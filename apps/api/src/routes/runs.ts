@@ -1,11 +1,12 @@
 import type { FastifyInstance } from "fastify";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { RunMode } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
-import { agentGraphs, runEvents, runs } from "../db/schema.js";
+import { agentGraphs, runEvents, runs, usageEvents } from "../db/schema.js";
 import { loadLiveGraph } from "../orchestrator/engine.js";
 import { enqueueHop } from "../queue/runQueue.js";
+import { requireAuth } from "../auth/middleware.js";
 
 const createRunBody = z.object({
   graphId: z.string().uuid(),
@@ -13,14 +14,29 @@ const createRunBody = z.object({
   mode: RunMode.default("pinned"),
 });
 
+/**
+ * Grok Build's state-sorted triage list (running/blocked first, then
+ * everything else by recency) is the pattern this mirrors — see PLAN.md.
+ */
+const STATUS_PRIORITY: Record<string, number> = {
+  running: 0,
+  pending: 1,
+  error: 2,
+  completed: 3,
+  cancelled: 4,
+};
+
 export async function runRoutes(app: FastifyInstance) {
-  app.post("/runs", async (req, reply) => {
+  app.post("/runs", { preHandler: requireAuth }, async (req, reply) => {
     const body = createRunBody.parse(req.body);
 
     const graphRow = await db.query.agentGraphs.findFirst({
       where: eq(agentGraphs.id, body.graphId),
     });
     if (!graphRow) return reply.code(404).send({ error: "Graph not found" });
+    if (graphRow.ownerId !== req.userId) {
+      return reply.code(403).send({ error: "You do not own this graph" });
+    }
     if (!graphRow.entryNodeId) {
       return reply.code(422).send({ error: "Graph has no entryNodeId set" });
     }
@@ -54,6 +70,32 @@ export async function runRoutes(app: FastifyInstance) {
       .where(eq(runEvents.runId, id))
       .orderBy(runEvents.sequence);
 
-    return { ...run, events };
+    const usage = await db.select().from(usageEvents).where(eq(usageEvents.runId, id));
+    const usageTotal = usage.reduce(
+      (acc, u) => ({
+        inputTokens: acc.inputTokens + u.inputTokens,
+        outputTokens: acc.outputTokens + u.outputTokens,
+        estimatedCostUsd: acc.estimatedCostUsd + u.estimatedCostUsd,
+      }),
+      { inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 },
+    );
+
+    return { ...run, events, usage, usageTotal };
+  });
+
+  /** Companion list view to the hierarchy canvas — see PLAN.md's "Runs list view". */
+  app.get("/graphs/:id/runs", async (req) => {
+    const { id: graphId } = req.params as { id: string };
+    const rows = await db
+      .select()
+      .from(runs)
+      .where(eq(runs.graphId, graphId))
+      .orderBy(desc(runs.createdAt));
+
+    return rows.sort((a, b) => {
+      const priorityDiff = (STATUS_PRIORITY[a.status] ?? 99) - (STATUS_PRIORITY[b.status] ?? 99);
+      if (priorityDiff !== 0) return priorityDiff;
+      return b.createdAt.getTime() - a.createdAt.getTime();
+    });
   });
 }

@@ -9,16 +9,20 @@
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "test:e2e": "tsx e2e/run.ts"
   },
   "dependencies": {
+    "@fastify/cookie": "^11.0.0",
+    "@fastify/cors": "^10.0.0",
     "@fastify/websocket": "^11.0.0",
     "@openbots/graph-schema": "workspace:*",
     "@openbots/providers": "workspace:*",
-    "ai": "^4.0.0",
+    "ai": "^7.0.93",
     "bullmq": "^5.34.0",
     "drizzle-orm": "^0.38.0",
     "fastify": "^5.2.0",
+    "fastify-plugin": "^5.0.0",
     "ioredis": "^5.4.0",
     "postgres": "^3.4.5",
     "zod": "^3.24.0"

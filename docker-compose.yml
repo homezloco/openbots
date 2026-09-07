@@ -18,7 +18,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -29,6 +29,7 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+    image: openbots-api
     env_file: .env
     environment:
       DATABASE_URL: postgres://openbots:openbots@postgres:5432/openbots
@@ -42,9 +43,7 @@ services:
         condition: service_healthy
 
   worker:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
+    image: openbots-api
     command: ["node", "dist/worker.js"]
     env_file: .env
     environment:

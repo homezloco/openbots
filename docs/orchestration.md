@@ -45,6 +45,28 @@ once the lazy-resolution loop above is proven in practice.
   fallback. Add later layers here before relying on `auto` edges for
   anything ambiguous in production.
 
+## `consensus` edges (fan-out/join)
+
+A node's `consensusGroup` marks it as a fan-out source: every edge in
+`consensusGroup.edgeIds` (all must be `kind: "consensus"`) fires
+concurrently with the same input, tracked via a `fanout_batches` row.
+Once every branch finishes, `aggregatorNodeId` is dispatched once with
+every branch's output — the engine only handles the fan-out/join
+mechanics, the aggregator (an ordinary agent node) makes the actual
+consensus judgment call.
+
+`consensusGroup` can only be set via `PATCH /graphs/:id/nodes/:nodeId`,
+never at node-creation time — it references edge ids, which don't exist
+until the node and its edges already exist. This wasn't discovered until
+the e2e suite tried to exercise consensus for the first time.
+
+Branches run inline within the source's own BullMQ job (`Promise.allSettled`,
+each still behind its own `withNodeTimeout`) rather than as separately
+queued hops — a deliberate v1 simplification that trades per-branch job
+isolation for a much simpler join. v1 also has no partial-failure
+tolerance: any branch failing fails the whole batch and the run, rather
+than letting the aggregator judge on a subset.
+
 ## Per-node isolation
 
 Every hop runs behind `withNodeTimeout` (`circuitBreaker.ts`) and as its

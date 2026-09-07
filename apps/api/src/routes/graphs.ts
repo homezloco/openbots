@@ -1,11 +1,20 @@
-import type { FastifyInstance } from "fastify";
-import { eq } from "drizzle-orm";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { AgentRole, ProviderId, RoutingEdgeKind, RoutingCondition } from "@openbots/graph-schema";
+import {
+  AgentRole,
+  ConsensusGroup,
+  FallbackTarget,
+  ModelTier,
+  ProviderId,
+  RoutingEdgeKind,
+  RoutingCondition,
+} from "@openbots/graph-schema";
 import { db } from "../db/client.js";
 import { agentGraphs, agentNodes, routingEdges } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
-import { loadLiveGraph } from "../orchestrator/engine.js";
+import { loadLiveGraph, nodeRowToAgentNode } from "../orchestrator/engine.js";
+import { requireAuth } from "../auth/middleware.js";
 
 const createGraphBody = z.object({
   name: z.string().min(1),
@@ -17,10 +26,20 @@ const createNodeBody = z.object({
   role: AgentRole,
   provider: ProviderId,
   model: z.string().min(1),
+  tier: ModelTier.optional(),
   systemPrompt: z.string().optional(),
   description: z.string().optional(),
+  tools: z.array(z.string()).optional(),
+  fileAccessRoot: z
+    .string()
+    .refine((p) => p.startsWith("/"), "fileAccessRoot must be an absolute path")
+    .optional(),
+  fallbackChain: z.array(FallbackTarget).optional(),
+  consensusGroup: ConsensusGroup.optional(),
   position: z.object({ x: z.number(), y: z.number() }),
 });
+
+const updateNodeBody = createNodeBody.partial();
 
 const createEdgeBody = z.object({
   sourceNodeId: z.string().uuid(),
@@ -40,14 +59,85 @@ const updateGraphBody = z.object({
   entryNodeId: z.string().uuid().optional(),
 });
 
+/** Every graph gets an owner at creation; mutations require the caller to match. Reads stay public. */
+async function requireGraphOwner(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  graphId: string,
+): Promise<boolean> {
+  const graph = await db.query.agentGraphs.findFirst({ where: eq(agentGraphs.id, graphId) });
+  if (!graph) {
+    reply.code(404).send({ error: "Graph not found" });
+    return false;
+  }
+  if (graph.ownerId !== req.userId) {
+    reply.code(403).send({ error: "You do not own this graph" });
+    return false;
+  }
+  return true;
+}
+
+export type CreateNodeBody = z.infer<typeof createNodeBody>;
+
+/** Shared by the manual "+ Add agent" form and the natural-language quick-add route — one insert path, one place to keep in sync with the schema. */
+export async function insertAgentNode(graphId: string, body: CreateNodeBody) {
+  const [node] = await db
+    .insert(agentNodes)
+    .values({
+      graphId,
+      name: body.name,
+      role: body.role,
+      provider: body.provider,
+      model: body.model,
+      tier: body.tier ?? null,
+      systemPrompt: body.systemPrompt ?? "",
+      description: body.description ?? "",
+      tools: body.tools ?? [],
+      fileAccessRoot: body.fileAccessRoot ?? null,
+      fallbackChain: body.fallbackChain ?? [],
+      consensusGroup: body.consensusGroup ?? null,
+      positionX: body.position.x,
+      positionY: body.position.y,
+    })
+    .returning();
+  await recordChange(graphId, "node_added", null, node);
+  return nodeRowToAgentNode(node);
+}
+
 export async function graphRoutes(app: FastifyInstance) {
-  app.post("/graphs", async (req, reply) => {
+  app.post("/graphs", { preHandler: requireAuth }, async (req, reply) => {
     const body = createGraphBody.parse(req.body);
     const [graph] = await db
       .insert(agentGraphs)
-      .values({ name: body.name, description: body.description ?? "" })
+      .values({ name: body.name, description: body.description ?? "", ownerId: req.userId })
       .returning();
-    return reply.code(201).send(graph);
+    // Loaded rather than returning the raw row: AgentGraph requires
+    // nodes/edges/warnings, which a bare insert `.returning()` row doesn't
+    // have — the same shape mismatch that crashed the canvas on node
+    // creation (see nodeRowToAgentNode). A brand-new graph has none of
+    // either yet, so this is two cheap empty-result queries.
+    return reply.code(201).send(await loadLiveGraph(graph.id));
+  });
+
+  /**
+   * The "roster" endpoint: every graph you own, with a node count so the
+   * Dashboard can decide whether to show a single-node graph as a chat
+   * "bot" or link a multi-node graph straight to Hierarchy.
+   */
+  app.get("/graphs", { preHandler: requireAuth }, async (req) => {
+    const graphs = await db
+      .select()
+      .from(agentGraphs)
+      .where(eq(agentGraphs.ownerId, req.userId!))
+      .orderBy(desc(agentGraphs.updatedAt));
+
+    const counts = await db
+      .select({ graphId: agentNodes.graphId, count: sql<number>`count(*)::int` })
+      .from(agentNodes)
+      .groupBy(agentNodes.graphId);
+    const countByGraph = new Map(counts.map((c) => [c.graphId, c.count]));
+
+    return graphs.map((g) => ({ ...g, nodeCount: countByGraph.get(g.id) ?? 0 }));
   });
 
   app.get("/graphs/:id", async (req) => {
@@ -55,41 +145,58 @@ export async function graphRoutes(app: FastifyInstance) {
     return loadLiveGraph(id);
   });
 
-  app.patch("/graphs/:id", async (req, reply) => {
+  app.patch("/graphs/:id", { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    if (!(await requireGraphOwner(req, reply, id))) return;
     const body = updateGraphBody.parse(req.body);
-    const [graph] = await db
+    await db
       .update(agentGraphs)
       .set({ ...body, updatedAt: new Date() })
-      .where(eq(agentGraphs.id, id))
-      .returning();
-    if (!graph) return reply.code(404).send({ error: "Graph not found" });
-    return graph;
+      .where(eq(agentGraphs.id, id));
+    // See the comment in POST /graphs: return the fully-shaped AgentGraph, not the raw update row.
+    return loadLiveGraph(id);
   });
 
-  app.post("/graphs/:id/nodes", async (req, reply) => {
+  app.post("/graphs/:id/nodes", { preHandler: requireAuth }, async (req, reply) => {
     const { id: graphId } = req.params as { id: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
     const body = createNodeBody.parse(req.body);
-    const [node] = await db
-      .insert(agentNodes)
-      .values({
-        graphId,
-        name: body.name,
-        role: body.role,
-        provider: body.provider,
-        model: body.model,
-        systemPrompt: body.systemPrompt ?? "",
-        description: body.description ?? "",
-        positionX: body.position.x,
-        positionY: body.position.y,
-      })
-      .returning();
-    await recordChange(graphId, "node_added", null, node);
+    const node = await insertAgentNode(graphId, body);
     return reply.code(201).send(node);
   });
 
-  app.post("/graphs/:id/edges", async (req, reply) => {
+  /**
+   * Exists mainly so `consensusGroup` can be set at all: it references edge
+   * ids, which don't exist until after the node and its edges are created,
+   * so it can never be supplied at node-creation time for a real consensus
+   * setup. Also doubles as the general node-edit endpoint.
+   */
+  app.patch("/graphs/:id/nodes/:nodeId", { preHandler: requireAuth }, async (req, reply) => {
+    const { id: graphId, nodeId } = req.params as { id: string; nodeId: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
+    const body = updateNodeBody.parse(req.body);
+
+    const before = await db.query.agentNodes.findFirst({ where: eq(agentNodes.id, nodeId) });
+    if (!before) return reply.code(404).send({ error: "Node not found" });
+
+    const { position, ...rest } = body;
+    const [after] = await db
+      .update(agentNodes)
+      .set({
+        ...rest,
+        ...(position ? { positionX: position.x, positionY: position.y } : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(agentNodes.id, nodeId))
+      .returning();
+
+    await recordChange(graphId, "node_updated", before, after);
+    return nodeRowToAgentNode(after);
+  });
+
+  app.post("/graphs/:id/edges", { preHandler: requireAuth }, async (req, reply) => {
     const { id: graphId } = req.params as { id: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
     const body = createEdgeBody.parse(req.body);
     const [edge] = await db
       .insert(routingEdges)
@@ -112,8 +219,9 @@ export async function graphRoutes(app: FastifyInstance) {
    * loop directly — it just updates the row that resolveNextHop() will
    * read on the affected run's next hop (see orchestrator/resolve.ts).
    */
-  app.patch("/graphs/:id/edges/:edgeId", async (req, reply) => {
-    const { edgeId } = req.params as { id: string; edgeId: string };
+  app.patch("/graphs/:id/edges/:edgeId", { preHandler: requireAuth }, async (req, reply) => {
+    const { id: graphId, edgeId } = req.params as { id: string; edgeId: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
     const body = rerouteEdgeBody.parse(req.body);
 
     const before = await db.query.routingEdges.findFirst({ where: eq(routingEdges.id, edgeId) });
@@ -129,8 +237,9 @@ export async function graphRoutes(app: FastifyInstance) {
     return after;
   });
 
-  app.delete("/graphs/:id/edges/:edgeId", async (req, reply) => {
-    const { edgeId } = req.params as { id: string; edgeId: string };
+  app.delete("/graphs/:id/edges/:edgeId", { preHandler: requireAuth }, async (req, reply) => {
+    const { id: graphId, edgeId } = req.params as { id: string; edgeId: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
     const before = await db.query.routingEdges.findFirst({ where: eq(routingEdges.id, edgeId) });
     if (!before) return reply.code(404).send({ error: "Edge not found" });
 
@@ -139,3 +248,5 @@ export async function graphRoutes(app: FastifyInstance) {
     return reply.code(204).send();
   });
 }
+
+export { requireGraphOwner };

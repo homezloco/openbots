@@ -36,6 +36,8 @@ services:
       REDIS_URL: redis://redis:6379
     ports:
       - "4000:4000"
+    volumes:
+      - ./apps/api/e2e/fixtures/testrepo:/tmp/testrepo:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -49,6 +51,8 @@ services:
     environment:
       DATABASE_URL: postgres://openbots:openbots@postgres:5432/openbots
       REDIS_URL: redis://redis:6379
+    volumes:
+      - ./apps/api/e2e/fixtures/testrepo:/tmp/testrepo:ro
     depends_on:
       postgres:
         condition: service_healthy

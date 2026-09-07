@@ -1,0 +1,85 @@
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Write .env for docker compose
+        run: |
+          cat > .env <<EOF
+          ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY=
+          XAI_API_KEY=
+          OPENROUTER_API_KEY=
+          OPENAI_COMPATIBLE_API_KEY=
+          OPENAI_COMPATIBLE_BASE_URL=
+          DATABASE_URL=postgres://openbots:openbots@postgres:5432/openbots
+          REDIS_URL=redis://redis:6379
+          SESSION_SECRET=${{ secrets.E2E_SESSION_SECRET }}
+          CREDENTIALS_ENCRYPTION_KEY=${{ secrets.E2E_CREDENTIALS_ENCRYPTION_KEY }}
+          WEB_ORIGIN=http://localhost:3000
+          ALLOWED_FILE_ACCESS_ROOTS=/tmp/testrepo
+          COOKIE_SECURE=false
+          EOF
+
+      - name: Start postgres + redis
+        run: docker compose up postgres redis -d --wait
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgres://openbots:openbots@localhost:5432/openbots
+        run: pnpm --filter @openbots/api db:migrate
+
+      - name: Build api image
+        run: docker compose build api
+
+      - name: Start api + worker
+        run: docker compose up api worker -d
+
+      - name: Wait for api to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4000/health > /dev/null; then
+              echo "api is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "api never became healthy"
+          docker compose logs api worker
+          exit 1
+
+      - name: Run e2e suite
+        run: pnpm --filter @openbots/api test:e2e
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

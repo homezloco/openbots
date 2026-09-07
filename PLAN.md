@@ -61,6 +61,10 @@ Full review + fixes documented in the session; two real, high-confidence finding
 
 All three are covered by new e2e regression tests (`security: ...` cases in `apps/api/e2e/run.ts`).
 
+## CI
+
+`.github/workflows/e2e.yml` runs the real e2e suite (docker compose up → migrate → build/start api+worker → wait for health → `test:e2e`) on every push to `main` and on-demand via `workflow_dispatch`. Deliberately not on every PR, since each run makes real, billed Anthropic API calls. The file-access fixture that used to be set up by hand inside the running container (`/tmp/testrepo`) is now committed at `apps/api/e2e/fixtures/testrepo/` and mounted in by `docker-compose.yml`, so this also fixed a real reproducibility gap for local dev, not just CI. **Needs three repo secrets added before it will pass**: `ANTHROPIC_API_KEY`, `E2E_SESSION_SECRET`, `E2E_CREDENTIALS_ENCRYPTION_KEY`.
+
 ## PC Health Monitor — capability boundary (deliberate)
 
 linux-command-centre (a sibling project) has no REST API — only a

@@ -1,0 +1,10 @@
+.claude/
+node_modules/
+dist/
+.next/
+.turbo/
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+pnpm-lock.yaml.bak

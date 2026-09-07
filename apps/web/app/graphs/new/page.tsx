@@ -43,7 +43,7 @@ export default function NewGraphPage() {
           Create
         </button>
       </div>
-      {error && <p style={{ color: "#e74c3c" }}>{error}</p>}
+      {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
     </div>
   );
 }

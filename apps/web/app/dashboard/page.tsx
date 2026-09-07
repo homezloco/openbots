@@ -76,7 +76,7 @@ export default function DashboardPage() {
 
   return (
     <div style={{ display: "flex", height: "100%" }}>
-      <aside style={{ width: 280, padding: 16, borderRight: "1px solid #eee", display: "flex", flexDirection: "column", gap: 12, overflowY: "auto" }}>
+      <aside style={{ width: 280, padding: 16, borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 12, overflowY: "auto" }}>
         <div>
           <textarea
             placeholder='Describe a new bot, e.g. "Summarizes incoming support tickets"'
@@ -90,7 +90,7 @@ export default function DashboardPage() {
           </button>
         </div>
 
-        {error && <p style={{ color: "#e74c3c" }}>{error}</p>}
+        {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
 
         <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
           {graphs.map((g) => (
@@ -101,23 +101,24 @@ export default function DashboardPage() {
                   width: "100%",
                   textAlign: "left",
                   padding: 8,
-                  background: g.id === selectedId ? "#f0f0f0" : "transparent",
+                  background: g.id === selectedId ? "var(--bg-hover)" : "transparent",
+                  color: "var(--text)",
                   border: "none",
                   borderRadius: 4,
                   cursor: "pointer",
                 }}
               >
-                {g.name} <small style={{ color: "#999" }}>({g.nodeCount} agent{g.nodeCount === 1 ? "" : "s"})</small>
+                {g.name} <small style={{ color: "var(--text-faint)" }}>({g.nodeCount} agent{g.nodeCount === 1 ? "" : "s"})</small>
               </button>
             </li>
           ))}
-          {graphs.length === 0 && <p style={{ color: "#999" }}>No bots yet — describe one above.</p>}
+          {graphs.length === 0 && <p style={{ color: "var(--text-faint)" }}>No bots yet — describe one above.</p>}
         </ul>
       </aside>
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
         {!selected && (
-          <div style={{ padding: 24, color: "#999" }}>Select a bot on the left, or describe a new one.</div>
+          <div style={{ padding: 24, color: "var(--text-faint)" }}>Select a bot on the left, or describe a new one.</div>
         )}
         {selected && selected.nodeCount === 1 && <BotChat graph={selected} />}
         {selected && selected.nodeCount !== 1 && (
@@ -189,23 +190,23 @@ function BotChat({ graph }: { graph: GraphSummary }) {
 
   return (
     <>
-      <div style={{ padding: "8px 16px", borderBottom: "1px solid #eee", display: "flex", justifyContent: "space-between" }}>
+      <div style={{ padding: "8px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between" }}>
         <strong>{graph.name}</strong>
         <a href={`/hierarchy?graphId=${graph.id}`}>View in Hierarchy</a>
       </div>
       <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: 16 }}>
         {runs.map((r) => (
           <div key={r.id} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div style={{ alignSelf: "flex-end", maxWidth: "70%", background: "#111", color: "#fff", borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>
+            <div style={{ alignSelf: "flex-end", maxWidth: "70%", background: "var(--accent)", color: "var(--accent-text)", borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>
               {typeof r.input === "string" ? extractLatestUserMessage(r.input) : JSON.stringify(r.input)}
             </div>
-            <div style={{ alignSelf: "flex-start", maxWidth: "70%", background: "#f0f0f0", borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>
+            <div style={{ alignSelf: "flex-start", maxWidth: "70%", background: "var(--bg-hover)", color: "var(--text)", borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>
               {typeof r.output === "string" ? r.output : JSON.stringify(r.output)}
             </div>
           </div>
         ))}
       </div>
-      {error && <p style={{ color: "#e74c3c", padding: "0 16px" }}>{error}</p>}
+      {error && <p style={{ color: "var(--danger)", padding: "0 16px" }}>{error}</p>}
       <div style={{ display: "flex", gap: 8, padding: 16 }}>
         <input
           value={input}

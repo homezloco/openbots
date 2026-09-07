@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   AgentRole,
@@ -15,6 +15,7 @@ import { agentGraphs, agentNodes, routingEdges } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
 import { loadLiveGraph, nodeRowToAgentNode } from "../orchestrator/engine.js";
 import { requireAuth } from "../auth/middleware.js";
+import { fileAccessRootSchema } from "../validation/fileAccessRoot.js";
 
 const createGraphBody = z.object({
   name: z.string().min(1),
@@ -30,10 +31,7 @@ const createNodeBody = z.object({
   systemPrompt: z.string().optional(),
   description: z.string().optional(),
   tools: z.array(z.string()).optional(),
-  fileAccessRoot: z
-    .string()
-    .refine((p) => p.startsWith("/"), "fileAccessRoot must be an absolute path")
-    .optional(),
+  fileAccessRoot: fileAccessRootSchema.optional(),
   fallbackChain: z.array(FallbackTarget).optional(),
   consensusGroup: ConsensusGroup.optional(),
   position: z.object({ x: z.number(), y: z.number() }),
@@ -145,6 +143,14 @@ export async function graphRoutes(app: FastifyInstance) {
     return loadLiveGraph(id);
   });
 
+  /** Cascades to the graph's nodes/edges/runs/routing-changes/credentials via FK onDelete rules in db/schema.ts. */
+  app.delete("/graphs/:id", { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await requireGraphOwner(req, reply, id))) return;
+    await db.delete(agentGraphs).where(eq(agentGraphs.id, id));
+    return reply.code(204).send();
+  });
+
   app.patch("/graphs/:id", { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!(await requireGraphOwner(req, reply, id))) return;
@@ -176,7 +182,13 @@ export async function graphRoutes(app: FastifyInstance) {
     if (!(await requireGraphOwner(req, reply, graphId))) return;
     const body = updateNodeBody.parse(req.body);
 
-    const before = await db.query.agentNodes.findFirst({ where: eq(agentNodes.id, nodeId) });
+    // graphId is included in both lookups below, not just the ownership
+    // check above — otherwise a caller could pass their OWN graphId with
+    // ANOTHER user's nodeId and still pass requireGraphOwner, then edit a
+    // node that isn't theirs. Found in security review (IDOR/BOLA).
+    const before = await db.query.agentNodes.findFirst({
+      where: and(eq(agentNodes.id, nodeId), eq(agentNodes.graphId, graphId)),
+    });
     if (!before) return reply.code(404).send({ error: "Node not found" });
 
     const { position, ...rest } = body;
@@ -187,7 +199,7 @@ export async function graphRoutes(app: FastifyInstance) {
         ...(position ? { positionX: position.x, positionY: position.y } : {}),
         updatedAt: new Date(),
       })
-      .where(eq(agentNodes.id, nodeId))
+      .where(and(eq(agentNodes.id, nodeId), eq(agentNodes.graphId, graphId)))
       .returning();
 
     await recordChange(graphId, "node_updated", before, after);
@@ -224,13 +236,16 @@ export async function graphRoutes(app: FastifyInstance) {
     if (!(await requireGraphOwner(req, reply, graphId))) return;
     const body = rerouteEdgeBody.parse(req.body);
 
-    const before = await db.query.routingEdges.findFirst({ where: eq(routingEdges.id, edgeId) });
+    // graphId scoped here too — same IDOR class as the node PATCH above.
+    const before = await db.query.routingEdges.findFirst({
+      where: and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)),
+    });
     if (!before) return reply.code(404).send({ error: "Edge not found" });
 
     const [after] = await db
       .update(routingEdges)
       .set({ targetNodeId: body.targetNodeId, updatedAt: new Date() })
-      .where(eq(routingEdges.id, edgeId))
+      .where(and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)))
       .returning();
 
     await recordChange(before.graphId, "edge_rerouted", before, after);
@@ -240,10 +255,12 @@ export async function graphRoutes(app: FastifyInstance) {
   app.delete("/graphs/:id/edges/:edgeId", { preHandler: requireAuth }, async (req, reply) => {
     const { id: graphId, edgeId } = req.params as { id: string; edgeId: string };
     if (!(await requireGraphOwner(req, reply, graphId))) return;
-    const before = await db.query.routingEdges.findFirst({ where: eq(routingEdges.id, edgeId) });
+    const before = await db.query.routingEdges.findFirst({
+      where: and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)),
+    });
     if (!before) return reply.code(404).send({ error: "Edge not found" });
 
-    await db.delete(routingEdges).where(eq(routingEdges.id, edgeId));
+    await db.delete(routingEdges).where(and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)));
     await recordChange(before.graphId, "edge_removed", before, null);
     return reply.code(204).send();
   });

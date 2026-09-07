@@ -64,7 +64,7 @@ export async function dispatchHop(runId: string): Promise<void> {
 
   let result: AgentCallResult;
   try {
-    result = await withNodeTimeout(node.id, () => callAgent(node, run.input));
+    result = await withNodeTimeout(node.id, () => callAgent(node, run.input, getAutoRoutingTargets(graph, node.id)));
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     await db.insert(runEvents).values({
@@ -180,7 +180,9 @@ async function dispatchConsensus(
       publishRunEvent({ runId, type: "hop_dispatched", nodeId: targetNode.id });
 
       try {
-        const result = await withNodeTimeout(targetNode.id, () => callAgent(targetNode, input));
+        const result = await withNodeTimeout(targetNode.id, () =>
+          callAgent(targetNode, input, getAutoRoutingTargets(graph, targetNode.id)),
+        );
         await recordUsage(runId, targetNode.id, result);
         await db.insert(runEvents).values({
           runId,
@@ -258,6 +260,30 @@ async function recordUsage(runId: string, nodeId: string, result: AgentCallResul
 }
 
 /**
+ * A router/supervisor node has no innate knowledge of its own outgoing
+ * `auto` edges — resolveNextHop matches the OUTPUT text against candidate
+ * descriptions, but nothing previously told the model those candidates
+ * existed unless someone hand-wrote them into its systemPrompt. That
+ * silently broke a "route to the right project" graph the first time it
+ * wasn't hand-authored with the exact category names baked in — found
+ * when a real multi-project test misrouted. This makes it automatic
+ * instead of something every router's prompt has to get right by hand.
+ */
+function getAutoRoutingTargets(graph: AgentGraph, nodeId: string): { name: string; description: string }[] {
+  return graph.edges
+    .filter((e) => e.sourceNodeId === nodeId && e.kind === "auto")
+    .map((e) => graph.nodes.find((n) => n.id === e.targetNodeId))
+    .filter((n): n is AgentNode => Boolean(n))
+    .map((n) => ({ name: n.name, description: n.description }));
+}
+
+function appendAutoRoutingContext(systemPrompt: string, targets: { name: string; description: string }[]): string {
+  if (targets.length === 0) return systemPrompt;
+  const list = targets.map((t) => `- ${t.name}: ${t.description || "(no description)"}`).join("\n");
+  return `${systemPrompt}\n\nYou can delegate to one of these specialists — mention the target's name clearly in your response so it can be routed correctly:\n${list}`;
+}
+
+/**
  * Tries node.provider/node.model first, then each entry in
  * node.fallbackChain in order — but only on a classified auth or
  * model-not-found error (classifyProviderError). Any other error (e.g. a
@@ -265,9 +291,14 @@ async function recordUsage(runId: string, nodeId: string, result: AgentCallResul
  * retrying the same input against a different provider won't help. See
  * docs/adapters.md.
  */
-async function callAgent(node: AgentNode, input: unknown): Promise<AgentCallResult> {
+async function callAgent(
+  node: AgentNode,
+  input: unknown,
+  autoRoutingTargets: { name: string; description: string }[] = [],
+): Promise<AgentCallResult> {
   const targets = [{ provider: node.provider, model: node.model }, ...node.fallbackChain];
   const prompt = typeof input === "string" ? input : JSON.stringify(input);
+  const systemPrompt = appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets);
 
   let lastError: unknown;
   for (let i = 0; i < targets.length; i++) {
@@ -280,7 +311,7 @@ async function callAgent(node: AgentNode, input: unknown): Promise<AgentCallResu
       const result = await withRetry(() =>
         generateText({
           model,
-          system: node.systemPrompt,
+          system: systemPrompt,
           prompt,
           ...(tools ? { tools, stopWhen: stepCountIs(5) } : {}),
         }),

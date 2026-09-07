@@ -46,6 +46,8 @@ export const getMe = () => request<PublicUser>("/auth/me");
 export const createGraph = (name: string, description?: string) =>
   request<AgentGraph>("/graphs", { method: "POST", body: JSON.stringify({ name, description }) });
 
+export const deleteGraph = (graphId: string) => request<void>(`/graphs/${graphId}`, { method: "DELETE" });
+
 export const fetchGraph = (graphId: string) =>
   request<AgentGraph>(`/graphs/${graphId}`, { cache: "no-store" });
 

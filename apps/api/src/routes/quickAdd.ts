@@ -7,6 +7,7 @@ import { getCredentialsFromEnv } from "../orchestrator/credentials.js";
 import { requireAuth } from "../auth/middleware.js";
 import { insertAgentNode } from "./graphs.js";
 import { requireGraphOwner } from "./graphs.js";
+import { fileAccessRootSchema } from "../validation/fileAccessRoot.js";
 
 const quickAddBody = z.object({
   description: z.string().min(1),
@@ -18,10 +19,7 @@ const quickAddBody = z.object({
    * explicit, separate opt-in, not a side effect of the LLM guessing what
    * you meant. See @openbots/graph-schema's AgentNode.fileAccessRoot.
    */
-  fileAccessRoot: z
-    .string()
-    .refine((p) => p.startsWith("/"), "fileAccessRoot must be an absolute path")
-    .optional(),
+  fileAccessRoot: fileAccessRootSchema.optional(),
   tools: z.array(z.string()).optional(),
   position: z.object({ x: z.number(), y: z.number() }).optional(),
 });

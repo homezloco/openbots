@@ -31,17 +31,17 @@ export function GraphPicker() {
 
   return (
     <div>
-      {error && <p style={{ color: "#e74c3c" }}>{error}</p>}
+      {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
       <ul style={{ listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
         {graphs.map((g) => (
           <li key={g.id}>
             <a href={`/hierarchy?graphId=${g.id}`}>{g.name}</a>{" "}
-            <small style={{ color: "#999" }}>
+            <small style={{ color: "var(--text-faint)" }}>
               ({g.nodeCount} agent{g.nodeCount === 1 ? "" : "s"})
             </small>
           </li>
         ))}
-        {graphs.length === 0 && <p style={{ color: "#999" }}>No graphs yet.</p>}
+        {graphs.length === 0 && <p style={{ color: "var(--text-faint)" }}>No graphs yet.</p>}
       </ul>
       <a href="/graphs/new">+ New graph</a>
     </div>

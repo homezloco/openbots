@@ -53,7 +53,7 @@ export default function TemplatesPage() {
       <h1>Templates</h1>
 
       {user && (
-        <div style={{ border: "1px solid #eee", borderRadius: 6, padding: 16, marginBottom: 24 }}>
+        <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 16, marginBottom: 24 }}>
           <h2 style={{ marginTop: 0 }}>Save a graph as a template</h2>
           <div style={{ display: "flex", gap: 8 }}>
             <input placeholder="Graph id" value={sourceGraphId} onChange={(e) => setSourceGraphId(e.target.value)} style={{ flex: 1 }} />
@@ -65,14 +65,14 @@ export default function TemplatesPage() {
         </div>
       )}
 
-      {error && <p style={{ color: "#e74c3c" }}>{error}</p>}
+      {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
 
       <ul style={{ listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 12 }}>
         {templates.map((t) => (
-          <li key={t.id} style={{ border: "1px solid #eee", borderRadius: 6, padding: 16, display: "flex", justifyContent: "space-between" }}>
+          <li key={t.id} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 16, display: "flex", justifyContent: "space-between" }}>
             <div>
               <strong>{t.name}</strong>
-              <p style={{ margin: "4px 0", color: "#666" }}>{t.description || "No description"}</p>
+              <p style={{ margin: "4px 0", color: "var(--text-muted)" }}>{t.description || "No description"}</p>
               <small>{t.nodeCount} agents</small>
             </div>
             <button onClick={() => useTemplate(t.id)} disabled={busy || !user}>

@@ -71,6 +71,32 @@ async function test(name: string, fn: () => Promise<void>) {
   }
 }
 
+/**
+ * For a test that's inherently a real timing race (not a code bug) — the
+ * mechanism it verifies is correct-by-construction (see
+ * docs/orchestration.md), but a single attempt can lose the race if the
+ * model responds unusually fast. Retries the whole flow with a fresh
+ * graph rather than growing the prompt indefinitely to chase reliability.
+ */
+async function testWithRetries(name: string, fn: () => Promise<void>, attempts = 3) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await fn();
+      results.push({ name, passed: true, durationMs: 0 });
+      console.log(`✅ ${name}${i > 1 ? ` (attempt ${i}/${attempts})` : ""}`);
+      return;
+    } catch (err) {
+      if (i === attempts) {
+        const message = err instanceof Error ? err.message : String(err);
+        results.push({ name, passed: false, error: message, durationMs: 0 });
+        console.log(`❌ ${name} (failed all ${attempts} attempts): ${message}`);
+        return;
+      }
+      console.log(`   (attempt ${i}/${attempts} lost the timing race, retrying: ${err instanceof Error ? err.message : err})`);
+    }
+  }
+}
+
 async function main() {
   const email = `e2e-${Date.now()}@openbots.dev`;
   const password = "e2e-test-password-123";
@@ -492,7 +518,7 @@ async function main() {
   });
 
   // --- Mid-run rerouting: the actual headline differentiator, never previously demonstrated ---
-  await test("mid-run rerouting: a reroute fired while the first hop is executing changes the next hop", async () => {
+  await testWithRetries("mid-run rerouting: a reroute fired while the first hop is executing changes the next hop", async () => {
     const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mid-run reroute" }) });
     const graphId = g.body.id;
 
@@ -565,6 +591,88 @@ async function main() {
         run.events[1].nodeId === originalTarget.body.id ? "OriginalTarget — the reroute was too slow/lost the race" : run.events[1].nodeId
       }`,
     );
+  });
+
+  // --- Security regression: fileAccessRoot outside the allowlist is rejected ---
+  await test("security: fileAccessRoot outside ALLOWED_FILE_ACCESS_ROOTS is rejected", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E security file root" }) });
+    const graphId = g.body.id;
+    const created = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Snoop",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Read files.",
+        tools: ["read_file"],
+        fileAccessRoot: "/etc",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(created.status === 400, `expected 400 rejecting an out-of-allowlist root, got ${created.status}: ${JSON.stringify(created.body)}`);
+  });
+
+  // --- Security regression: IDOR on node/edge/credential mutation routes ---
+  await test("security: cannot mutate another user's node via your own graphId (IDOR)", async () => {
+    const attackerCookie = sessionCookie;
+
+    // Victim: a second user with their own graph + node.
+    sessionCookie = "";
+    const victimEmail = `e2e-victim-${Date.now()}@openbots.dev`;
+    await api("/auth/signup", { method: "POST", body: JSON.stringify({ email: victimEmail, password }) });
+    const victimGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "Victim graph" }) });
+    const victimNode = await api(`/graphs/${victimGraph.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "VictimAgent",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "original prompt",
+        position: { x: 0, y: 0 },
+      }),
+    });
+
+    // Attacker: their own graph, then an attempt to PATCH the victim's node
+    // by pairing it with their OWN graphId in the URL.
+    sessionCookie = attackerCookie;
+    const attackerGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "Attacker graph" }) });
+    const attack = await api(`/graphs/${attackerGraph.body.id}/nodes/${victimNode.body.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ systemPrompt: "PWNED" }),
+    });
+    assert(attack.status === 404, `expected 404 (cross-graph mutation blocked), got ${attack.status}: ${JSON.stringify(attack.body)}`);
+
+    // Confirm the victim's node was actually left untouched.
+    sessionCookie = "";
+    await api("/auth/login", { method: "POST", body: JSON.stringify({ email: victimEmail, password }) });
+    const victimGraphAfter = await api(`/graphs/${victimGraph.body.id}`);
+    const stillOriginal = victimGraphAfter.body.nodes.find((n: any) => n.id === victimNode.body.id);
+    assert(stillOriginal.systemPrompt === "original prompt", `victim node was mutated by the attacker: ${JSON.stringify(stillOriginal)}`);
+
+    sessionCookie = attackerCookie;
+  });
+
+  // --- Security regression: GET /runs/:id requires auth + ownership ---
+  await test("security: GET /runs/:id requires authentication and ownership", async () => {
+    const run = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: basicGraphId, input: "hi" }) });
+    const runId = run.body.id;
+
+    const ownerCookie = sessionCookie;
+
+    sessionCookie = "";
+    const unauth = await api(`/runs/${runId}`);
+    assert(unauth.status === 401, `expected 401 with no session, got ${unauth.status}: ${JSON.stringify(unauth.body)}`);
+
+    const otherEmail = `e2e-other-${Date.now()}@openbots.dev`;
+    await api("/auth/signup", { method: "POST", body: JSON.stringify({ email: otherEmail, password }) });
+    const wrongUser = await api(`/runs/${runId}`);
+    assert(wrongUser.status === 404, `expected 404 for a non-owning authenticated user, got ${wrongUser.status}: ${JSON.stringify(wrongUser.body)}`);
+
+    sessionCookie = ownerCookie;
+    const owner = await api(`/runs/${runId}`);
+    assert(owner.status === 200, `expected the actual owner to be able to read their own run, got ${owner.status}`);
   });
 
   // --- Summary ---

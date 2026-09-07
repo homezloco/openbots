@@ -49,7 +49,7 @@ export default function LoginPage() {
           minLength={8}
           required
         />
-        {error && <p style={{ color: "#e74c3c", margin: 0 }}>{error}</p>}
+        {error && <p style={{ color: "var(--danger)", margin: 0 }}>{error}</p>}
         <button type="submit" disabled={submitting}>
           {submitting ? "Please wait…" : mode === "login" ? "Log in" : "Sign up"}
         </button>

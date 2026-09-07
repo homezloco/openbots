@@ -59,10 +59,21 @@ export async function runRoutes(app: FastifyInstance) {
     return reply.code(201).send(run);
   });
 
-  app.get("/runs/:id", async (req, reply) => {
+  /**
+   * A run's output can contain anything an agent produced — including
+   * tool output (e.g. file contents) or the substance of a private
+   * conversation. This previously had no auth check at all; found in
+   * security review alongside the fileAccessRoot finding it compounds.
+   */
+  app.get("/runs/:id", { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const run = await db.query.runs.findFirst({ where: eq(runs.id, id) });
     if (!run) return reply.code(404).send({ error: "Run not found" });
+
+    const graph = await db.query.agentGraphs.findFirst({ where: eq(agentGraphs.id, run.graphId) });
+    if (!graph || graph.ownerId !== req.userId) {
+      return reply.code(404).send({ error: "Run not found" });
+    }
 
     const events = await db
       .select()
@@ -84,8 +95,13 @@ export async function runRoutes(app: FastifyInstance) {
   });
 
   /** Companion list view to the hierarchy canvas — see PLAN.md's "Runs list view". */
-  app.get("/graphs/:id/runs", async (req) => {
+  app.get("/graphs/:id/runs", { preHandler: requireAuth }, async (req, reply) => {
     const { id: graphId } = req.params as { id: string };
+    const graph = await db.query.agentGraphs.findFirst({ where: eq(agentGraphs.id, graphId) });
+    if (!graph || graph.ownerId !== req.userId) {
+      return reply.code(404).send({ error: "Graph not found" });
+    }
+
     const rows = await db
       .select()
       .from(runs)

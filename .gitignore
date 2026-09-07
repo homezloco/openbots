@@ -6,5 +6,6 @@ dist/
 *.tsbuildinfo
 .env
 .env.local
+docker-compose.override.yml
 .DS_Store
 pnpm-lock.yaml.bak

@@ -4,7 +4,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { tool, type Tool } from "ai";
 import { z } from "zod";
 
-export type ToolName = "current_time" | "calculator";
+export type ToolName = "current_time" | "calculator" | "pc_telemetry";
 export const FILE_TOOL_NAMES = ["read_file", "list_directory"] as const;
 
 /**
@@ -37,6 +37,56 @@ const registry: Record<ToolName, Tool> = {
       }
       const result = Function(`"use strict"; return (${expression});`)();
       return { result };
+    },
+  }),
+  /**
+   * Read-only by construction: this only ever sends {subscribe: channel}
+   * to linux-command-centre's local WebSocket stream (thermal/battery),
+   * which itself only pushes sensor readings — there is no message this
+   * tool can send that triggers a write/control action. The actual
+   * control surface (systemctl, apt, firewall, user management, etc.)
+   * goes through a separate privileged helper gated by an interactive
+   * Polkit prompt and is deliberately NOT wired up here — see PLAN.md for
+   * the risk reasoning.
+   */
+  pc_telemetry: tool({
+    description:
+      "Read current PC hardware telemetry (thermal: CPU temps/fan RPM/turbo state, or battery: charge level/status) from a locally running linux-command-centre instance. Read-only.",
+    inputSchema: z.object({ channel: z.enum(["thermal", "battery"]) }),
+    execute: async ({ channel }) => {
+      const wsUrl = process.env.PC_TELEMETRY_WS_URL ?? "ws://127.0.0.1:52341";
+      return new Promise((resolvePromise, reject) => {
+        let settled = false;
+        const ws = new WebSocket(wsUrl);
+        const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          ws.close();
+          reject(new Error(`Timed out waiting for "${channel}" telemetry from ${wsUrl} — is linux-command-centre running?`));
+        }, 5000);
+
+        ws.addEventListener("open", () => ws.send(JSON.stringify({ subscribe: channel })));
+        ws.addEventListener("message", (event) => {
+          if (settled) return;
+          try {
+            const msg = JSON.parse(String(event.data));
+            if (msg.channel === channel) {
+              settled = true;
+              clearTimeout(timeout);
+              ws.close();
+              resolvePromise(msg.data);
+            }
+          } catch {
+            // ignore malformed frames
+          }
+        });
+        ws.addEventListener("error", () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          reject(new Error(`Could not reach linux-command-centre telemetry at ${wsUrl}`));
+        });
+      });
     },
   }),
 };

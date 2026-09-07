@@ -1,12 +1,13 @@
 "use client";
 
 import { useAuth } from "./AuthProvider";
+import { ThemeToggle } from "./ThemeToggle";
 
 export function NavBar() {
   const { user, loading, logout } = useAuth();
 
   return (
-    <nav style={{ display: "flex", alignItems: "center", gap: 16, padding: "12px 24px", borderBottom: "1px solid #eee" }}>
+    <nav style={{ display: "flex", alignItems: "center", gap: 16, padding: "12px 24px", borderBottom: "1px solid var(--border)" }}>
       <strong>OpenBots</strong>
       <a href="/dashboard">Dashboard</a>
       <a href="/hierarchy">Hierarchy</a>
@@ -14,6 +15,7 @@ export function NavBar() {
       <a href="/runs">Runs</a>
       <a href="/templates">Templates</a>
       <span style={{ flex: 1 }} />
+      <ThemeToggle />
       {!loading && (user ? (
         <>
           <span>{user.email}</span>

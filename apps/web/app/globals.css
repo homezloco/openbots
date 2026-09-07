@@ -1,18 +1,94 @@
+:root {
+  --bg: #ffffff;
+  --bg-elevated: #f7f7f7;
+  --bg-hover: #f0f0f0;
+  --text: #111111;
+  --text-muted: #666666;
+  --text-faint: #999999;
+  --border: #eeeeee;
+  --border-subtle: #f5f5f5;
+  --accent: #111111;
+  --accent-text: #ffffff;
+  --danger: #e74c3c;
+  --success: #2ecc71;
+  --warning-bg: #fff8e1;
+  --warning-border: #f5d76e;
+  --status-running: #f5a623;
+  --status-succeeded: #2ecc71;
+  --status-failed: #e74c3c;
+  --status-neutral: #999999;
+  --consensus-edge: #8e44ad;
+}
+
+/* Explicit choice always wins; this covers "system" mode following the OS. */
+:root[data-theme="dark"] {
+  --bg: #12141a;
+  --bg-elevated: #1b1e26;
+  --bg-hover: #23262f;
+  --text: #e8e8ea;
+  --text-muted: #a3a3ad;
+  --text-faint: #7a7a85;
+  --border: #2a2d38;
+  --border-subtle: #23262f;
+  --accent: #e8e8ea;
+  --accent-text: #12141a;
+  --danger: #ff6b5e;
+  --success: #4ade80;
+  --warning-bg: #3a2f0f;
+  --warning-border: #6b5a1f;
+  --status-running: #f5a623;
+  --status-succeeded: #4ade80;
+  --status-failed: #ff6b5e;
+  --status-neutral: #7a7a85;
+  --consensus-edge: #c99ce0;
+}
+
 html,
 body {
   height: 100%;
   margin: 0;
   font-family: system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+a {
+  color: inherit;
+}
+
+input,
+select,
+textarea,
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+
+button {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .node-running {
-  box-shadow: 0 0 0 2px #f5a623;
+  box-shadow: 0 0 0 2px var(--status-running);
 }
 
 .node-succeeded {
-  box-shadow: 0 0 0 2px #2ecc71;
+  box-shadow: 0 0 0 2px var(--status-succeeded);
 }
 
 .node-failed {
-  box-shadow: 0 0 0 2px #e74c3c;
+  box-shadow: 0 0 0 2px var(--status-failed);
 }

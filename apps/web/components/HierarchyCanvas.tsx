@@ -25,6 +25,7 @@ import {
   runEventsSocketUrl,
   updateGraph,
 } from "../lib/api";
+import { useTheme } from "./ThemeProvider";
 
 const ROLE_ICON: Partial<Record<AgentNode["role"], string>> = { supervisor: "👑 ", reviewer: "🔎 " };
 
@@ -38,7 +39,7 @@ function toFlowNodes(graph: AgentGraph): Node[] {
 
 function edgeStyle(kind: AgentGraph["edges"][number]["kind"]): React.CSSProperties | undefined {
   if (kind === "auto") return { strokeDasharray: "4 4" };
-  if (kind === "consensus") return { strokeDasharray: "1 4", stroke: "#8e44ad" };
+  if (kind === "consensus") return { strokeDasharray: "1 4", stroke: "var(--consensus-edge)" };
   return undefined;
 }
 
@@ -64,6 +65,7 @@ const ROLES: AgentNode["role"][] = ["supervisor", "worker", "router", "reviewer"
  * new node creates a fresh explicit edge instead.
  */
 export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) {
+  const { theme } = useTheme();
   const [graph, setGraph] = useState(initialGraph);
   const [nodes, setNodes, onNodesChange] = useNodesState(toFlowNodes(initialGraph));
   const [edges, setEdges, onEdgesChange] = useEdgesState(toFlowEdges(initialGraph));
@@ -196,14 +198,14 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       {graph.warnings.length > 0 && (
-        <div style={{ background: "#fff8e1", borderBottom: "1px solid #f5d76e", padding: 8, fontSize: 13 }}>
+        <div style={{ background: "var(--warning-bg)", borderBottom: "1px solid var(--warning-border)", padding: 8, fontSize: 13 }}>
           {graph.warnings.map((w, i) => (
             <div key={i}>⚠️ {w}</div>
           ))}
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8, padding: 8, borderBottom: "1px solid #eee", alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 8, padding: 8, borderBottom: "1px solid var(--border)", alignItems: "center" }}>
         <button onClick={() => setShowAddAgent((s) => !s)}>+ Add agent</button>
         <label>
           Entry:
@@ -226,7 +228,7 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
       </div>
 
       {showAddAgent && (
-        <div style={{ padding: 8, borderBottom: "1px solid #eee" }}>
+        <div style={{ padding: 8, borderBottom: "1px solid var(--border)" }}>
           <div style={{ display: "flex", gap: 12, marginBottom: 8, alignItems: "center" }}>
             <label>
               <input type="radio" checked={addMode === "quick"} onChange={() => setAddMode("quick")} /> Describe it
@@ -312,6 +314,7 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
           onEdgesChange={onEdgesChange}
           onReconnect={onReconnect}
           onConnect={onConnect}
+          colorMode={theme}
           fitView
         >
           <Background />

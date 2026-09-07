@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { ProviderId } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
@@ -65,7 +65,12 @@ export async function credentialRoutes(app: FastifyInstance) {
   app.delete("/graphs/:id/credentials/:credentialId", { preHandler: requireAuth }, async (req, reply) => {
     const { id: graphId, credentialId } = req.params as { id: string; credentialId: string };
     if (!(await requireGraphOwner(req, reply, graphId))) return;
-    await db.delete(providerCredentials).where(eq(providerCredentials.id, credentialId));
+    // graphId scoped in the WHERE, not just checked via requireGraphOwner
+    // above — otherwise a caller's own graphId paired with another user's
+    // credentialId would still pass and delete a foreign credential.
+    await db
+      .delete(providerCredentials)
+      .where(and(eq(providerCredentials.id, credentialId), eq(providerCredentials.graphId, graphId)));
     return reply.code(204).send();
   });
 }

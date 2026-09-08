@@ -6,17 +6,19 @@ no product in the "AI bot" space currently ships one (see Competitive
 notes below).
 
 **Status as of 2026-09-08: all three original phases are built and
-e2e-tested (43/43 passing, `apps/api/e2e/run.ts`), three security review
+e2e-tested (51/51 passing, `apps/api/e2e/run.ts`), three security review
 passes found and fixed real vulnerabilities, dark mode shipped, and the product
 grew past the original scope into a working multi-agent "engineering
 team" built from the user's own real projects — now with live run
 visualization, per-agent conversation history, a unified Dashboard
 experience, agents that can actually write code and (on explicit
 `/push`/`/pr` confirmation, over HTTPS+PAT or SSH) push it and open a PR,
-and graphs that can run themselves on a recurring cron schedule (see
-"Live visualization, agent reuse, and dashboard unification", "Agent
-file-write and confirmed push", and "Scheduled runs" below). See "Known
-gaps" at the bottom
+graphs that can run themselves on a recurring cron schedule, one graph
+that can fire work into another it owns, and agents that can read real
+conversion/revenue/traffic numbers instead of only chat-supplied ones
+(see "Live visualization, agent reuse, and dashboard unification",
+"Agent file-write and confirmed push", "Scheduled runs", and "Cross-graph
+dispatch and business metrics" below). See "Known gaps" at the bottom
 for what's still actually missing.**
 
 ## Phase 1 — MVP
@@ -261,6 +263,44 @@ visibility.** Two small UX gaps closed together:
 
 Both e2e-verified (42/42 passing) and confirmed live in a browser.
 
+## Cross-graph dispatch and business metrics (2026-09-08)
+
+Built as part of restructuring the user's real setup into a 3-tier
+agency delegation hierarchy (Portfolio → Project Leads → aspect
+specialists) — full design and rationale in the session; the graph
+migration itself (splitting the 8-project "Engineering Team" graph into
+per-project graphs) is a separate, ongoing step from this engine work.
+
+**`dispatch_to_graph`** — the one deliberate exception to "graphs are
+fully self-contained": a node with this tool and a `dispatchTargets`
+allowlist can fire-and-forget start a real run in another owned graph,
+without waiting for or seeing its result. Security is name-based
+resolution (the model never supplies a raw graph id) plus a fresh
+per-call ownership re-check, never trusted from save-time config — see
+`docs/orchestration.md`'s "Cross-graph dispatch" section for the full
+design, including why a third operator-level allowlist was considered
+and rejected, and why `runs.dispatchDepth` (cycle prevention) is a
+required part of the tool rather than an afterthought.
+
+**`business_metrics`** — real conversion/revenue/traffic numbers instead
+of only what's typed into chat. Buildable and built today for leadgen-a.example
+and leadgen-b.example (both expose a real admin API — confirmed by reading
+their actual `server/routes.ts`, not just docs) and saas-b.example
+(usage/traffic only). **Deliberately not built yet**: revenue for
+saas-a/saas-b (neither exposes it via any API today — the
+confirmed plan is a small first-party endpoint in each app, not handing
+OpenBots their Supabase service-role key or Stripe secret key directly),
+Railway hosting cost (real API exists but needs the user's own token to
+finalize the query against its live schema), and Render hosting cost
+(hard blocker — Render's public API has no billing endpoint at all,
+confirmed against its own reference docs; not a credential gap, the
+capability doesn't exist).
+
+e2e-verified including a real fire-and-forget dispatch (one graph's run
+completes immediately while a second, independently-dispatched run
+completes in a separate graph moments later) and the credential-missing
+error path for `business_metrics` — 51/51 passing.
+
 ## PC Health Monitor — capability boundary (deliberate)
 
 linux-command-centre (a sibling project) has no REST API — only a
@@ -287,6 +327,8 @@ scheduler; not specific to this agent, works for any graph).
 3. The tool registry is a small built-in set, not dynamic npm-package loading — deliberate (arbitrary plugin loading would let anyone who can edit a graph run arbitrary code in the API process).
 4. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
 5. `/push` and `/pr` only support a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes. See "Agent file-write and confirmed push" above.
+6. `business_metrics` covers leadgen-a/leadgen-b/saas-b-traffic only. No revenue for saas-a/saas-b (needs new endpoint code in each app), no Railway hosting cost (needs the user's own API token), no Render hosting cost (hard blocker — Render's API has no billing endpoint, full stop). See "Cross-graph dispatch and business metrics" above.
+7. `dispatch_to_graph` has no canvas UI for configuring `dispatchTargets` — API/PATCH only, consistent with `consensusGroup` already being backend-only everywhere.
 
 ## Competitive notes (xAI Grok Bot / Grok Build, researched 2026-09)
 

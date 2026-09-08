@@ -8,6 +8,7 @@ import { requireAuth } from "../auth/middleware.js";
 import { insertAgentNode } from "./graphs.js";
 import { requireGraphOwner } from "./graphs.js";
 import { checkWriteRootAllowed, fileAccessRootSchema } from "../validation/fileAccessRoot.js";
+import { checkDispatchTargetsOwned } from "../validation/dispatchTargets.js";
 
 const quickAddBody = z.object({
   description: z.string().min(1),
@@ -18,9 +19,12 @@ const quickAddBody = z.object({
    * mentions a repo/path — granting real filesystem access has to be an
    * explicit, separate opt-in, not a side effect of the LLM guessing what
    * you meant. See @openbots/graph-schema's AgentNode.fileAccessRoot.
+   * Same reasoning applies to dispatchTargets below — the ability to fire
+   * runs into other graphs is never inferred from prose either.
    */
   fileAccessRoot: fileAccessRootSchema.optional(),
   tools: z.array(z.string()).optional(),
+  dispatchTargets: z.array(z.string().uuid()).optional(),
   position: z.object({ x: z.number(), y: z.number() }).optional(),
 });
 
@@ -54,6 +58,8 @@ export async function quickAddRoutes(app: FastifyInstance) {
     const body = quickAddBody.parse(req.body);
     const writeError = checkWriteRootAllowed(body.tools, body.fileAccessRoot);
     if (writeError) return reply.code(400).send({ error: writeError });
+    const dispatchError = await checkDispatchTargetsOwned(body.tools, body.dispatchTargets, req.userId);
+    if (dispatchError) return reply.code(400).send({ error: dispatchError });
 
     const credentials = getCredentialsFromEnv(META_PROVIDER);
     const model = getModel(META_PROVIDER, META_MODEL, credentials);
@@ -75,6 +81,7 @@ export async function quickAddRoutes(app: FastifyInstance) {
       description: extracted.description,
       tools: body.tools,
       fileAccessRoot: body.fileAccessRoot,
+      dispatchTargets: body.dispatchTargets,
       position: body.position ?? { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
     });
 

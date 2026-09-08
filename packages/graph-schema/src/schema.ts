@@ -96,6 +96,15 @@ export const AgentNode = z.object({
   fileAccessRoot: z.string().optional(),
   fallbackChain: z.array(FallbackTarget).default([]),
   consensusGroup: ConsensusGroup.optional(),
+  /**
+   * Graph ids this node may fire-and-forget dispatch into via the
+   * "dispatch_to_graph" tool — same dual-gate pattern as fileAccessRoot:
+   * the tool name in `tools` alone grants nothing without this also being
+   * set, and vice versa. Re-verified against real ownership at call time
+   * (see orchestrator/dispatchTool.ts) — this field is a UX/save-time
+   * convenience, never the actual security boundary.
+   */
+  dispatchTargets: z.array(z.string().uuid()).optional(),
   position: CanvasPosition,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

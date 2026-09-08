@@ -51,6 +51,7 @@ export const agentNodes = pgTable("agent_nodes", {
   fileAccessRoot: text("file_access_root"), // absolute dir path the read_file/list_directory tools are confined to
   fallbackChain: jsonb("fallback_chain").notNull().default([]), // FallbackTarget[]
   consensusGroup: jsonb("consensus_group"), // ConsensusGroup | null
+  dispatchTargets: jsonb("dispatch_targets"), // string[] (graph ids) | null — see orchestrator/dispatchTool.ts
   positionX: real("position_x").notNull().default(0),
   positionY: real("position_y").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -103,6 +104,10 @@ export const runs = pgTable("runs", {
   // trigger delete so the run's own history survives the schedule that
   // created it being removed later.
   scheduledTriggerId: uuid("scheduled_trigger_id").references(() => scheduledTriggers.id, { onDelete: "set null" }),
+  // How many dispatch_to_graph hops led to this run (0 = started manually or
+  // by schedule, never by dispatch). Caps cross-graph dispatch cycles — see
+  // orchestrator/dispatchTool.ts's MAX_DISPATCH_DEPTH.
+  dispatchDepth: integer("dispatch_depth").notNull().default(0),
   input: jsonb("input"),
   output: jsonb("output"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

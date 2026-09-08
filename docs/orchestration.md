@@ -285,3 +285,69 @@ through the exact same path as a manually-started one rather than a
 parallel reimplementation that could drift. `runs.scheduledTriggerId`
 (nullable, `onDelete: set null`) records which trigger caused a run, if
 any, so its own run history survives that trigger being deleted later.
+
+## Cross-graph dispatch (`dispatch_to_graph`)
+
+Every section above assumes a graph is fully self-contained — routing
+edges only ever connect nodes within the same graph, and nothing in the
+engine could touch another graph's execution. `dispatch_to_graph`
+(`apps/api/src/orchestrator/dispatchTool.ts`) is a deliberate, narrow
+exception, added specifically so a "big picture" agent in one graph can
+delegate real work into another graph without a human relaying it by
+hand.
+
+**Fire-and-forget, not a cross-graph call stack.** The tool starts a real
+run in the target graph via the same `createRun()` helper `/push` and
+scheduled triggers already use, and returns immediately with
+`{dispatched, runId, message}` — it never waits for or sees that run's
+actual output. A synchronous "call another graph and block for its
+result" design was considered and rejected: a sub-run can take a long
+time (especially a consensus fan-out one), and blocking one BullMQ
+worker slot on another graph's entire run fights the same
+async-by-default grain `write_file`/`/push` were built around. The
+system prompt explicitly teaches a dispatch-capable node this contract
+(`engine.ts::appendDispatchContext`) so it never describes or guesses at
+a dispatched run's outcome — the same honesty instinct
+`appendWriteContext`'s "never claim you pushed" already establishes.
+
+**Security: name-based resolution + fresh ownership check, no third
+allowlist.** The model only ever supplies a graph **name** in its tool
+call — never a raw id — matched server-side against
+`getDispatchableGraphs(ownerId, node.dispatchTargets)`, which itself
+re-queries `agentGraphs` filtered to `ownerId === callingGraph.ownerId`
+on every single call. Even a fully prompt-injected tool call can at
+absolute worst dispatch to a graph already in that node's own
+`dispatchTargets` — never anything else, regardless of what arguments
+it's given. `dispatchTargets` (a per-node allowlist, mirroring
+`fileAccessRoot`'s dual-gate: the tool name in `tools[]` alone grants
+nothing without this also being configured, and vice versa) is a
+save-time UX convenience only, validated by
+`validation/dispatchTargets.ts::checkDispatchTargetsOwned` — the real
+boundary is the ownership check re-run fresh inside `execute()` itself.
+A third, *operator*-level allowlist (analogous to
+`ALLOWED_FILE_ACCESS_ROOTS`) was considered and rejected: filesystem
+paths are an open, unbounded namespace that needs an operator ceiling
+above any one user; graph ids are already a closed, per-owner-scoped
+namespace in this single-owner self-hosted shape, so the same-owner
+check already is the ceiling. Revisit only if OpenBots ever adds team/
+multi-tenant sharing.
+
+**Cross-graph dispatch cycles are a genuinely new risk this tool
+introduces.** Before it, nothing could touch another graph's execution,
+so nothing needed a cycle guard. Graph A dispatching into B whose own
+Lead dispatches back into A has no natural stopping point otherwise,
+since each hop is fire-and-forget with no call stack to unwind.
+`runs.dispatchDepth` (incremented by one on every dispatch, checked
+against a small `MAX_DISPATCH_DEPTH` constant before a new dispatch is
+allowed to proceed) is a required part of the tool's design, not an
+afterthought.
+
+**Layering**: `dispatch_to_graph` and `business_metrics`
+(`orchestrator/businessMetricsTool.ts`) both live in `apps/api`, not
+`packages/providers/src/tools.ts` — they need `db`/`createRun`/
+`decryptCredential`, all `apps/api`-only, and `packages/providers` must
+never depend on `apps/api` (the same rule the write-root allowlist check
+already follows). `resolveTools()` silently skips any tool name it
+doesn't recognize, so `engine.ts::callAgent` merges both into the
+resolved tool set by hand after calling it, rather than teaching the
+shared package about `apps/api` internals.

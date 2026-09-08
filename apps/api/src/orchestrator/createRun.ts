@@ -17,6 +17,7 @@ export async function createRun(
   input: unknown,
   mode: "pinned" | "live",
   scheduledTriggerId?: string,
+  dispatchDepth = 0,
 ) {
   const graph = await loadLiveGraph(graphRow.id);
 
@@ -30,6 +31,7 @@ export async function createRun(
       currentNodeId: graphRow.entryNodeId,
       input,
       scheduledTriggerId: scheduledTriggerId ?? null,
+      dispatchDepth,
     })
     .returning();
 

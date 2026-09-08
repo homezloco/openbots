@@ -25,6 +25,8 @@ import { withNodeTimeout } from "./circuitBreaker.js";
 import { withRetry } from "./retry.js";
 import { getCredentials } from "./credentials.js";
 import { classifyProviderError } from "./providerErrors.js";
+import { createDispatchToGraphTool, getDispatchableGraphs, type DispatchableGraph } from "./dispatchTool.js";
+import { createBusinessMetricsTool } from "./businessMetricsTool.js";
 import { computeWarnings } from "./warnings.js";
 import { enqueueHop } from "../queue/runQueue.js";
 import { publishRunEvent } from "../ws/publish.js";
@@ -74,7 +76,7 @@ export async function dispatchHop(runId: string): Promise<void> {
 
   let result: AgentCallResult;
   try {
-    result = await withNodeTimeout(node.id, () => callAgent(node, run.input, runId, autoRoutingTargets));
+    result = await withNodeTimeout(node.id, () => callAgent(node, run.input, runId, autoRoutingTargets, graph.ownerId));
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     await db.insert(runEvents).values({
@@ -209,7 +211,7 @@ async function dispatchConsensus(
 
       try {
         const result = await withNodeTimeout(targetNode.id, () =>
-          callAgent(targetNode, input, runId, getAutoRoutingTargets(graph, targetNode.id)),
+          callAgent(targetNode, input, runId, getAutoRoutingTargets(graph, targetNode.id), graph.ownerId),
         );
         await recordUsage(runId, targetNode.id, result);
         await db.insert(runEvents).values({
@@ -341,6 +343,20 @@ function appendWriteContext(systemPrompt: string, canWrite: boolean): string {
 }
 
 /**
+ * Mirrors appendAutoRoutingContext exactly, for the same reason: the
+ * model dispatching to another graph has zero built-in knowledge of what
+ * those graphs even are. Also teaches the fire-and-forget contract up
+ * front — without this a node would naturally assume dispatch_to_graph
+ * behaves like a normal synchronous tool call and try to relay a "result"
+ * it was never actually given.
+ */
+function appendDispatchContext(systemPrompt: string, targets: DispatchableGraph[]): string {
+  if (targets.length === 0) return systemPrompt;
+  const list = targets.map((t) => `- ${t.name}: ${t.description || "(no description)"}`).join("\n");
+  return `${systemPrompt}\n\nYou can start independent work in these other graphs using dispatch_to_graph:\n${list}\n\nThis is fire-and-forget — it only starts that graph's own run, it does NOT wait for or return that run's result. Always tell the user you've dispatched it and that they (or you, later) should check that graph's own run history for the outcome — you will never see that run's actual output yourself, so never describe or guess at what it found.`;
+}
+
+/**
  * Tries node.provider/node.model first, then each entry in
  * node.fallbackChain in order — but only on a classified auth or
  * model-not-found error (classifyProviderError). Any other error (e.g. a
@@ -353,6 +369,7 @@ async function callAgent(
   input: unknown,
   runId: string,
   autoRoutingTargets: { name: string; description: string }[] = [],
+  ownerId: string | null = null,
 ): Promise<AgentCallResult> {
   const targets = [{ provider: node.provider, model: node.model }, ...node.fallbackChain];
   const prompt = typeof input === "string" ? input : JSON.stringify(input);
@@ -378,9 +395,16 @@ async function callAgent(
   // Teaching it the real workflow keeps the good instinct (never claim
   // push capability, since push is genuinely never available to it) while
   // fixing what it tells the user to actually do next.
-  const systemPrompt = appendWriteContext(
-    appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
-    canWrite,
+  const wantsDispatch = node.tools.includes("dispatch_to_graph");
+  const dispatchableGraphs = wantsDispatch ? await getDispatchableGraphs(ownerId, node.dispatchTargets) : [];
+  const wantsMetrics = node.tools.includes("business_metrics");
+
+  const systemPrompt = appendDispatchContext(
+    appendWriteContext(
+      appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
+      canWrite,
+    ),
+    dispatchableGraphs,
   );
 
   let lastError: unknown;
@@ -394,10 +418,22 @@ async function callAgent(
     try {
       const credentials = await getCredentials(node.graphId, node.id, target.provider);
       const model = getModel(target.provider, target.model, credentials);
-      const tools =
+      const baseTools =
         node.tools.length > 0
           ? resolveTools(node.tools, { fileAccessRoot: effectiveFileRoot, writableRoot: worktree?.path, touchedFiles })
           : undefined;
+      // dispatch_to_graph and business_metrics both live in apps/api (they
+      // need db + createRun/decryptCredential, all apps/api-only —
+      // packages/providers must never depend on apps/api, the same
+      // layering rule the write-root allowlist check follows), so
+      // resolveTools silently skips them and they're merged in here.
+      let tools = baseTools;
+      if (wantsDispatch) {
+        tools = { ...(tools ?? {}), dispatch_to_graph: createDispatchToGraphTool(ownerId, node.dispatchTargets ?? [], runId) };
+      }
+      if (wantsMetrics) {
+        tools = { ...(tools ?? {}), business_metrics: createBusinessMetricsTool(ownerId) };
+      }
       const result = await withRetry(() =>
         generateText({
           model,
@@ -493,6 +529,7 @@ export function nodeRowToAgentNode(n: typeof agentNodes.$inferSelect): AgentNode
     fileAccessRoot: n.fileAccessRoot ?? undefined,
     fallbackChain: n.fallbackChain as AgentNode["fallbackChain"],
     consensusGroup: (n.consensusGroup as AgentNode["consensusGroup"]) ?? undefined,
+    dispatchTargets: (n.dispatchTargets as string[] | null) ?? undefined,
     position: { x: n.positionX, y: n.positionY },
     createdAt: n.createdAt.toISOString(),
     updatedAt: n.updatedAt.toISOString(),

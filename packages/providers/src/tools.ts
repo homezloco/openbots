@@ -294,5 +294,22 @@ export function listAvailableTools(): { name: string; description: string; requi
         : "Edit a file within an isolated git worktree by exact, unique string replacement.",
     requiresFileAccessRoot: true,
   }));
-  return [...staticTools, ...fileTools, ...writeTools];
+  // dispatch_to_graph and business_metrics are apps/api-only tools (they
+  // need db access and other apps/api internals this package must never
+  // depend on — see orchestrator/dispatchTool.ts and
+  // orchestrator/businessMetricsTool.ts) — listed here as metadata only,
+  // for any future tool-picker UI, never constructed by resolveTools().
+  const crossServiceTools = [
+    {
+      name: "dispatch_to_graph",
+      description: "Fire-and-forget: start a run in another graph you own, without waiting for its result.",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "business_metrics",
+      description: "Read real conversion/revenue/traffic numbers for a configured property.",
+      requiresFileAccessRoot: false,
+    },
+  ];
+  return [...staticTools, ...fileTools, ...writeTools, ...crossServiceTools];
 }

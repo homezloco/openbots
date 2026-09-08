@@ -1380,6 +1380,183 @@ async function main() {
     assert(list.body.every((c: any) => c.nodeName === "Writer"), `expected every commit's nodeName to resolve to "Writer", got: ${JSON.stringify(list.body)}`);
   });
 
+  // --- dispatch_to_graph: fire-and-forget cross-graph dispatch ---
+  let dispatchSourceGraphId = "";
+  let dispatchTargetGraphId = "";
+  let dispatchTargetGraphName = "";
+
+  await test("dispatch_to_graph setup: source and target graphs", async () => {
+    dispatchTargetGraphName = `E2E dispatch target ${Date.now()}`;
+    const target = await api("/graphs", { method: "POST", body: JSON.stringify({ name: dispatchTargetGraphName }) });
+    dispatchTargetGraphId = target.body.id;
+    const targetNode = await api(`/graphs/${dispatchTargetGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Target Worker",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Reply with exactly the single word: pong",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${dispatchTargetGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: targetNode.body.id }) });
+
+    const source = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E dispatch source" }) });
+    dispatchSourceGraphId = source.body.id;
+    const sourceNode = await api(`/graphs/${dispatchSourceGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Dispatcher",
+        role: "supervisor",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: `When asked to dispatch, call dispatch_to_graph with targetGraphName exactly "${dispatchTargetGraphName}".`,
+        tools: ["dispatch_to_graph"],
+        dispatchTargets: [dispatchTargetGraphId],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(sourceNode.status === 201, `dispatcher node create failed: ${JSON.stringify(sourceNode.body)}`);
+    await api(`/graphs/${dispatchSourceGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: sourceNode.body.id }) });
+  });
+
+  await test("security: dispatchTargets can only reference graphs you own", async () => {
+    const ownerCookie = sessionCookie;
+    sessionCookie = "";
+    const victimEmail = `e2e-victim-dispatch-${Date.now()}@openbots.dev`;
+    await api("/auth/signup", { method: "POST", body: JSON.stringify({ email: victimEmail, password }) });
+    const victimGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "Victim dispatch target" }) });
+
+    sessionCookie = ownerCookie;
+    const created = await api(`/graphs/${dispatchSourceGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Bad Dispatcher",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "test",
+        tools: ["dispatch_to_graph"],
+        dispatchTargets: [victimGraph.body.id],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(created.status === 400, `expected 400 rejecting an unowned dispatch target, got ${created.status}: ${JSON.stringify(created.body)}`);
+  });
+
+  await test("security: dispatch_to_graph requires dispatchTargets when granted", async () => {
+    const created = await api(`/graphs/${dispatchSourceGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Empty Targets Dispatcher",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "test",
+        tools: ["dispatch_to_graph"],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(created.status === 400, `expected 400 requiring dispatchTargets, got ${created.status}: ${JSON.stringify(created.body)}`);
+  });
+
+  await test("dispatch_to_graph: the model is told which graphs it can dispatch to", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: dispatchSourceGraphId,
+        input: "Without dispatching anything yet, just tell me the exact name of the one graph you're allowed to dispatch work to.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(
+      String(run.output).includes(dispatchTargetGraphName),
+      `expected the target graph's name in the model's answer, got: ${run.output}`,
+    );
+  });
+
+  await test("dispatch_to_graph returns a clear error for an unknown target name", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: dispatchSourceGraphId,
+        input:
+          "Call dispatch_to_graph with targetGraphName set to the literal string 'DefinitelyNotARealGraph' and input 'test'. Tell me exactly what error text you got back.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(/no dispatchable graph/i.test(String(run.output)), `expected a not-found error mentioned, got: ${run.output}`);
+  });
+
+  await test("dispatch_to_graph fires a real, independent run in the target graph", async () => {
+    const before = await api(`/graphs/${dispatchTargetGraphId}/runs`);
+    const beforeCount = before.body.length;
+
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: dispatchSourceGraphId, input: "Please dispatch the message 'ping' now." }),
+    });
+    const dispatcherRun = await waitForRun(created.body.id);
+    assert(dispatcherRun.status === "completed", `dispatcher run failed: ${JSON.stringify(dispatcherRun.events)}`);
+    assert(/dispatch/i.test(String(dispatcherRun.output)), `expected the dispatcher to report dispatching, got: ${dispatcherRun.output}`);
+
+    let sawNewRun = false;
+    for (let i = 0; i < 10 && !sawNewRun; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const after = await api(`/graphs/${dispatchTargetGraphId}/runs`);
+      sawNewRun = after.body.length > beforeCount;
+    }
+    assert(sawNewRun, "expected a new run to appear in the target graph's run history");
+
+    const targetRuns = await api(`/graphs/${dispatchTargetGraphId}/runs`);
+    const finished = await waitForRun(targetRuns.body[0].id);
+    assert(finished.status === "completed", `dispatched run did not complete: ${JSON.stringify(finished.events)}`);
+    assert(String(finished.output).toLowerCase().includes("pong"), `unexpected dispatched run output: ${finished.output}`);
+  });
+
+  // --- business_metrics: real conversion/revenue/traffic data ---
+  await test("business_metrics: reports a clear error when no credential is configured", async () => {
+    const graph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E metrics" }) });
+    const node = await api(`/graphs/${graph.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Analyst",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "When asked for metrics, call business_metrics with source 'leadgen-a'. Report the exact error text if you get one.",
+        tools: ["business_metrics"],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${graph.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const created = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: graph.body.id, input: "Get me leadgen-a's conversion metrics." }) });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(/no.*credential|settings/i.test(String(run.output)), `expected a missing-credential message, got: ${run.output}`);
+  });
+
+  await test("user credentials: metrics_leadgen-a rejects a non-login value and accepts a well-formed one", async () => {
+    const bad = await api("/me/credentials", { method: "POST", body: JSON.stringify({ provider: "metrics_leadgen-a", apiKey: "not-json" }) });
+    assert(bad.status === 400, `expected 400 for a non-JSON value, got ${bad.status}: ${JSON.stringify(bad.body)}`);
+
+    const good = await api("/me/credentials", {
+      method: "POST",
+      body: JSON.stringify({ provider: "metrics_leadgen-a", apiKey: JSON.stringify({ username: "staff", password: "hunter2" }) }),
+    });
+    assert(good.status === 201, `expected 201 for a well-formed login pair, got ${good.status}: ${JSON.stringify(good.body)}`);
+    assert(!JSON.stringify(good.body).includes("hunter2"), "the raw password must never appear in the create response");
+
+    const list = await api("/me/credentials");
+    assert(!JSON.stringify(list.body).includes("hunter2"), "the raw password must never appear in the list response");
+
+    await api(`/me/credentials/${good.body.id}`, { method: "DELETE" });
+  });
+
   // --- Summary ---
   console.log("\n--- Summary ---");
   const passed = results.filter((r) => r.passed).length;

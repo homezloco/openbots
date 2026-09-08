@@ -16,6 +16,7 @@ import { recordChange } from "../db/routingChanges.js";
 import { loadLiveGraph, nodeRowToAgentNode } from "../orchestrator/engine.js";
 import { requireAuth } from "../auth/middleware.js";
 import { checkWriteRootAllowed, fileAccessRootSchema } from "../validation/fileAccessRoot.js";
+import { checkDispatchTargetsOwned } from "../validation/dispatchTargets.js";
 import { unregisterSchedule } from "../queue/scheduleQueue.js";
 
 const createGraphBody = z.object({
@@ -35,6 +36,7 @@ const createNodeBody = z.object({
   fileAccessRoot: fileAccessRootSchema.optional(),
   fallbackChain: z.array(FallbackTarget).optional(),
   consensusGroup: ConsensusGroup.optional(),
+  dispatchTargets: z.array(z.string().uuid()).optional(),
   position: z.object({ x: z.number(), y: z.number() }),
 });
 
@@ -100,6 +102,7 @@ export async function insertAgentNode(graphId: string, body: CreateNodeBody) {
       fileAccessRoot: body.fileAccessRoot ?? null,
       fallbackChain: body.fallbackChain ?? [],
       consensusGroup: body.consensusGroup ?? null,
+      dispatchTargets: body.dispatchTargets ?? null,
       positionX: body.position.x,
       positionY: body.position.y,
     })
@@ -198,6 +201,8 @@ export async function graphRoutes(app: FastifyInstance) {
     const body = createNodeBody.parse(req.body);
     const writeError = checkWriteRootAllowed(body.tools, body.fileAccessRoot);
     if (writeError) return reply.code(400).send({ error: writeError });
+    const dispatchError = await checkDispatchTargetsOwned(body.tools, body.dispatchTargets, req.userId);
+    if (dispatchError) return reply.code(400).send({ error: dispatchError });
     const node = await insertAgentNode(graphId, body);
     return reply.code(201).send(node);
   });
@@ -224,6 +229,11 @@ export async function graphRoutes(app: FastifyInstance) {
     // trusting that the source row is still valid under today's allowlist.
     // consensusGroup is deliberately dropped: it references edge ids
     // scoped to the source graph and would be dangling in this one.
+    // dispatchTargets is deliberately dropped too — even though the
+    // referenced graph ids stay technically valid across the copy, "may
+    // fire runs into these other graphs" is significant enough capability
+    // that copying a node into a new context should require re-granting
+    // it explicitly, not carrying it over silently.
     const copied = createNodeBody.parse({
       name: source.name,
       role: source.role,
@@ -272,6 +282,11 @@ export async function graphRoutes(app: FastifyInstance) {
     const effectiveFileAccessRoot = body.fileAccessRoot !== undefined ? body.fileAccessRoot : before.fileAccessRoot;
     const writeError = checkWriteRootAllowed(effectiveTools, effectiveFileAccessRoot);
     if (writeError) return reply.code(400).send({ error: writeError });
+
+    const effectiveDispatchTargets =
+      body.dispatchTargets !== undefined ? body.dispatchTargets : (before.dispatchTargets as string[] | null | undefined);
+    const dispatchError = await checkDispatchTargetsOwned(effectiveTools, effectiveDispatchTargets, req.userId);
+    if (dispatchError) return reply.code(400).send({ error: dispatchError });
 
     const { position, ...rest } = body;
     const [after] = await db

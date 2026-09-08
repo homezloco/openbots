@@ -6,6 +6,17 @@ import { userCredentials } from "../db/schema.js";
 import { encryptCredential } from "../auth/crypto.js";
 import { requireAuth } from "../auth/middleware.js";
 
+const METRICS_PROVIDERS = ["metrics_leadgen-a", "metrics_leadgen-b", "metrics_saas-b"];
+
+function isValidMetricsLogin(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed?.username === "string" && parsed.username.length > 0 && typeof parsed?.password === "string" && parsed.password.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 const createCredentialBody = z
   .object({
     provider: z.string().min(1),
@@ -15,7 +26,11 @@ const createCredentialBody = z
   .refine(
     (body) => body.provider !== "github_ssh_key" || /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(body.apiKey),
     { message: "Expected a PEM-encoded private key (starting with -----BEGIN ... PRIVATE KEY-----)", path: ["apiKey"] },
-  );
+  )
+  .refine((body) => !METRICS_PROVIDERS.includes(body.provider) || isValidMetricsLogin(body.apiKey), {
+    message: 'Expected a JSON-encoded {"username", "password"} pair',
+    path: ["apiKey"],
+  });
 
 function toSummary(row: typeof userCredentials.$inferSelect) {
   return {

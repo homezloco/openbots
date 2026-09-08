@@ -83,6 +83,38 @@ export default function SettingsPage() {
         onError={setError}
         onSaved={refresh}
       />
+
+      <h2 style={{ marginTop: 32, marginBottom: 4 }}>Business metrics</h2>
+      <p style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 0 }}>
+        Lets an agent with the <code>business_metrics</code> tool read real conversion/revenue/traffic numbers instead of only
+        what you type in chat. Each property logs in with its own existing staff/admin account — nothing new to create there.
+      </p>
+
+      <MetricsCredentialSection
+        title="leadgen-a.example"
+        provider="metrics_leadgen-a"
+        credentials={credentials}
+        loading={loading}
+        onError={setError}
+        onSaved={refresh}
+      />
+      <MetricsCredentialSection
+        title="leadgen-b.example"
+        provider="metrics_leadgen-b"
+        credentials={credentials}
+        loading={loading}
+        onError={setError}
+        onSaved={refresh}
+      />
+      <MetricsCredentialSection
+        title="saas-b.example"
+        provider="metrics_saas-b"
+        description="Traffic/usage only — saas-b has no revenue endpoint yet."
+        credentials={credentials}
+        loading={loading}
+        onError={setError}
+        onSaved={refresh}
+      />
     </div>
   );
 }
@@ -182,6 +214,98 @@ function CredentialSection({
             <input placeholder="e.g. personal GitHub account" value={label} onChange={(e) => setLabel(e.target.value)} />
           </label>
           <button onClick={save} disabled={busy || !apiKey.trim()} style={{ alignSelf: "flex-start" }}>
+            Save
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Separate from CredentialSection because the underlying credential value
+ * is a username+password pair, not a single token/key — JSON-encoded
+ * client-side into the same encryptedKey string field before POST
+ * /me/credentials (no schema change on the backend), decoded back out by
+ * businessMetricsTool.ts on use. Never render the raw JSON to the user.
+ */
+function MetricsCredentialSection({
+  title,
+  provider,
+  description,
+  credentials,
+  loading,
+  onError,
+  onSaved,
+}: {
+  title: string;
+  provider: string;
+  description?: string;
+  credentials: UserCredentialSummary[];
+  loading: boolean;
+  onError: (message: string | null) => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const existing = credentials.find((c) => c.provider === provider);
+
+  async function save() {
+    if (!username.trim() || !password) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await createUserCredential({ provider, apiKey: JSON.stringify({ username: username.trim(), password }) });
+      await onSaved();
+      setUsername("");
+      setPassword("");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    onError(null);
+    try {
+      await deleteUserCredential(id);
+      await onSaved();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to remove");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 16, marginTop: 12 }}>
+      <h3 style={{ marginTop: 0, marginBottom: description ? 4 : 12 }}>{title}</h3>
+      {description && <p style={{ color: "var(--text-muted)", fontSize: 13, marginTop: 0 }}>{description}</p>}
+
+      {loading ? (
+        <p>Loading…</p>
+      ) : existing ? (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 13 }}>Saved {new Date(existing.createdAt).toLocaleDateString()}</p>
+          <button onClick={() => remove(existing.id)} disabled={busy}>
+            Remove
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Username</span>
+            <input value={username} onChange={(e) => setUsername(e.target.value)} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Password</span>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          </label>
+          <button onClick={save} disabled={busy || !username.trim() || !password}>
             Save
           </button>
         </div>

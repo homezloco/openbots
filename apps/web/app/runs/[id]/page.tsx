@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { fetchRun, type Run, type RunEventRow, type UsageTotal } from "../../../lib/api";
+import { fetchGraph, fetchRun, type Run, type RunEventRow, type UsageTotal } from "../../../lib/api";
+import { useRunEventsSocket } from "../../../lib/useRunEventsSocket";
 import { useAuth } from "../../../components/AuthProvider";
+import { RunEventTrail } from "../../../components/RunEventTrail";
 
 type RunDetail = Run & { events: RunEventRow[]; usageTotal: UsageTotal };
 
@@ -19,6 +21,7 @@ export default function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { user, loading } = useAuth();
   const [run, setRun] = useState<RunDetail | null>(null);
+  const [nodeNames, setNodeNames] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -26,6 +29,27 @@ export default function RunDetailPage() {
       fetchRun(id).then(setRun).catch((err) => setError(err.message));
     }
   }, [user, id]);
+
+  useEffect(() => {
+    if (!run?.graphId) return;
+    fetchGraph(run.graphId)
+      .then((g) => setNodeNames(Object.fromEntries(g.nodes.map((n) => [n.id, n.name]))))
+      .catch(() => {});
+  }, [run?.graphId]);
+
+  // Live updates while the run is executing. Refetches rather than
+  // hand-building synthetic event rows — reuses 100% of the render code
+  // below and avoids inventing a second row shape to keep in sync with
+  // RunEventRow. The graph-scoped socket also carries OTHER runs on this
+  // graph, hence the explicit msg.runId check.
+  const refetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useRunEventsSocket(run?.graphId ?? null, (msg) => {
+    if (msg.runId !== id) return;
+    clearTimeout(refetchTimer.current);
+    refetchTimer.current = setTimeout(() => {
+      fetchRun(id).then(setRun).catch((err) => setError(err.message));
+    }, 200);
+  });
 
   if (loading) return null;
   if (!user) {
@@ -61,35 +85,7 @@ export default function RunDetailPage() {
       )}
 
       <h2>Event trail</h2>
-      <ol style={{ listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 12 }}>
-        {run.events.map((event) => (
-          <li key={event.id} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 12 }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-              <strong>#{event.sequence}</strong>
-              <span>node {event.nodeId}</span>
-              <span
-                style={{
-                  color:
-                    event.status === "succeeded"
-                      ? "var(--status-succeeded)"
-                      : event.status === "failed"
-                        ? "var(--status-failed)"
-                        : "var(--status-neutral)",
-                }}
-              >
-                {event.status}
-              </span>
-              {event.fanoutBatchId && <span title="Part of a consensus fan-out">🔀 consensus branch</span>}
-            </div>
-            {event.output != null && (
-              <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0" }}>
-                {typeof event.output === "string" ? event.output : JSON.stringify(event.output, null, 2)}
-              </pre>
-            )}
-            {event.error && <p style={{ color: "var(--danger)", margin: "8px 0 0" }}>{event.error}</p>}
-          </li>
-        ))}
-      </ol>
+      <RunEventTrail events={run.events} nodeNames={nodeNames} />
     </div>
   );
 }

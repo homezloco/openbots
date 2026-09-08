@@ -4,8 +4,10 @@ export const RUN_EVENTS_CHANNEL = "run-events";
 
 export interface RunEventMessage {
   runId: string;
+  graphId: string;
   type: "hop_dispatched" | "hop_succeeded" | "hop_failed" | "run_completed";
   nodeId?: string;
+  resolvedEdgeId?: string | null;
   payload?: unknown;
 }
 

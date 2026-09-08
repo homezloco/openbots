@@ -1,12 +1,13 @@
 import type { FastifyInstance } from "fastify";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { RunMode } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
-import { agentGraphs, runEvents, runs, usageEvents } from "../db/schema.js";
+import { agentGraphs, agentNodes, runEvents, runs, usageEvents } from "../db/schema.js";
 import { loadLiveGraph } from "../orchestrator/engine.js";
 import { enqueueHop } from "../queue/runQueue.js";
 import { requireAuth } from "../auth/middleware.js";
+import { requireGraphOwner } from "./graphs.js";
 
 const createRunBody = z.object({
   graphId: z.string().uuid(),
@@ -113,5 +114,66 @@ export async function runRoutes(app: FastifyInstance) {
       if (priorityDiff !== 0) return priorityDiff;
       return b.createdAt.getTime() - a.createdAt.getTime();
     });
+  });
+
+  /**
+   * Backs the Hierarchy canvas's "click an agent to see its conversation
+   * history" panel. run_events.nodeId has no FK (deliberately — a node
+   * can move graphs or be deleted while its history stays queryable), so
+   * this is a straightforward node-centric query, no schema change needed.
+   * `isDirect` marks a run where this node was the entry hop (the user
+   * talked to it directly) vs. one where another node routed to it.
+   */
+  app.get("/graphs/:graphId/nodes/:nodeId/conversations", { preHandler: requireAuth }, async (req, reply) => {
+    const { graphId, nodeId } = req.params as { graphId: string; nodeId: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
+
+    const matches = await db
+      .select({ runId: runEvents.runId, status: runs.status, startedAt: runs.createdAt })
+      .from(runEvents)
+      .innerJoin(runs, eq(runEvents.runId, runs.id))
+      .where(and(eq(runEvents.nodeId, nodeId), eq(runs.graphId, graphId)))
+      .orderBy(desc(runs.createdAt));
+
+    const seen = new Set<string>();
+    const runSummaries: { runId: string; status: string; startedAt: Date }[] = [];
+    for (const m of matches) {
+      if (seen.has(m.runId)) continue;
+      seen.add(m.runId);
+      runSummaries.push(m);
+      if (runSummaries.length >= 20) break;
+    }
+
+    const runIds = runSummaries.map((r) => r.runId);
+    const allEvents =
+      runIds.length > 0
+        ? await db.select().from(runEvents).where(inArray(runEvents.runId, runIds)).orderBy(runEvents.sequence)
+        : [];
+
+    const eventsByRun = new Map<string, typeof allEvents>();
+    for (const e of allEvents) {
+      const arr = eventsByRun.get(e.runId) ?? [];
+      arr.push(e);
+      eventsByRun.set(e.runId, arr);
+    }
+
+    const nodes = await db
+      .select({ id: agentNodes.id, name: agentNodes.name })
+      .from(agentNodes)
+      .where(eq(agentNodes.graphId, graphId));
+
+    return {
+      nodes,
+      runs: runSummaries.map((r) => {
+        const events = eventsByRun.get(r.runId) ?? [];
+        return {
+          runId: r.runId,
+          status: r.status,
+          startedAt: r.startedAt,
+          isDirect: events.length > 0 && events[0].nodeId === nodeId,
+          events,
+        };
+      }),
+    };
   });
 }

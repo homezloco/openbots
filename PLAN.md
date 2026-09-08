@@ -6,11 +6,14 @@ no product in the "AI bot" space currently ships one (see Competitive
 notes below).
 
 **Status as of 2026-09-07: all three original phases are built and
-e2e-tested (15/15 passing, `apps/api/e2e/run.ts`), a security review found
-and fixed two real vulnerabilities, dark mode shipped, and the product
+e2e-tested (17/17 passing, `apps/api/e2e/run.ts`), two security reviews
+found and fixed real vulnerabilities, dark mode shipped, and the product
 grew past the original scope into a working multi-agent "engineering
-team" built from the user's own real projects. See "Known gaps" at the
-bottom for what's still actually missing.**
+team" built from the user's own real projects — now with live run
+visualization, per-agent conversation history, and a unified Dashboard
+experience (see "Live visualization, agent reuse, and dashboard
+unification" below). See "Known gaps" at the bottom for what's still
+actually missing.**
 
 ## Phase 1 — MVP
 
@@ -64,6 +67,21 @@ All three are covered by new e2e regression tests (`security: ...` cases in `app
 ## CI
 
 `.github/workflows/e2e.yml` runs the real e2e suite (docker compose up → migrate → build/start api+worker → wait for health → `test:e2e`) on every push to `main` and on-demand via `workflow_dispatch`. Deliberately not on every PR, since each run makes real, billed Anthropic API calls. The file-access fixture that used to be set up by hand inside the running container (`/tmp/testrepo`) is now committed at `apps/api/e2e/fixtures/testrepo/` and mounted in by `docker-compose.yml`, so this also fixed a real reproducibility gap for local dev, not just CI. **Needs three repo secrets added before it will pass**: `ANTHROPIC_API_KEY`, `E2E_SESSION_SECRET`, `E2E_CREDENTIALS_ENCRYPTION_KEY`.
+
+## Live visualization, agent reuse, and dashboard unification (2026-09-07)
+
+Full plan in the session; built and e2e-verified in build order:
+
+1. **WS security fix (shipped first, urgent).** `GET /ws/runs` — the live-update WebSocket the canvas already used to light up nodes — had **no auth and no scoping at all**: it broadcast every user's run activity, including output/error text, to any connected client. Fixed: the route is now `GET /ws/graphs/:graphId/runs`, with an `[requireAuth, requireGraphOwner]` `preHandler` chain and per-socket filtering by a `graphId` field now included in every published event. **Important Fastify subtlety**: `@fastify/websocket` completes the HTTP upgrade *before* invoking the `(socket, req)` callback, so the ownership check must live in `preHandler` — a `socket.close()` after the fact would still leak that the handshake succeeded. `requireAuth` must run before `requireGraphOwner` in the chain: that helper's `ownerId !== req.userId` check alone passes when both are `null` (unauthenticated request against a graph whose owner was deleted).
+2. **Auto-routing "no confident match" bug, found live.** A real run showed the Lead Engineer correctly ask a clarifying "UNKNOWN — could you specify which project?" question — but `resolve.ts::matchAutoEdge` had no concept of that; it always forwarded to *some* candidate via keyword overlap (even falling back to `candidates[0]` with zero signal), and the clarifying text happened to name several candidates by name (an artifact of the auto-routing context injection), so it "won" the overlap contest by accident and the run silently continued instead of surfacing the question. Fixed: `appendAutoRoutingContext` now explicitly teaches every auto-routing node the `UNKNOWN` convention, and `matchAutoEdge` treats an `UNKNOWN`-prefixed output (or a zero-overlap score) as no match, letting the existing "no next node → run completes with this output" path do the right thing with no new plumbing.
+3. **Add existing agent.** `GET /agents` (cross-graph node listing scoped to the caller) + `POST /graphs/:id/nodes/from-existing` (copies a node's full config via the same `insertAgentNode()` every other creation path uses, deliberately excluding `consensusGroup`) + a third "Existing agent" tab in the canvas's Add-agent panel. Needed two *independent* `requireGraphOwner` checks (target graph AND the source node's own graph) since this is the first mutation spanning two different graphs.
+4. **Node pulse + edge "signal" animation.** `.node-running`/`succeeded`/`failed` gained real `@keyframes` (was a static ring); a new `SignalEdge` component renders a one-shot SVG `<animateMotion>` pulse along whichever edge a hop actually resolved to (`resolvedEdgeId` now travels on the wire too). `startRun()` no longer navigates away to `/runs/:id` — it stays on the canvas so the pulse is visible, with a "view full trail" link instead.
+5. **Click an agent → see its conversation history.** New `GET /graphs/:graphId/nodes/:nodeId/conversations` (no schema change — `run_events.nodeId` has no FK and is stable regardless of which graph currently owns the node) returns every run this agent has been part of, flagging whether the user talked to it directly (`sequence === 0`) or another agent routed to it. `RunEventTrail` was extracted out of the run detail page into a shared component (fixing a raw-UUID-instead-of-name display bug as a side effect) and reused by a new slide-over `AgentConversationPanel`, opened via `onNodeClick` on the canvas.
+6. **Dashboard/Hierarchy unification.** The Dashboard's multi-node-graph branch used to be a dead-end "Open in Hierarchy →" link. `BotChat`'s send/history/multi-turn-memory logic was extracted into a shared `useBotChat` hook; a new `HierarchyChat` component renders the live canvas (now pulse/signal/click-panel-capable) on top and the same chat input/transcript strip underneath, so a multi-agent "team" gets the same one-screen "type → watch it think → see the answer" experience a single bot already had. `/hierarchy` itself is unchanged and still exists as the dedicated full-canvas editing surface.
+
+Also removed the "Leadgen A Corrupt Engineer" node — a stale duplicate directory (`~/Development/leadgen-a-corrupt`) the project-bootstrap sweep had picked up alongside the real `leadgen-a` project — and added the `DELETE /graphs/:id/nodes/:nodeId` route needed to do that (missing entirely before this).
+
+**Not yet manually verified in-browser** (no browser automation available in the environment this was built in): the pulse/signal animation's visual feel and timing, and the Dashboard/HierarchyChat layout. All backend behavior is e2e-verified (17/17); the visual polish needs a live look.
 
 ## PC Health Monitor — capability boundary (deliberate)
 

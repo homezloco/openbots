@@ -60,7 +60,7 @@ export async function dispatchHop(runId: string): Promise<void> {
 
   const sequence = await nextSequence(runId);
   const startedAt = new Date();
-  publishRunEvent({ runId, type: "hop_dispatched", nodeId: node.id });
+  publishRunEvent({ runId, graphId: graph.id, type: "hop_dispatched", nodeId: node.id });
 
   let result: AgentCallResult;
   try {
@@ -78,7 +78,7 @@ export async function dispatchHop(runId: string): Promise<void> {
       finishedAt: new Date(),
     });
     await db.update(runs).set({ status: "error", updatedAt: new Date() }).where(eq(runs.id, runId));
-    publishRunEvent({ runId, type: "hop_failed", nodeId: node.id, payload: { error } });
+    publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: node.id, payload: { error } });
     return;
   }
 
@@ -98,7 +98,7 @@ export async function dispatchHop(runId: string): Promise<void> {
       startedAt,
       finishedAt: new Date(),
     });
-    publishRunEvent({ runId, type: "hop_succeeded", nodeId: node.id, payload: { output } });
+    publishRunEvent({ runId, graphId: graph.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
     await dispatchConsensus(runId, graph, node, output);
     return;
   }
@@ -116,14 +116,21 @@ export async function dispatchHop(runId: string): Promise<void> {
     startedAt,
     finishedAt: new Date(),
   });
-  publishRunEvent({ runId, type: "hop_succeeded", nodeId: node.id, payload: { output } });
+  publishRunEvent({
+    runId,
+    graphId: graph.id,
+    type: "hop_succeeded",
+    nodeId: node.id,
+    resolvedEdgeId: edge?.id ?? null,
+    payload: { output },
+  });
 
   if (!nextNodeId) {
     await db
       .update(runs)
       .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
       .where(eq(runs.id, runId));
-    publishRunEvent({ runId, type: "run_completed", payload: { output } });
+    publishRunEvent({ runId, graphId: graph.id, type: "run_completed", payload: { output } });
     return;
   }
 
@@ -177,7 +184,7 @@ async function dispatchConsensus(
     branches.map(async ({ edge, targetNode }, index) => {
       const sequence = baseSequence + index;
       const startedAt = new Date();
-      publishRunEvent({ runId, type: "hop_dispatched", nodeId: targetNode.id });
+      publishRunEvent({ runId, graphId: graph.id, type: "hop_dispatched", nodeId: targetNode.id });
 
       try {
         const result = await withNodeTimeout(targetNode.id, () =>
@@ -196,7 +203,14 @@ async function dispatchConsensus(
           startedAt,
           finishedAt: new Date(),
         });
-        publishRunEvent({ runId, type: "hop_succeeded", nodeId: targetNode.id, payload: { output: result.text } });
+        publishRunEvent({
+          runId,
+          graphId: graph.id,
+          type: "hop_succeeded",
+          nodeId: targetNode.id,
+          resolvedEdgeId: edge.id,
+          payload: { output: result.text },
+        });
         return { nodeId: targetNode.id, output: result.text };
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
@@ -212,7 +226,7 @@ async function dispatchConsensus(
           startedAt,
           finishedAt: new Date(),
         });
-        publishRunEvent({ runId, type: "hop_failed", nodeId: targetNode.id, payload: { error } });
+        publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: targetNode.id, payload: { error } });
         throw err;
       }
     }),
@@ -224,6 +238,7 @@ async function dispatchConsensus(
     await db.update(runs).set({ status: "error", updatedAt: new Date() }).where(eq(runs.id, runId));
     publishRunEvent({
       runId,
+      graphId: graph.id,
       type: "hop_failed",
       nodeId: sourceNode.id,
       payload: { error: `${failures.length}/${branches.length} consensus branches failed` },
@@ -280,7 +295,7 @@ function getAutoRoutingTargets(graph: AgentGraph, nodeId: string): { name: strin
 function appendAutoRoutingContext(systemPrompt: string, targets: { name: string; description: string }[]): string {
   if (targets.length === 0) return systemPrompt;
   const list = targets.map((t) => `- ${t.name}: ${t.description || "(no description)"}`).join("\n");
-  return `${systemPrompt}\n\nYou can delegate to one of these specialists — mention the target's name clearly in your response so it can be routed correctly:\n${list}`;
+  return `${systemPrompt}\n\nYou can delegate to one of these specialists — mention the target's name clearly in your response so it can be routed correctly:\n${list}\n\nIf none of these fit, or you need the user to clarify before you can route, start your reply with the single word UNKNOWN — do not guess a specialist.`;
 }
 
 /**

@@ -81,14 +81,31 @@ button:disabled {
   cursor: default;
 }
 
+@keyframes ob-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--status-running); }
+  50% { box-shadow: 0 0 0 7px var(--status-running); }
+}
+
 .node-running {
-  box-shadow: 0 0 0 2px var(--status-running);
+  animation: ob-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes ob-flash-succeeded {
+  0% { box-shadow: 0 0 0 10px var(--status-succeeded); }
+  100% { box-shadow: 0 0 0 2px var(--status-succeeded); }
 }
 
 .node-succeeded {
   box-shadow: 0 0 0 2px var(--status-succeeded);
+  animation: ob-flash-succeeded 0.5s ease-out;
+}
+
+@keyframes ob-flash-failed {
+  0% { box-shadow: 0 0 0 10px var(--status-failed); }
+  100% { box-shadow: 0 0 0 2px var(--status-failed); }
 }
 
 .node-failed {
   box-shadow: 0 0 0 2px var(--status-failed);
+  animation: ob-flash-failed 0.5s ease-out;
 }

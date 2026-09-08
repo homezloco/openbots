@@ -39,6 +39,11 @@ const createNodeBody = z.object({
 
 const updateNodeBody = createNodeBody.partial();
 
+const fromExistingNodeBody = z.object({
+  sourceNodeId: z.string().uuid(),
+  position: z.object({ x: z.number(), y: z.number() }),
+});
+
 const createEdgeBody = z.object({
   sourceNodeId: z.string().uuid(),
   targetNodeId: z.string().uuid(),
@@ -172,6 +177,45 @@ export async function graphRoutes(app: FastifyInstance) {
   });
 
   /**
+   * Copies an already-configured agent from ANY graph the caller owns into
+   * this one — the "add existing agent" flow, distinct from templates
+   * (which only reuse a whole graph). Two independent ownership checks are
+   * required, not the usual single and(eq(id), eq(graphId)): this spans
+   * TWO graphs (the target `:id` and the source node's own graphId), so
+   * proving you own one says nothing about the other.
+   */
+  app.post("/graphs/:id/nodes/from-existing", { preHandler: requireAuth }, async (req, reply) => {
+    const { id: graphId } = req.params as { id: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
+    const body = fromExistingNodeBody.parse(req.body);
+
+    const source = await db.query.agentNodes.findFirst({ where: eq(agentNodes.id, body.sourceNodeId) });
+    if (!source) return reply.code(404).send({ error: "Source agent not found" });
+    if (!(await requireGraphOwner(req, reply, source.graphId))) return;
+
+    // Re-run the exact same validation (including the fileAccessRoot
+    // allowlist) any other node-creation path goes through, rather than
+    // trusting that the source row is still valid under today's allowlist.
+    // consensusGroup is deliberately dropped: it references edge ids
+    // scoped to the source graph and would be dangling in this one.
+    const copied = createNodeBody.parse({
+      name: source.name,
+      role: source.role,
+      provider: source.provider,
+      model: source.model,
+      tier: source.tier ?? undefined,
+      systemPrompt: source.systemPrompt,
+      description: source.description,
+      tools: source.tools,
+      fileAccessRoot: source.fileAccessRoot ?? undefined,
+      fallbackChain: source.fallbackChain,
+      position: body.position,
+    });
+    const node = await insertAgentNode(graphId, copied);
+    return reply.code(201).send(node);
+  });
+
+  /**
    * Exists mainly so `consensusGroup` can be set at all: it references edge
    * ids, which don't exist until after the node and its edges are created,
    * so it can never be supplied at node-creation time for a real consensus
@@ -204,6 +248,30 @@ export async function graphRoutes(app: FastifyInstance) {
 
     await recordChange(graphId, "node_updated", before, after);
     return nodeRowToAgentNode(after);
+  });
+
+  app.delete("/graphs/:id/nodes/:nodeId", { preHandler: requireAuth }, async (req, reply) => {
+    const { id: graphId, nodeId } = req.params as { id: string; nodeId: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
+
+    // graphId scoped here too — same IDOR class as the node PATCH above.
+    const before = await db.query.agentNodes.findFirst({
+      where: and(eq(agentNodes.id, nodeId), eq(agentNodes.graphId, graphId)),
+    });
+    if (!before) return reply.code(404).send({ error: "Node not found" });
+
+    // routingEdges.sourceNodeId/targetNodeId cascade on delete, but
+    // agentGraphs.entryNodeId is not a real FK (it references either an
+    // agent_nodes row or nothing yet) — clear it explicitly so a deleted
+    // node never leaves the graph pointing at a dangling entry node.
+    await db
+      .update(agentGraphs)
+      .set({ entryNodeId: null })
+      .where(and(eq(agentGraphs.id, graphId), eq(agentGraphs.entryNodeId, nodeId)));
+
+    await db.delete(agentNodes).where(and(eq(agentNodes.id, nodeId), eq(agentNodes.graphId, graphId)));
+    await recordChange(graphId, "node_removed", before, null);
+    return reply.code(204).send();
   });
 
   app.post("/graphs/:id/edges", { preHandler: requireAuth }, async (req, reply) => {

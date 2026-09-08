@@ -107,6 +107,13 @@ export interface CreateNodeInput {
 export const createNode = (graphId: string, body: CreateNodeInput) =>
   request<AgentNode>(`/graphs/${graphId}/nodes`, { method: "POST", body: JSON.stringify(body) });
 
+export const listAllAgents = () => request<(AgentNode & { graphName: string })[]>("/agents");
+
+export const createNodeFromExisting = (
+  graphId: string,
+  body: { sourceNodeId: string; position: { x: number; y: number } },
+) => request<AgentNode>(`/graphs/${graphId}/nodes/from-existing`, { method: "POST", body: JSON.stringify(body) });
+
 export const createEdge = (
   graphId: string,
   body: { sourceNodeId: string; targetNodeId: string; kind?: RoutingEdge["kind"]; priority?: number },
@@ -189,6 +196,20 @@ export const createRun = (graphId: string, input: unknown, mode: "pinned" | "liv
 export const fetchRun = (runId: string) =>
   request<Run & { events: RunEventRow[]; usageTotal: UsageTotal }>(`/runs/${runId}`, { cache: "no-store" });
 
+export interface AgentConversation {
+  runId: string;
+  status: string;
+  startedAt: string;
+  isDirect: boolean;
+  events: RunEventRow[];
+}
+
+export const fetchAgentConversations = (graphId: string, nodeId: string) =>
+  request<{ nodes: { id: string; name: string }[]; runs: AgentConversation[] }>(
+    `/graphs/${graphId}/nodes/${nodeId}/conversations`,
+    { cache: "no-store" },
+  );
+
 export const listRuns = (graphId: string) => request<Run[]>(`/graphs/${graphId}/runs`);
 
 // --- Templates ---
@@ -215,6 +236,15 @@ export const instantiateTemplate = (templateId: string) =>
 export const sendChatMessage = (provider: ProviderId, model: string, message: string, systemPrompt?: string) =>
   request<{ text: string }>("/chat", { method: "POST", body: JSON.stringify({ provider, model, message, systemPrompt }) });
 
-export function runEventsSocketUrl(): string {
-  return `${API_URL.replace(/^http/, "ws")}/ws/runs`;
+export interface RunEventMessage {
+  runId: string;
+  graphId: string;
+  type: "hop_dispatched" | "hop_succeeded" | "hop_failed" | "run_completed";
+  nodeId?: string;
+  resolvedEdgeId?: string | null;
+  payload?: unknown;
+}
+
+export function runEventsSocketUrl(graphId: string): string {
+  return `${API_URL.replace(/^http/, "ws")}/ws/graphs/${graphId}/runs`;
 }

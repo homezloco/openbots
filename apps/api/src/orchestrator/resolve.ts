@@ -51,17 +51,27 @@ function matchAutoEdge(
   candidates: RoutingEdge[],
   lastOutput: unknown,
 ): RoutingEdge | null {
+  // The router is explicitly saying "I can't tell" (see engine.ts's
+  // appendAutoRoutingContext, which teaches every auto-routing node this
+  // convention) — treat that as no match rather than guessing anyway.
+  // Found as a real bug: a genuine clarifying question that happened to
+  // name several candidates by name (since the injected context lists
+  // them) would win the keyword-overlap contest below purely by accident,
+  // silently continuing the run instead of surfacing the question.
+  const text = typeof lastOutput === "string" ? lastOutput : JSON.stringify(lastOutput ?? "");
+  if (/^\s*unknown\b/i.test(text)) return null;
+
   if (candidates.length <= 1) return candidates[0] ?? null;
 
-  const outputTokens = tokenize(typeof lastOutput === "string" ? lastOutput : JSON.stringify(lastOutput ?? ""));
-  if (outputTokens.size === 0) return candidates[0];
+  const outputTokens = tokenize(text);
+  if (outputTokens.size === 0) return null;
 
-  let best = candidates[0];
-  let bestScore = -1;
+  let best: RoutingEdge | null = null;
+  let bestScore = 0;
   for (const edge of candidates) {
     const target = graph.nodes.find((n) => n.id === edge.targetNodeId);
     const score = overlapScore(outputTokens, tokenize(target?.description ?? ""));
-    if (score > bestScore || (score === bestScore && edge.priority > best.priority)) {
+    if (score > 0 && (score > bestScore || (score === bestScore && edge.priority > (best?.priority ?? -Infinity)))) {
       best = edge;
       bestScore = score;
     }

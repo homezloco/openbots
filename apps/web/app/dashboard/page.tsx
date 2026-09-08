@@ -1,29 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import {
-  createGraph,
-  createRun,
-  fetchRun,
-  listGraphs,
-  listRuns,
-  quickAddAgent,
-  updateGraph,
-  type GraphSummary,
-  type Run,
-} from "../../lib/api";
+import { createGraph, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
+import { extractLatestUserMessage, useBotChat } from "../../lib/useBotChat";
 import { useAuth } from "../../components/AuthProvider";
+import { HierarchyChat } from "../../components/HierarchyChat";
 
 /**
  * The bot roster (Grok Bot's sidebar-of-bots pattern): every graph you own,
  * listed like contacts. A single-node graph gets a chat view right here; a
- * multi-node graph is a real pipeline and links to Hierarchy instead. See
- * PLAN.md.
+ * multi-node graph gets HierarchyChat — the live canvas plus the same chat
+ * input/transcript strip, instead of the old dead-end "Open in Hierarchy"
+ * link. See PLAN.md.
  *
- * Conversation memory is built by chaining each completed run's own
- * transcript forward — no backend/schema change needed, see buildNextInput
- * below. A run's `input` therefore holds the FULL transcript so far; the UI
- * recovers just this turn's message with extractLatestUserMessage.
+ * Conversation memory (useBotChat, shared with HierarchyChat) is built by
+ * chaining each completed run's own transcript forward — no backend/schema
+ * change needed. A run's `input` therefore holds the FULL transcript so
+ * far; the UI recovers just this turn's message with extractLatestUserMessage.
  */
 export default function DashboardPage() {
   const { user, loading } = useAuth();
@@ -121,72 +114,14 @@ export default function DashboardPage() {
           <div style={{ padding: 24, color: "var(--text-faint)" }}>Select a bot on the left, or describe a new one.</div>
         )}
         {selected && selected.nodeCount === 1 && <BotChat graph={selected} />}
-        {selected && selected.nodeCount !== 1 && (
-          <div style={{ padding: 24 }}>
-            <p>
-              "{selected.name}" has {selected.nodeCount} agents — that's a real pipeline, not a single bot.
-            </p>
-            <a href={`/hierarchy?graphId=${selected.id}`}>Open in Hierarchy →</a>
-          </div>
-        )}
+        {selected && selected.nodeCount !== 1 && <HierarchyChat graph={selected} />}
       </div>
     </div>
   );
 }
 
-function extractLatestUserMessage(transcript: string): string {
-  const idx = transcript.lastIndexOf("User: ");
-  return idx === -1 ? transcript : transcript.slice(idx + "User: ".length);
-}
-
-function buildNextInput(lastCompletedRun: Run | null, newMessage: string): string {
-  if (!lastCompletedRun || typeof lastCompletedRun.input !== "string") return `User: ${newMessage}`;
-  return `${lastCompletedRun.input}\nAssistant: ${lastCompletedRun.output}\nUser: ${newMessage}`;
-}
-
 function BotChat({ graph }: { graph: GraphSummary }) {
-  const [runs, setRuns] = useState<Run[]>([]);
-  const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function loadHistory() {
-    const rows = await listRuns(graph.id);
-    const chronological = rows
-      .filter((r) => r.status === "completed")
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-    setRuns(chronological);
-  }
-
-  useEffect(() => {
-    loadHistory().catch((err) => setError(err.message));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph.id]);
-
-  async function send() {
-    if (!input.trim()) return;
-    const message = input;
-    setInput("");
-    setSending(true);
-    setError(null);
-    try {
-      const lastRun = runs.length > 0 ? runs[runs.length - 1] : null;
-      const nextInput = buildNextInput(lastRun, message);
-      const created = await createRun(graph.id, nextInput);
-
-      let final = await fetchRun(created.id);
-      for (let i = 0; i < 30 && final.status !== "completed" && final.status !== "error"; i++) {
-        await new Promise((r) => setTimeout(r, 1000));
-        final = await fetchRun(created.id);
-      }
-      if (final.status === "error") throw new Error("The bot failed to respond — check its Hierarchy/Runs view for details");
-      setRuns((r) => [...r, final]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to send message");
-    } finally {
-      setSending(false);
-    }
-  }
+  const { runs, input, setInput, sending, error, send } = useBotChat(graph);
 
   return (
     <>

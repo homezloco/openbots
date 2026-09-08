@@ -675,6 +675,108 @@ async function main() {
     assert(owner.status === 200, `expected the actual owner to be able to read their own run, got ${owner.status}`);
   });
 
+  // --- Add existing agent: copies config, excludes consensusGroup, IDOR-safe in both directions ---
+  await test("add existing agent copies node config, excluding consensusGroup, with IDOR checks", async () => {
+    const sourceGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E source graph" }) });
+    const sourceNode = await api(`/graphs/${sourceGraph.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "ReusableAgent",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "distinctive prompt for reuse test",
+        description: "distinctive description",
+        tools: ["read_file", "list_directory"],
+        fileAccessRoot: "/tmp/testrepo",
+        position: { x: 0, y: 0 },
+      }),
+    });
+
+    const targetGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E target graph" }) });
+    const copied = await api(`/graphs/${targetGraph.body.id}/nodes/from-existing`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: sourceNode.body.id, position: { x: 10, y: 10 } }),
+    });
+    assert(copied.status === 201, `expected 201, got ${copied.status}: ${JSON.stringify(copied.body)}`);
+    assert(copied.body.id !== sourceNode.body.id, "copy should have a fresh id");
+    assert(copied.body.graphId === targetGraph.body.id, "copy should belong to the target graph");
+    assert(copied.body.systemPrompt === "distinctive prompt for reuse test", "systemPrompt not copied");
+    assert(copied.body.fileAccessRoot === "/tmp/testrepo", "fileAccessRoot not copied");
+    assert(copied.body.consensusGroup == null, "consensusGroup should NOT be copied");
+
+    const targetGraphAfter = await api(`/graphs/${targetGraph.body.id}`);
+    assert(
+      targetGraphAfter.body.nodes.some((n: any) => n.id === copied.body.id),
+      "copied node not actually present in target graph",
+    );
+
+    // IDOR direction 1: attacker's own target graph + a victim's sourceNodeId.
+    const attackerCookie = sessionCookie;
+    sessionCookie = "";
+    const victimEmail = `e2e-victim-agents-${Date.now()}@openbots.dev`;
+    await api("/auth/signup", { method: "POST", body: JSON.stringify({ email: victimEmail, password }) });
+    const victimGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "Victim source graph" }) });
+    const victimNode = await api(`/graphs/${victimGraph.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "VictimReusable",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        position: { x: 0, y: 0 },
+      }),
+    });
+
+    sessionCookie = attackerCookie;
+    const attack1 = await api(`/graphs/${targetGraph.body.id}/nodes/from-existing`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: victimNode.body.id, position: { x: 0, y: 0 } }),
+    });
+    assert(
+      attack1.status === 403 || attack1.status === 404,
+      `expected the source-graph ownership check to block this, got ${attack1.status}: ${JSON.stringify(attack1.body)}`,
+    );
+
+    // IDOR direction 2: attacker's own node as source, victim's graph as target.
+    const attack2 = await api(`/graphs/${victimGraph.body.id}/nodes/from-existing`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: sourceNode.body.id, position: { x: 0, y: 0 } }),
+    });
+    assert(
+      attack2.status === 403 || attack2.status === 404,
+      `expected the target-graph ownership check to block this, got ${attack2.status}: ${JSON.stringify(attack2.body)}`,
+    );
+
+    sessionCookie = attackerCookie;
+  });
+
+  // --- Conversation history: routed hops vs a direct message to the same node ---
+  await test("agent conversation history distinguishes direct messages from routed hops", async () => {
+    // basicGraphId/nodeA/nodeB already have one routed run from the
+    // "run completes through both explicit hops" test above (nodeA -> nodeB).
+    // Temporarily point entryNodeId at nodeB to create a genuinely direct run.
+    await api(`/graphs/${basicGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: nodeB }) });
+    const direct = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: basicGraphId, input: "Direct hello" }) });
+    const directRun = await waitForRun(direct.body.id);
+    assert(directRun.status === "completed", `direct run failed: ${JSON.stringify(directRun.events)}`);
+
+    const convos = await api(`/graphs/${basicGraphId}/nodes/${nodeB}/conversations`);
+    assert(convos.status === 200, `expected 200, got ${convos.status}: ${JSON.stringify(convos.body)}`);
+    assert(convos.body.runs.length >= 2, `expected at least 2 runs involving nodeB, got ${convos.body.runs.length}`);
+
+    const directEntry = convos.body.runs.find((r: any) => r.runId === direct.body.id);
+    assert(directEntry, "direct run missing from conversation history");
+    assert(directEntry.isDirect === true, `expected the direct run to be marked isDirect, got ${JSON.stringify(directEntry)}`);
+
+    const routedEntry = convos.body.runs.find((r: any) => r.runId !== direct.body.id);
+    assert(routedEntry, "routed run missing from conversation history");
+    assert(routedEntry.isDirect === false, `expected the routed run to be marked NOT direct, got ${JSON.stringify(routedEntry)}`);
+
+    // Restore entryNodeId in case any future test relies on it.
+    await api(`/graphs/${basicGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: nodeA }) });
+  });
+
   // --- Summary ---
   console.log("\n--- Summary ---");
   const passed = results.filter((r) => r.passed).length;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -18,14 +18,20 @@ import type { AgentGraph, AgentNode, ProviderId } from "@openbots/graph-schema";
 import {
   createEdge,
   createNode,
+  createNodeFromExisting,
   createRun,
   createTemplate,
+  listAllAgents,
   quickAddAgent,
   rerouteEdge,
-  runEventsSocketUrl,
   updateGraph,
 } from "../lib/api";
+import { useRunEventsSocket } from "../lib/useRunEventsSocket";
+import { AgentConversationPanel } from "./AgentConversationPanel";
+import { SignalEdge, type EdgePulse } from "./SignalEdge";
 import { useTheme } from "./ThemeProvider";
+
+const EDGE_TYPES = { signal: SignalEdge };
 
 const ROLE_ICON: Partial<Record<AgentNode["role"], string>> = { supervisor: "👑 ", reviewer: "🔎 " };
 
@@ -50,11 +56,22 @@ function toFlowEdges(graph: AgentGraph): Edge[] {
     target: e.targetNodeId,
     label: e.label,
     style: edgeStyle(e.kind),
+    type: "signal",
   }));
 }
 
 const PROVIDERS: ProviderId[] = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"];
 const ROLES: AgentNode["role"][] = ["supervisor", "worker", "router", "reviewer"];
+
+function groupByGraph<T extends { graphName: string }>(agents: T[]): [string, T[]][] {
+  const groups = new Map<string, T[]>();
+  for (const agent of agents) {
+    const list = groups.get(agent.graphName) ?? [];
+    list.push(agent);
+    groups.set(agent.graphName, list);
+  }
+  return [...groups.entries()];
+}
 
 /**
  * Dragging an existing edge's endpoint to a new node calls the reroute API
@@ -70,10 +87,13 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
   const [nodes, setNodes, onNodesChange] = useNodesState(toFlowNodes(initialGraph));
   const [edges, setEdges, onEdgesChange] = useEdgesState(toFlowEdges(initialGraph));
   const [showAddAgent, setShowAddAgent] = useState(false);
-  const [addMode, setAddMode] = useState<"quick" | "manual">("quick");
+  const [addMode, setAddMode] = useState<"quick" | "manual" | "existing">("quick");
   const [quickDescription, setQuickDescription] = useState("");
   const [quickBusy, setQuickBusy] = useState(false);
   const [connectFrom, setConnectFrom] = useState("");
+  const [existingAgents, setExistingAgents] = useState<(AgentNode & { graphName: string })[] | null>(null);
+  const [existingAgentId, setExistingAgentId] = useState("");
+  const [existingBusy, setExistingBusy] = useState(false);
   const [form, setForm] = useState({
     name: "",
     role: "worker" as AgentNode["role"],
@@ -84,17 +104,60 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
     fileAccessRoot: "",
   });
 
-  useEffect(() => {
-    const ws = new WebSocket(runEventsSocketUrl());
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data) as { nodeId?: string; type: string };
-      if (!msg.nodeId) return;
-      setNodes((nds) =>
-        nds.map((n) => (n.id === msg.nodeId ? { ...n, className: statusClass(msg.type) } : n)),
-      );
-    };
-    return () => ws.close();
-  }, [setNodes]);
+  const [pulses, setPulses] = useState<EdgePulse[]>([]);
+  const nodeClearTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+
+  /**
+   * React won't restart a CSS animation just because the same className is
+   * reapplied (e.g. a node visited twice in one run) — clearing to "" and
+   * reapplying on the next frame forces a real DOM attribute change each
+   * time. Per-node clear timers mean a fresh event on a re-visited node
+   * cancels any stale pending fade-out from its previous visit.
+   */
+  const setNodeStatus = useCallback(
+    (nodeId: string, cls: string, autoClearMs?: number) => {
+      clearTimeout(nodeClearTimers.current.get(nodeId));
+      nodeClearTimers.current.delete(nodeId);
+      setNodes((nds) => nds.map((n) => (n.id === nodeId ? { ...n, className: "" } : n)));
+      requestAnimationFrame(() => {
+        setNodes((nds) => nds.map((n) => (n.id === nodeId ? { ...n, className: cls } : n)));
+        if (autoClearMs) {
+          const t = setTimeout(() => {
+            setNodes((nds) => nds.map((n) => (n.id === nodeId ? { ...n, className: "" } : n)));
+            nodeClearTimers.current.delete(nodeId);
+          }, autoClearMs);
+          nodeClearTimers.current.set(nodeId, t);
+        }
+      });
+    },
+    [setNodes],
+  );
+
+  const addPulse = useCallback((edgeId: string) => {
+    const id = `${edgeId}-${Date.now()}-${Math.random()}`;
+    setPulses((ps) => [...ps, { id, edgeId }]);
+    setTimeout(() => setPulses((ps) => ps.filter((p) => p.id !== id)), 650);
+  }, []);
+
+  useRunEventsSocket(graph.id, (msg) => {
+    if (msg.nodeId) {
+      if (msg.type === "hop_dispatched") setNodeStatus(msg.nodeId, "node-running");
+      else if (msg.type === "hop_succeeded") setNodeStatus(msg.nodeId, "node-succeeded", 2000);
+      else if (msg.type === "hop_failed") setNodeStatus(msg.nodeId, "node-failed", 4000);
+    }
+    if (msg.type === "hop_succeeded" && msg.resolvedEdgeId) {
+      addPulse(msg.resolvedEdgeId);
+    }
+  });
+
+  const edgesWithPulses = useMemo(
+    () =>
+      edges.map((e) => ({
+        ...e,
+        data: { pulses: pulses.filter((p) => p.edgeId === e.id) },
+      })),
+    [edges, pulses],
+  );
 
   const onReconnect = useCallback(
     (oldEdge: Edge, newConnection: Connection) => {
@@ -176,16 +239,52 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
     }
   }
 
+  /** Lazy-loads the cross-graph agent roster the first time "Existing agent" is selected. */
+  function selectAddMode(mode: "quick" | "manual" | "existing") {
+    setAddMode(mode);
+    if (mode === "existing" && existingAgents === null) {
+      listAllAgents()
+        .then(setExistingAgents)
+        .catch((err) => {
+          console.error("Failed to load agents:", err);
+          setExistingAgents([]);
+        });
+    }
+  }
+
+  /** Copies an already-configured agent from another graph in, via POST .../nodes/from-existing. */
+  async function addExisting() {
+    if (!existingAgentId) return;
+    setExistingBusy(true);
+    try {
+      const position = connectFrom ? positionBelow(connectFrom) : { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 };
+      const node = await createNodeFromExisting(graph.id, { sourceNodeId: existingAgentId, position });
+      appendNode(node);
+      await connectIfRequested(node);
+      setExistingAgentId("");
+      setShowAddAgent(false);
+    } catch (err) {
+      console.error("Add existing agent failed:", err);
+      window.alert(err instanceof Error ? err.message : "Failed to add existing agent");
+    } finally {
+      setExistingBusy(false);
+    }
+  }
+
   async function setEntry(nodeId: string) {
     const updated = await updateGraph(graph.id, { entryNodeId: nodeId });
     setGraph((g) => ({ ...g, entryNodeId: updated.entryNodeId }));
   }
 
+  const [lastRunId, setLastRunId] = useState<string | null>(null);
+  const [openAgentPanel, setOpenAgentPanel] = useState<{ nodeId: string; nodeName: string } | null>(null);
+
+  /** Stays on the canvas to watch the live pulse instead of navigating away — the whole point of the animation is seeing it happen here. */
   async function startRun() {
     const input = window.prompt("Run input:");
     if (!input) return;
     const run = await createRun(graph.id, input);
-    window.location.href = `/runs/${run.id}`;
+    setLastRunId(run.id);
   }
 
   async function saveAsTemplate() {
@@ -225,16 +324,20 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
         </button>
         <button onClick={saveAsTemplate}>Save as template</button>
         <a href={`/runs?graphId=${graph.id}`}>View runs</a>
+        {lastRunId && <a href={`/runs/${lastRunId}`}>Run started — view full trail →</a>}
       </div>
 
       {showAddAgent && (
         <div style={{ padding: 8, borderBottom: "1px solid var(--border)" }}>
           <div style={{ display: "flex", gap: 12, marginBottom: 8, alignItems: "center" }}>
             <label>
-              <input type="radio" checked={addMode === "quick"} onChange={() => setAddMode("quick")} /> Describe it
+              <input type="radio" checked={addMode === "quick"} onChange={() => selectAddMode("quick")} /> Describe it
             </label>
             <label>
-              <input type="radio" checked={addMode === "manual"} onChange={() => setAddMode("manual")} /> Manual
+              <input type="radio" checked={addMode === "manual"} onChange={() => selectAddMode("manual")} /> Manual
+            </label>
+            <label>
+              <input type="radio" checked={addMode === "existing"} onChange={() => selectAddMode("existing")} /> Existing agent
             </label>
             <label>
               Connects from:
@@ -303,37 +406,71 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
               <button onClick={addAgent}>Add</button>
             </div>
           )}
+
+          {addMode === "existing" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <select value={existingAgentId} onChange={(e) => setExistingAgentId(e.target.value)} style={{ flex: 1, minWidth: 260 }}>
+                  <option value="">{existingAgents === null ? "Loading…" : "Select an agent…"}</option>
+                  {groupByGraph(existingAgents ?? []).map(([graphName, agents]) => (
+                    <optgroup key={graphName} label={graphName}>
+                      {agents.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <button onClick={addExisting} disabled={!existingAgentId || existingBusy}>
+                  {existingBusy ? "Adding…" : "Add"}
+                </button>
+              </div>
+              {existingAgents?.length === 0 && (
+                <p style={{ color: "var(--text-faint)", margin: 0 }}>No other agents found — describe one or add it manually instead.</p>
+              )}
+              {(() => {
+                const selected = existingAgents?.find((a) => a.id === existingAgentId);
+                if (!selected?.fileAccessRoot) return null;
+                return (
+                  <p style={{ color: "var(--text-faint)", margin: 0, fontSize: 13 }}>
+                    This agent has file access to <code>{selected.fileAccessRoot}</code> — that access will be copied to the new agent too.
+                  </p>
+                );
+              })()}
+            </div>
+          )}
         </div>
       )}
 
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1, position: "relative" }}>
         <ReactFlow
           nodes={nodes}
-          edges={edges}
+          edges={edgesWithPulses}
+          edgeTypes={EDGE_TYPES}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onReconnect={onReconnect}
           onConnect={onConnect}
+          onNodeClick={(_, node) => {
+            const agentNode = graph.nodes.find((n) => n.id === node.id);
+            if (agentNode) setOpenAgentPanel({ nodeId: agentNode.id, nodeName: agentNode.name });
+          }}
           colorMode={theme}
           fitView
         >
           <Background />
           <Controls />
         </ReactFlow>
+        {openAgentPanel && (
+          <AgentConversationPanel
+            graphId={graph.id}
+            nodeId={openAgentPanel.nodeId}
+            nodeName={openAgentPanel.nodeName}
+            onClose={() => setOpenAgentPanel(null)}
+          />
+        )}
       </div>
     </div>
   );
-}
-
-function statusClass(eventType: string): string {
-  switch (eventType) {
-    case "hop_dispatched":
-      return "node-running";
-    case "hop_succeeded":
-      return "node-succeeded";
-    case "hop_failed":
-      return "node-failed";
-    default:
-      return "";
-  }
 }

@@ -50,6 +50,21 @@ export default function DashboardPage() {
       .catch((err) => setError(err.message));
   }, [user]);
 
+  // The roster has no websocket (that's reserved for live run events within
+  // one already-open graph, see useRunEventsSocket) — a graph created or
+  // renamed some other way (another tab, a script, another device) would
+  // otherwise only show up after a manual reload. Cheap enough to just poll;
+  // failures are silent since a transient miss shouldn't flash an error
+  // banner every few seconds.
+  useEffect(() => {
+    if (!user) return;
+    const interval = setInterval(() => {
+      refreshGraphs().catch(() => {});
+    }, 5000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
   async function createBot() {
     if (!description.trim()) return;
     setCreating(true);

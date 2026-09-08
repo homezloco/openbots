@@ -35,7 +35,12 @@ const createNodeBody = z.object({
   tools: z.array(z.string()).optional(),
   fileAccessRoot: fileAccessRootSchema.optional(),
   fallbackChain: z.array(FallbackTarget).optional(),
-  consensusGroup: ConsensusGroup.optional(),
+  // .nullable() in addition to .optional(): PATCH needs a way to explicitly
+  // CLEAR an existing consensusGroup (e.g. converting a hybrid node back to
+  // plain auto routing), not just leave it unchanged (omitted) or replace
+  // it with a new one. Harmless on create, where null and omitted already
+  // behave identically.
+  consensusGroup: ConsensusGroup.nullable().optional(),
   dispatchTargets: z.array(z.string().uuid()).optional(),
   position: z.object({ x: z.number(), y: z.number() }),
 });

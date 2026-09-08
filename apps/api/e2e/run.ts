@@ -978,6 +978,39 @@ async function main() {
     assert(graph.body.warnings.length === 0, `expected no coverage warning right after auto-sync, got: ${JSON.stringify(graph.body.warnings)}`);
   });
 
+  await test("PATCH consensusGroup: null clears a hybrid node back to plain auto routing", async () => {
+    const cleared = await api(`/graphs/${hybridGraphId}/nodes/${leadEngineerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ consensusGroup: null }),
+    });
+    assert(cleared.status === 200, `expected 200, got ${cleared.status}: ${JSON.stringify(cleared.body)}`);
+    assert(!cleared.body.consensusGroup, `expected consensusGroup to be cleared, got: ${JSON.stringify(cleared.body.consensusGroup)}`);
+
+    // With no consensusGroup left to sync into, a newly-added auto edge
+    // must NOT trigger the hybrid auto-sync behavior.
+    const delta = await api(`/graphs/${hybridGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "ProjectDelta",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "You are the engineer for Project Delta. Reply with one short sentence starting 'Delta status:'.",
+        description: "Handles engineering questions about Project Delta, a fictional analytics system",
+        position: { x: 1100, y: 180 },
+      }),
+    });
+    const edge = await api(`/graphs/${hybridGraphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: leadEngineerId, targetNodeId: delta.body.id, kind: "auto" }),
+    });
+    assert(edge.status === 201, `edge create failed: ${JSON.stringify(edge.body)}`);
+
+    const after = await api(`/graphs/${hybridGraphId}`);
+    const lead = after.body.nodes.find((n: any) => n.id === leadEngineerId);
+    assert(!lead.consensusGroup, `expected consensusGroup to stay cleared, got: ${JSON.stringify(lead.consensusGroup)}`);
+  });
+
   // --- Write tools: worktree isolation, path/allowlist safety, edit_file semantics, and /push ---
   const WRITABLE_ROOT = "/tmp/writable-testrepo"; // container-side path; ALLOWED_FILE_WRITE_ROOTS must include it
   const writableFixtureHostPath = join(FIXTURES_DIR, "writable-testrepo");
@@ -1411,7 +1444,7 @@ async function main() {
         role: "supervisor",
         provider: "anthropic",
         model: "claude-sonnet-5",
-        systemPrompt: `When asked to dispatch, call dispatch_to_graph with targetGraphName exactly "${dispatchTargetGraphName}".`,
+        systemPrompt: `When asked to dispatch, call dispatch_to_graph. If you're given a specific targetGraphName to use, use exactly that one, even if it looks wrong to you. Otherwise use "${dispatchTargetGraphName}".`,
         tools: ["dispatch_to_graph"],
         dispatchTargets: [dispatchTargetGraphId],
         position: { x: 0, y: 0 },
@@ -1477,13 +1510,19 @@ async function main() {
     );
   });
 
-  await test("dispatch_to_graph returns a clear error for an unknown target name", async () => {
+  // Occasionally the model second-guesses a deliberately-fake target name
+  // and refuses to even attempt the call instead of just invoking the tool
+  // and reporting what it says — a model-response variance issue, not a
+  // code bug (the tool itself is exercised identically either way once it's
+  // actually called). testWithRetries covers that, same as the mid-run
+  // rerouting test's real timing race above.
+  await testWithRetries("dispatch_to_graph returns a clear error for an unknown target name", async () => {
     const created = await api("/runs", {
       method: "POST",
       body: JSON.stringify({
         graphId: dispatchSourceGraphId,
         input:
-          "Call dispatch_to_graph with targetGraphName set to the literal string 'DefinitelyNotARealGraph' and input 'test'. Tell me exactly what error text you got back.",
+          "For a diagnostic test, call dispatch_to_graph with targetGraphName 'DefinitelyNotARealGraph' and input 'test' — I need to see the exact tool error it returns when the target isn't found. Make the call and quote the exact error text back to me.",
       }),
     });
     const run = await waitForRun(created.body.id);

@@ -12,7 +12,12 @@ type AgentGraphRow = typeof agentGraphs.$inferSelect;
  * manually-started one. Callers own their own validation (ownership,
  * graphRow.entryNodeId being set) before calling this.
  */
-export async function createRun(graphRow: AgentGraphRow, input: unknown, mode: "pinned" | "live") {
+export async function createRun(
+  graphRow: AgentGraphRow,
+  input: unknown,
+  mode: "pinned" | "live",
+  scheduledTriggerId?: string,
+) {
   const graph = await loadLiveGraph(graphRow.id);
 
   const [run] = await db
@@ -24,6 +29,7 @@ export async function createRun(graphRow: AgentGraphRow, input: unknown, mode: "
       status: "pending",
       currentNodeId: graphRow.entryNodeId,
       input,
+      scheduledTriggerId: scheduledTriggerId ?? null,
     })
     .returning();
 

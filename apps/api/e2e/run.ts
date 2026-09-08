@@ -1340,7 +1340,25 @@ async function main() {
     assert(run.status === "completed", `scheduled run did not complete: ${JSON.stringify(run.events)}`);
     assert(String(run.output).toLowerCase().includes("tick"), `unexpected scheduled run output: ${run.output}`);
 
+    const history = await api(`/graphs/${scheduleGraphId}/schedules/${scheduleId}/runs`);
+    assert(history.status === 200, `schedule run history failed: ${JSON.stringify(history.body)}`);
+    assert(
+      history.body.some((r: any) => r.id === firedRunId && r.status === "completed"),
+      `expected the fired run in the schedule's own history, got: ${JSON.stringify(history.body)}`,
+    );
+
     await api(`/graphs/${scheduleGraphId}/schedules/${scheduleId}`, { method: "DELETE" });
+  });
+
+  await test("agent commits: GET /graphs/:graphId/commits reflects push status and node name", async () => {
+    const list = await api(`/graphs/${writeGraphId}/commits`);
+    assert(list.status === 200, `expected 200, got ${list.status}: ${JSON.stringify(list.body)}`);
+    assert(list.body.length > 0, "expected at least one commit from the earlier write-tool tests");
+    assert(
+      list.body.some((c: any) => c.pushedAt !== null),
+      `expected at least one commit to already be marked pushed, got: ${JSON.stringify(list.body)}`,
+    );
+    assert(list.body.every((c: any) => c.nodeName === "Writer"), `expected every commit's nodeName to resolve to "Writer", got: ${JSON.stringify(list.body)}`);
   });
 
   // --- Summary ---

@@ -4,7 +4,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { RunMode } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
-import { scheduledTriggers } from "../db/schema.js";
+import { runs, scheduledTriggers } from "../db/schema.js";
 import { requireAuth } from "../auth/middleware.js";
 import { requireGraphOwner } from "./graphs.js";
 import { registerSchedule, unregisterSchedule } from "../queue/scheduleQueue.js";
@@ -150,5 +150,33 @@ export async function scheduledTriggerRoutes(app: FastifyInstance) {
 
     await unregisterSchedule(id);
     return reply.code(204).send();
+  });
+
+  /**
+   * A schedule's own past firings — every run it caused, not just the
+   * most recent (scheduledTriggers.lastRunId). Set on runs.scheduledTriggerId
+   * by orchestrator/createRun.ts when the run originates from a firing.
+   */
+  app.get("/graphs/:graphId/schedules/:id/runs", { preHandler: requireAuth }, async (req, reply) => {
+    const { graphId, id } = req.params as { graphId: string; id: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
+
+    const existing = await db.query.scheduledTriggers.findFirst({
+      where: and(eq(scheduledTriggers.id, id), eq(scheduledTriggers.graphId, graphId)),
+    });
+    if (!existing) return reply.code(404).send({ error: "Schedule not found" });
+
+    const rows = await db
+      .select({ id: runs.id, status: runs.status, createdAt: runs.createdAt, completedAt: runs.completedAt })
+      .from(runs)
+      .where(and(eq(runs.scheduledTriggerId, id), eq(runs.graphId, graphId)))
+      .orderBy(desc(runs.createdAt));
+
+    return rows.map((r) => ({
+      id: r.id,
+      status: r.status,
+      createdAt: r.createdAt.toISOString(),
+      completedAt: r.completedAt?.toISOString() ?? null,
+    }));
   });
 }

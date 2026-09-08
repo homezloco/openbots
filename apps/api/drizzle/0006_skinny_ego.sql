@@ -1,0 +1,2 @@
+ALTER TABLE "runs" ADD COLUMN "scheduled_trigger_id" uuid;--> statement-breakpoint
+ALTER TABLE "runs" ADD CONSTRAINT "runs_scheduled_trigger_id_scheduled_triggers_id_fk" FOREIGN KEY ("scheduled_trigger_id") REFERENCES "public"."scheduled_triggers"("id") ON DELETE set null ON UPDATE no action;

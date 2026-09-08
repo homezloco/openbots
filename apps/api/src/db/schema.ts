@@ -98,6 +98,11 @@ export const runs = pgTable("runs", {
   graphSnapshot: jsonb("graph_snapshot"), // set iff mode === "pinned"
   status: text("status").notNull().default("pending"),
   currentNodeId: uuid("current_node_id"),
+  // Set iff this run was created by a scheduled trigger firing (orchestrator/
+  // scheduledTrigger.ts) rather than a manual POST /runs call. set null on
+  // trigger delete so the run's own history survives the schedule that
+  // created it being removed later.
+  scheduledTriggerId: uuid("scheduled_trigger_id").references(() => scheduledTriggers.id, { onDelete: "set null" }),
   input: jsonb("input"),
   output: jsonb("output"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

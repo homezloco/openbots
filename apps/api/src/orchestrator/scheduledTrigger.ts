@@ -21,7 +21,7 @@ export async function runScheduledTrigger(triggerId: string): Promise<void> {
     return;
   }
 
-  const run = await createRun(graphRow, trigger.input, trigger.mode as "pinned" | "live");
+  const run = await createRun(graphRow, trigger.input, trigger.mode as "pinned" | "live", trigger.id);
 
   await db.update(scheduledTriggers).set({ lastRunId: run.id, lastTriggeredAt: new Date() }).where(eq(scheduledTriggers.id, triggerId));
 }

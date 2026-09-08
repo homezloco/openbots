@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createSchedule, deleteSchedule, listSchedules, updateSchedule, type ScheduledTrigger } from "../lib/api";
+import { createSchedule, deleteSchedule, listSchedules, listScheduleRuns, updateSchedule, type ScheduledTrigger, type ScheduleRunSummary } from "../lib/api";
 
 /**
  * Slide-over for a graph's recurring cron schedules (apps/api/src/routes/
@@ -129,42 +129,83 @@ export function SchedulesPanel({ graphId, onClose }: { graphId: string; onClose:
         {schedules === null && <p style={{ color: "var(--text-faint)" }}>Loading…</p>}
         {schedules?.length === 0 && <p style={{ color: "var(--text-faint)" }}>No schedules yet.</p>}
         {schedules?.map((s) => (
-          <div key={s.id} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 12, marginBottom: 8 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <strong>{s.name}</strong>
-                <p style={{ margin: "4px 0 0", fontFamily: "monospace", fontSize: 13, color: "var(--text-muted)" }}>{s.cronExpression}</p>
-              </div>
-              <span style={{ fontSize: 12, color: s.enabled ? "var(--status-succeeded)" : "var(--text-faint)" }}>
-                {s.enabled ? "Enabled" : "Disabled"}
-              </span>
-            </div>
-            <p style={{ margin: "6px 0", fontSize: 13, color: "var(--text-muted)" }}>
-              {s.lastTriggeredAt ? (
-                <>
-                  Last ran {new Date(s.lastTriggeredAt).toLocaleString()}
-                  {s.lastRunId && (
-                    <>
-                      {" — "}
-                      <a href={`/runs/${s.lastRunId}`}>view run</a>
-                    </>
-                  )}
-                </>
-              ) : (
-                "Never triggered yet"
-              )}
-            </p>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => toggleEnabled(s)} disabled={busy}>
-                {s.enabled ? "Disable" : "Enable"}
-              </button>
-              <button onClick={() => remove(s.id)} disabled={busy} style={{ background: "transparent", color: "var(--danger)", border: "1px solid var(--border)" }}>
-                Delete
-              </button>
-            </div>
-          </div>
+          <ScheduleCard key={s.id} graphId={graphId} schedule={s} busy={busy} onToggle={() => toggleEnabled(s)} onDelete={() => remove(s.id)} />
         ))}
       </div>
+    </div>
+  );
+}
+
+function ScheduleCard({
+  graphId,
+  schedule: s,
+  busy,
+  onToggle,
+  onDelete,
+}: {
+  graphId: string;
+  schedule: ScheduledTrigger;
+  busy: boolean;
+  onToggle: () => void;
+  onDelete: () => void;
+}) {
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState<ScheduleRunSummary[] | null>(null);
+
+  function toggleHistory() {
+    setShowHistory((v) => !v);
+    if (!history) listScheduleRuns(graphId, s.id).then(setHistory).catch(() => setHistory([]));
+  }
+
+  return (
+    <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 12, marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <strong>{s.name}</strong>
+          <p style={{ margin: "4px 0 0", fontFamily: "monospace", fontSize: 13, color: "var(--text-muted)" }}>{s.cronExpression}</p>
+        </div>
+        <span style={{ fontSize: 12, color: s.enabled ? "var(--status-succeeded)" : "var(--text-faint)" }}>
+          {s.enabled ? "Enabled" : "Disabled"}
+        </span>
+      </div>
+      <p style={{ margin: "6px 0", fontSize: 13, color: "var(--text-muted)" }}>
+        {s.lastTriggeredAt ? (
+          <>
+            Last ran {new Date(s.lastTriggeredAt).toLocaleString()}
+            {s.lastRunId && (
+              <>
+                {" — "}
+                <a href={`/runs/${s.lastRunId}`}>view run</a>
+              </>
+            )}
+          </>
+        ) : (
+          "Never triggered yet"
+        )}
+      </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={onToggle} disabled={busy}>
+          {s.enabled ? "Disable" : "Enable"}
+        </button>
+        <button onClick={toggleHistory} disabled={busy}>
+          {showHistory ? "Hide history" : "View history"}
+        </button>
+        <button onClick={onDelete} disabled={busy} style={{ background: "transparent", color: "var(--danger)", border: "1px solid var(--border)" }}>
+          Delete
+        </button>
+      </div>
+      {showHistory && (
+        <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+          {history === null && <p style={{ color: "var(--text-faint)", fontSize: 13 }}>Loading…</p>}
+          {history?.length === 0 && <p style={{ color: "var(--text-faint)", fontSize: 13 }}>No firings yet.</p>}
+          {history?.map((r) => (
+            <p key={r.id} style={{ margin: "4px 0", fontSize: 13 }}>
+              <a href={`/runs/${r.id}`}>{new Date(r.createdAt).toLocaleString()}</a>{" "}
+              <span style={{ color: "var(--text-muted)" }}>({r.status})</span>
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -193,6 +193,16 @@ export interface ScheduledTrigger {
 
 export const listSchedules = (graphId: string) => request<ScheduledTrigger[]>(`/graphs/${graphId}/schedules`);
 
+export interface ScheduleRunSummary {
+  id: string;
+  status: string;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export const listScheduleRuns = (graphId: string, scheduleId: string) =>
+  request<ScheduleRunSummary[]>(`/graphs/${graphId}/schedules/${scheduleId}/runs`);
+
 export const createSchedule = (
   graphId: string,
   body: { name: string; input: unknown; cronExpression: string; mode?: "pinned" | "live"; enabled?: boolean },
@@ -203,6 +213,21 @@ export const updateSchedule = (graphId: string, id: string, body: Partial<Pick<S
 
 export const deleteSchedule = (graphId: string, id: string) =>
   request<void>(`/graphs/${graphId}/schedules/${id}`, { method: "DELETE" });
+
+// --- Agent commits (writes made via write_file/edit_file, pushed with /push) ---
+
+export interface AgentCommitSummary {
+  id: string;
+  runId: string;
+  nodeId: string;
+  nodeName: string;
+  branch: string;
+  commitSha: string;
+  pushedAt: string | null;
+  createdAt: string;
+}
+
+export const listCommits = (graphId: string) => request<AgentCommitSummary[]>(`/graphs/${graphId}/commits`);
 
 // --- Runs ---
 

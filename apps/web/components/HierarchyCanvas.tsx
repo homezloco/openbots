@@ -30,6 +30,7 @@ import {
 import { useRunEventsSocket } from "../lib/useRunEventsSocket";
 import { AgentConversationPanel } from "./AgentConversationPanel";
 import { SchedulesPanel } from "./SchedulesPanel";
+import { CommitsPanel } from "./CommitsPanel";
 import { SignalEdge, type EdgePulse } from "./SignalEdge";
 import { useTheme } from "./ThemeProvider";
 
@@ -335,6 +336,7 @@ export function HierarchyCanvas({
   const [lastRunId, setLastRunId] = useState<string | null>(null);
   const [openAgentPanel, setOpenAgentPanel] = useState<string | null>(null);
   const [showSchedules, setShowSchedules] = useState(false);
+  const [showCommits, setShowCommits] = useState(false);
   const [runInputOpen, setRunInputOpen] = useState(false);
   const [runInput, setRunInput] = useState("");
   const [templateInputOpen, setTemplateInputOpen] = useState(false);
@@ -454,10 +456,20 @@ export function HierarchyCanvas({
         <button
           onClick={() => {
             setOpenAgentPanel(null);
+            setShowCommits(false);
             setShowSchedules((s) => !s);
           }}
         >
           ⏰ Schedules
+        </button>
+        <button
+          onClick={() => {
+            setOpenAgentPanel(null);
+            setShowSchedules(false);
+            setShowCommits((s) => !s);
+          }}
+        >
+          📦 Commits
         </button>
         <a href={`/runs?graphId=${graph.id}`}>View runs</a>
         {showStartRunButton && lastRunId && <a href={`/runs/${lastRunId}`}>Run started — view full trail →</a>}
@@ -626,6 +638,7 @@ export function HierarchyCanvas({
           onConnect={onConnect}
           onNodeClick={(_, node) => {
             setShowSchedules(false);
+            setShowCommits(false);
             setOpenAgentPanel(node.id);
           }}
           colorMode={theme}
@@ -644,6 +657,7 @@ export function HierarchyCanvas({
           />
         )}
         {showSchedules && <SchedulesPanel graphId={graph.id} onClose={() => setShowSchedules(false)} />}
+        {showCommits && <CommitsPanel graphId={graph.id} onClose={() => setShowCommits(false)} />}
       </div>
     </div>
   );

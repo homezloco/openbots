@@ -6,7 +6,7 @@ no product in the "AI bot" space currently ships one (see Competitive
 notes below).
 
 **Status as of 2026-09-08: all three original phases are built and
-e2e-tested (41/41 passing, `apps/api/e2e/run.ts`), two security reviews
+e2e-tested (42/42 passing, `apps/api/e2e/run.ts`), two security reviews
 found and fixed real vulnerabilities, dark mode shipped, and the product
 grew past the original scope into a working multi-agent "engineering
 team" built from the user's own real projects — now with live run
@@ -216,14 +216,34 @@ found" skip) with no way to stop it short of a Redis flush.
 slide-over (`SchedulesPanel.tsx`, same visual pattern as
 `AgentConversationPanel`) to create/list/enable-disable/delete a graph's
 schedules; a fired run shows up in the graph's normal run history like
-any other, so no separate schedule-run viewer was needed.
+any other.
 
 e2e-verified including a **real firing**, not just the CRUD contract: a
 6-field (seconds-first) cron pattern (`*/5 * * * * *` — cron-parser,
 which BullMQ uses internally, accepts an optional leading seconds field)
 lets the test observe an actual BullMQ-triggered run complete within
 ~8 seconds, immediately disabling the trigger once observed to bound
-the real Anthropic API calls it can rack up. 38/38 passing.
+the real Anthropic API calls it can rack up.
+
+**Follow-on (2026-09-08): per-schedule run history + unpushed-commit
+visibility.** Two small UX gaps closed together:
+- `runs.scheduledTriggerId` (nullable, `onDelete: set null` so a run's
+  history survives the schedule that created it being deleted later) is
+  now set by `createRun()` when a run originates from a firing. A new
+  `GET /graphs/:graphId/schedules/:id/runs` route plus an inline
+  expandable "View history" section per schedule card in
+  `SchedulesPanel.tsx` shows every past firing, not just the single
+  `lastRunId`.
+- A new `GET /graphs/:graphId/commits` route (`routes/commits.ts`)
+  surfaces `agentCommits` — every write a node has made and its push
+  status — so the user doesn't have to remember to type `/push`
+  themselves. A "📦 Commits" toolbar button opens a slide-over
+  (`CommitsPanel.tsx`) listing each commit's node, branch, pushed/
+  unpushed state, and a one-click "Push this branch" button that fires
+  `/push <branch>` through the same chat-command path as typing it
+  manually — no new push logic, just a UI shortcut to the existing one.
+
+Both e2e-verified (42/42 passing) and confirmed live in a browser.
 
 ## PC Health Monitor — capability boundary (deliberate)
 
@@ -251,8 +271,6 @@ scheduler; not specific to this agent, works for any graph).
 3. The tool registry is a small built-in set, not dynamic npm-package loading — deliberate (arbitrary plugin loading would let anyone who can edit a graph run arbitrary code in the API process).
 4. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
 5. `/push` and `/pr` only support a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes. See "Agent file-write and confirmed push" above.
-6. Scheduled triggers have no UI history of their own past firings beyond the single `lastRunId`/`lastTriggeredAt` — every firing's actual run is fully visible in the graph's normal run history, just not pre-filtered to "runs this schedule caused."
-7. No UI visibility into pending/unpushed commits — you have to remember to type `/push`; nothing in the canvas or chat currently surfaces "there are N unpushed commits on this graph."
 
 ## Competitive notes (xAI Grok Bot / Grok Build, researched 2026-09)
 

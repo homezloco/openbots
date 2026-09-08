@@ -1,11 +1,12 @@
-import { readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import type { Dirent } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { tool, type Tool } from "ai";
 import { z } from "zod";
 
 export type ToolName = "current_time" | "calculator" | "pc_telemetry";
 export const FILE_TOOL_NAMES = ["read_file", "list_directory"] as const;
+export const WRITE_TOOL_NAMES = ["write_file", "edit_file"] as const;
 
 /**
  * v1: a small built-in registry, not dynamic npm-package loading. Loading
@@ -93,20 +94,45 @@ const registry: Record<ToolName, Tool> = {
 
 /**
  * Resolves a relative path against `root` and rejects anything that
- * escapes it (via "..", a symlink-free absolute-looking segment, etc.) —
- * the actual security boundary for the file tools. `path.relative` gives
- * a string starting with ".." exactly when the target falls outside root.
+ * escapes it lexically (via "..", an absolute-looking segment, etc.).
+ * That alone is NOT sufficient: a symlink inside `root` whose target
+ * points outside it would let the OS follow it to wherever it points
+ * despite the string-level check passing — always a latent gap for
+ * read_file (information disclosure), but a much higher-severity one now
+ * that write tools exist (arbitrary write onto a live project). So after
+ * the lexical check, walk up from the target to the nearest ancestor that
+ * actually exists (the target itself for a read; a not-yet-created
+ * file's parent-or-higher for a write) and verify ITS real path
+ * (symlinks resolved) is still within root's real path.
  */
-function resolveWithinRoot(root: string, relativePath: string): string {
+async function resolveWithinRoot(root: string, relativePath: string): Promise<string> {
   const target = resolve(root, relativePath);
   const rel = relative(root, target);
   if (rel.startsWith("..") || isAbsolute(rel)) {
     throw new Error(`Path "${relativePath}" escapes the allowed root`);
   }
-  return target;
+
+  const realRoot = await realpath(root);
+  let probe = target;
+  for (;;) {
+    try {
+      const real = await realpath(probe);
+      const realRel = relative(realRoot, real);
+      if (realRel.startsWith("..") || isAbsolute(realRel)) {
+        throw new Error(`Path "${relativePath}" escapes the allowed root via a symlink`);
+      }
+      return target;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      const parent = dirname(probe);
+      if (parent === probe) throw new Error(`Path "${relativePath}" escapes the allowed root`);
+      probe = parent;
+    }
+  }
 }
 
 const MAX_FILE_READ_BYTES = 50_000;
+const MAX_FILE_WRITE_BYTES = 200_000;
 
 /** Built fresh per node, bound to that node's fileAccessRoot — never shared across nodes with different roots. */
 function createFileTools(root: string): Record<(typeof FILE_TOOL_NAMES)[number], Tool> {
@@ -115,7 +141,7 @@ function createFileTools(root: string): Record<(typeof FILE_TOOL_NAMES)[number],
       description: `List files and directories at a path relative to ${root}. Cannot see outside this root.`,
       inputSchema: z.object({ path: z.string().default(".") }),
       execute: async ({ path }) => {
-        const target = resolveWithinRoot(root, path);
+        const target = await resolveWithinRoot(root, path);
         const entries = await readdir(target, { withFileTypes: true });
         return entries.map((e: Dirent) => ({ name: e.name, type: e.isDirectory() ? "directory" : "file" }));
       },
@@ -124,7 +150,7 @@ function createFileTools(root: string): Record<(typeof FILE_TOOL_NAMES)[number],
       description: `Read a text file's contents by path relative to ${root}. Cannot see outside this root. Read-only.`,
       inputSchema: z.object({ path: z.string() }),
       execute: async ({ path }) => {
-        const target = resolveWithinRoot(root, path);
+        const target = await resolveWithinRoot(root, path);
         const info = await stat(target);
         if (!info.isFile()) throw new Error(`${path} is not a file`);
         const content = await readFile(target, "utf8");
@@ -135,15 +161,96 @@ function createFileTools(root: string): Record<(typeof FILE_TOOL_NAMES)[number],
 }
 
 /**
+ * Write tools operate against an isolated git worktree (see
+ * gitWorktree.ts), never the repo's main checkout — `root` here is
+ * already that worktree's path by the time this is called, substituted
+ * in by the caller (engine.ts), not the node's raw fileAccessRoot.
+ * `touchedFiles` is a shared, mutable set the caller inspects after the
+ * model call finishes to decide whether/what to commit — one commit per
+ * hop, not one per tool call (see docs/orchestration.md).
+ */
+function createWriteTools(root: string, touchedFiles: Set<string>): Record<(typeof WRITE_TOOL_NAMES)[number], Tool> {
+  return {
+    write_file: tool({
+      description: `Create or overwrite a file by path relative to ${root}. Cannot escape this root. Creates parent directories as needed.`,
+      inputSchema: z.object({ path: z.string(), content: z.string() }),
+      execute: async ({ path, content }) => {
+        if (Buffer.byteLength(content, "utf8") > MAX_FILE_WRITE_BYTES) {
+          throw new Error(`Content exceeds the ${MAX_FILE_WRITE_BYTES}-byte write limit`);
+        }
+        const target = await resolveWithinRoot(root, path);
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, content, "utf8");
+        touchedFiles.add(target);
+        return { written: true, path };
+      },
+    }),
+    edit_file: tool({
+      description: `Edit a file by path relative to ${root}, replacing an exact, unique occurrence of old_string with new_string. old_string must match exactly once — the edit is rejected (not guessed) if it matches zero or multiple times. Cannot escape this root.`,
+      inputSchema: z.object({ path: z.string(), old_string: z.string(), new_string: z.string() }),
+      execute: async ({ path, old_string, new_string }) => {
+        const target = await resolveWithinRoot(root, path);
+        const info = await stat(target);
+        if (!info.isFile()) throw new Error(`${path} is not a file`);
+        // The full, untruncated file — never gated by MAX_FILE_READ_BYTES.
+        // A match that's unique in a truncated prefix but not in the
+        // whole file must still be treated as ambiguous.
+        const content = await readFile(target, "utf8");
+        const occurrences = content.split(old_string).length - 1;
+        if (occurrences === 0) throw new Error(`old_string not found in ${path}`);
+        if (occurrences > 1) throw new Error(`old_string matches ${occurrences} times in ${path} — must match exactly once`);
+        const updated = content.replace(old_string, new_string);
+        if (Buffer.byteLength(updated, "utf8") > MAX_FILE_WRITE_BYTES) {
+          throw new Error(`Resulting content exceeds the ${MAX_FILE_WRITE_BYTES}-byte write limit`);
+        }
+        await writeFile(target, updated, "utf8");
+        touchedFiles.add(target);
+        return { edited: true, path };
+      },
+    }),
+  };
+}
+
+/**
+ * Runtime backstop for write access, independent of (and in addition to)
+ * whatever save-time validation the API layer does. Mirrors the exact
+ * allowlist logic in apps/api/src/validation/fileAccessRoot.ts — kept as
+ * a small duplicate here rather than an import, since packages/providers
+ * must not depend on apps/api (wrong direction). Unlike the read
+ * allowlist (checked only once, at node-save time), this is re-checked
+ * every time tools are resolved: a node created while a path was
+ * write-allowlisted must not keep silently writing to it forever after
+ * an operator later tightens ALLOWED_FILE_WRITE_ROOTS.
+ */
+export function isWithinAllowedWriteRoot(candidate: string): boolean {
+  const raw = process.env.ALLOWED_FILE_WRITE_ROOTS;
+  if (!raw) return false;
+  const allowedRoots = raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const resolvedCandidate = resolve(candidate);
+  return allowedRoots.some((root) => {
+    const resolvedRoot = resolve(root);
+    const rel = relative(resolvedRoot, resolvedCandidate);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  });
+}
+
+/**
  * `fileAccessRoot` must be set on the node AND the tool name must appear in
  * `toolNames` — naming "read_file" in a node's tool list alone grants
  * nothing without a configured root, and configuring a root alone grants
  * nothing without opting into the tool by name. Defense in depth against a
- * node accidentally getting file access from either field alone.
+ * node accidentally getting file access from either field alone. The same
+ * dual-gate applies to `write_file`/`edit_file`, additionally requiring
+ * `writableRoot` (only ever set by the caller once a node has passed the
+ * separate ALLOWED_FILE_WRITE_ROOTS check and had a worktree created —
+ * see engine.ts::callAgent).
  */
 export function resolveTools(
   toolNames: string[],
-  options: { fileAccessRoot?: string } = {},
+  options: { fileAccessRoot?: string; writableRoot?: string; touchedFiles?: Set<string> } = {},
 ): Record<string, Tool> {
   const resolved: Record<string, Tool> = {};
 
@@ -155,6 +262,13 @@ export function resolveTools(
     const fileTools = createFileTools(options.fileAccessRoot);
     for (const name of FILE_TOOL_NAMES) {
       if (toolNames.includes(name)) resolved[name] = fileTools[name];
+    }
+  }
+
+  if (options.writableRoot && options.touchedFiles && isWithinAllowedWriteRoot(options.writableRoot)) {
+    const writeTools = createWriteTools(options.writableRoot, options.touchedFiles);
+    for (const name of WRITE_TOOL_NAMES) {
+      if (toolNames.includes(name)) resolved[name] = writeTools[name];
     }
   }
 
@@ -172,5 +286,13 @@ export function listAvailableTools(): { name: string; description: string; requi
     description: name === "read_file" ? "Read a text file within a configured root directory." : "List entries in a directory within a configured root.",
     requiresFileAccessRoot: true,
   }));
-  return [...staticTools, ...fileTools];
+  const writeTools = WRITE_TOOL_NAMES.map((name) => ({
+    name,
+    description:
+      name === "write_file"
+        ? "Create or overwrite a file within an isolated git worktree of a configured root directory."
+        : "Edit a file within an isolated git worktree by exact, unique string replacement.",
+    requiresFileAccessRoot: true,
+  }));
+  return [...staticTools, ...fileTools, ...writeTools];
 }

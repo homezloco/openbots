@@ -69,6 +69,8 @@ export interface GraphSummary {
   nodeCount: number;
   createdAt: string;
   updatedAt: string;
+  /** Most recent run's createdAt across this graph, or null if it's never been run. Distinct from updatedAt (last structural edit). */
+  lastRunAt: string | null;
 }
 
 /** The bot roster: every graph you own. */
@@ -106,6 +108,9 @@ export interface CreateNodeInput {
 
 export const createNode = (graphId: string, body: CreateNodeInput) =>
   request<AgentNode>(`/graphs/${graphId}/nodes`, { method: "POST", body: JSON.stringify(body) });
+
+export const updateNode = (graphId: string, nodeId: string, body: Partial<CreateNodeInput>) =>
+  request<AgentNode>(`/graphs/${graphId}/nodes/${nodeId}`, { method: "PATCH", body: JSON.stringify(body) });
 
 export const listAllAgents = () => request<(AgentNode & { graphName: string })[]>("/agents");
 
@@ -167,6 +172,15 @@ export interface Run {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  /**
+   * Only present on listRuns() results. `input` is a scratch field the
+   * engine overwrites on every hop transition, so for a multi-hop run it
+   * no longer holds what the user actually asked by the time the run
+   * completes — this is the true original input (from run_events
+   * sequence 0), which is what conversation-memory chaining and the chat
+   * transcript should read instead.
+   */
+  originalInput?: unknown;
 }
 
 export interface RunEventRow {

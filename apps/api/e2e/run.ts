@@ -182,6 +182,26 @@ async function main() {
     assert(run.usageTotal.inputTokens > 0 && run.usageTotal.outputTokens > 0, "usage tracking recorded zero tokens");
   });
 
+  // --- Regression: GET /graphs/:id/runs must recover the TRUE original input on a multi-hop run ---
+  await test("GET /graphs/:id/runs returns the original input, not the mutated final hop's input", async () => {
+    // Reuses the 2-hop run from the test above: by completion, runs.input
+    // has been overwritten with nodeA's output (nodeB's input) — a
+    // conversation-memory chaining bug (useBotChat.buildNextInput) traced
+    // to exactly this: it silently dropped all prior context for any
+    // multi-hop run because it trusted the mutated `input` field.
+    const list = await api(`/graphs/${basicGraphId}/runs`);
+    assert(list.status === 200, `failed to list runs: ${JSON.stringify(list.body)}`);
+    const twoHopRun = list.body.find((r: any) => r.status === "completed" && r.originalInput === "My invoice charged me twice.");
+    assert(
+      twoHopRun,
+      `expected a run with originalInput "My invoice charged me twice.", got: ${JSON.stringify(list.body.map((r: any) => r.originalInput))}`,
+    );
+    assert(
+      twoHopRun.input !== "My invoice charged me twice.",
+      "expected the raw (mutated) input field to differ from originalInput, proving this test actually exercises the bug scenario",
+    );
+  });
+
   // --- Reviewer/tier warning ---
   await test("reviewer tier-mismatch warning fires", async () => {
     const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E reviewer tier" }) });
@@ -775,6 +795,162 @@ async function main() {
 
     // Restore entryNodeId in case any future test relies on it.
     await api(`/graphs/${basicGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: nodeA }) });
+  });
+
+  // --- Hybrid auto/consensus node: single-specialist routing vs. ALL fan-out ---
+  let hybridGraphId = "";
+  let leadEngineerId = "";
+  let projectAlphaId = "";
+  let projectBetaId = "";
+  let hybridAggregatorId = "";
+
+  await test("hybrid node setup: auto edges reused as a consensusGroup", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E hybrid fan-out" }) });
+    hybridGraphId = g.body.id;
+
+    const lead = await api(`/graphs/${hybridGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "LeadEngineer",
+        role: "supervisor",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Route engineering requests to the right project specialist.",
+        description: "Routes engineering requests to project specialists",
+        position: { x: 300, y: 0 },
+      }),
+    });
+    leadEngineerId = lead.body.id;
+
+    const alpha = await api(`/graphs/${hybridGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "ProjectAlpha",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "You are the engineer for Project Alpha. Reply with one short sentence starting 'Alpha status:'.",
+        description: "Handles engineering questions about Project Alpha, a fictional inventory tracking system",
+        position: { x: 0, y: 180 },
+      }),
+    });
+    projectAlphaId = alpha.body.id;
+
+    const beta = await api(`/graphs/${hybridGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "ProjectBeta",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "You are the engineer for Project Beta. Reply with one short sentence starting 'Beta status:'.",
+        description: "Handles engineering questions about Project Beta, a fictional billing and payments system",
+        position: { x: 600, y: 180 },
+      }),
+    });
+    projectBetaId = beta.body.id;
+
+    const aggregator = await api(`/graphs/${hybridGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Aggregator",
+        role: "reviewer",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt:
+          "You receive a JSON array of per-project status reports. Combine them into one summary that explicitly mentions both Alpha and Beta.",
+        position: { x: 300, y: 360 },
+      }),
+    });
+    hybridAggregatorId = aggregator.body.id;
+
+    const edgeAlpha = await api(`/graphs/${hybridGraphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: leadEngineerId, targetNodeId: projectAlphaId, kind: "auto" }),
+    });
+    const edgeBeta = await api(`/graphs/${hybridGraphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: leadEngineerId, targetNodeId: projectBetaId, kind: "auto" }),
+    });
+
+    // consensusGroup.edgeIds reuse the AUTO edges directly, not separate
+    // kind:"consensus" edges — this is what makes LeadEngineer a hybrid
+    // node instead of a pure fan-out source.
+    const patched = await api(`/graphs/${hybridGraphId}/nodes/${leadEngineerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        consensusGroup: { edgeIds: [edgeAlpha.body.id, edgeBeta.body.id], aggregatorNodeId: hybridAggregatorId },
+      }),
+    });
+    assert(patched.status === 200, `failed to set consensusGroup: ${JSON.stringify(patched.body)}`);
+
+    await api(`/graphs/${hybridGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: leadEngineerId }) });
+  });
+
+  await test("hybrid node: naming one specialist routes normally, no fan-out", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: hybridGraphId, input: "What is the status of Project Alpha?" }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(run.events.length === 2, `expected 2 hops (lead + specialist), got ${run.events.length}: ${JSON.stringify(run.events)}`);
+    assert(run.events[1].nodeId === projectAlphaId, `expected routing to ProjectAlpha, got hop to ${run.events[1].nodeId}`);
+    assert(
+      run.events.every((e: any) => !e.fanoutBatchId),
+      "no event should carry a fanoutBatchId for a single-specialist route",
+    );
+  });
+
+  await testWithRetries("hybrid node: signaling ALL fans out to every branch and reaches the aggregator", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: hybridGraphId, input: "I need status updates for all projects." }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(run.events.length === 4, `expected 4 hops (lead, 2 branches, aggregator), got ${run.events.length}: ${JSON.stringify(run.events)}`);
+
+    const branchEvents = run.events.filter((e: any) => e.nodeId === projectAlphaId || e.nodeId === projectBetaId);
+    assert(branchEvents.length === 2, `expected 2 branch events, got ${branchEvents.length}`);
+    assert(
+      branchEvents[0].fanoutBatchId && branchEvents[0].fanoutBatchId === branchEvents[1].fanoutBatchId,
+      "branch events don't share a fanoutBatchId",
+    );
+
+    const aggregatorEvent = run.events.find((e: any) => e.nodeId === hybridAggregatorId);
+    assert(aggregatorEvent, "aggregator never ran");
+    const output = String(run.output).toLowerCase();
+    assert(output.includes("alpha") && output.includes("beta"), `expected the aggregated output to mention both projects, got: ${output.slice(0, 300)}`);
+  });
+
+  await test("hybrid node: a new auto edge is automatically added to the ALL fan-out list", async () => {
+    const gamma = await api(`/graphs/${hybridGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "ProjectGamma",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "You are the engineer for Project Gamma. Reply with one short sentence starting 'Gamma status:'.",
+        description: "Handles engineering questions about Project Gamma, a fictional analytics system",
+        position: { x: 900, y: 180 },
+      }),
+    });
+
+    const newEdge = await api(`/graphs/${hybridGraphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: leadEngineerId, targetNodeId: gamma.body.id, kind: "auto" }),
+    });
+    assert(newEdge.status === 201, `failed to create the new auto edge: ${JSON.stringify(newEdge.body)}`);
+
+    const graph = await api(`/graphs/${hybridGraphId}`);
+    const lead = graph.body.nodes.find((n: any) => n.id === leadEngineerId);
+    assert(
+      lead.consensusGroup?.edgeIds?.includes(newEdge.body.id),
+      `expected the new edge ${newEdge.body.id} to be auto-added to consensusGroup.edgeIds, got: ${JSON.stringify(lead.consensusGroup)}`,
+    );
+    assert(graph.body.warnings.length === 0, `expected no coverage warning right after auto-sync, got: ${JSON.stringify(graph.body.warnings)}`);
   });
 
   // --- Summary ---

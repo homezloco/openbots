@@ -38,6 +38,7 @@ services:
       - "4000:4000"
     volumes:
       - ./apps/api/e2e/fixtures/testrepo:/tmp/testrepo:ro
+      - ./apps/api/e2e/fixtures/writable-testrepo:/tmp/writable-testrepo:rw
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,6 +54,7 @@ services:
       REDIS_URL: redis://redis:6379
     volumes:
       - ./apps/api/e2e/fixtures/testrepo:/tmp/testrepo:ro
+      - ./apps/api/e2e/fixtures/writable-testrepo:/tmp/writable-testrepo:rw
     depends_on:
       postgres:
         condition: service_healthy

@@ -33,7 +33,21 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    if (user) refreshGraphs().catch((err) => setError(err.message));
+    if (!user) return;
+    refreshGraphs()
+      .then((gs) => {
+        // Land on whichever graph you were most recently chatting with,
+        // rather than making you click one every time. lastRunAt (not
+        // updatedAt, which is the last STRUCTURAL edit) is the right
+        // signal; a graph that's never been run falls back to createdAt
+        // so a brand-new user still lands somewhere sensible.
+        setSelectedId((current) => {
+          if (current || gs.length === 0) return current;
+          const activityTime = (g: GraphSummary) => new Date(g.lastRunAt ?? g.createdAt).getTime();
+          return gs.reduce((latest, g) => (activityTime(g) > activityTime(latest) ? g : latest), gs[0]).id;
+        });
+      })
+      .catch((err) => setError(err.message));
   }, [user]);
 
   async function createBot() {
@@ -133,7 +147,10 @@ function BotChat({ graph }: { graph: GraphSummary }) {
         {runs.map((r) => (
           <div key={r.id} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ alignSelf: "flex-end", maxWidth: "70%", background: "var(--accent)", color: "var(--accent-text)", borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>
-              {typeof r.input === "string" ? extractLatestUserMessage(r.input) : JSON.stringify(r.input)}
+              {(() => {
+                const shown = r.originalInput ?? r.input;
+                return typeof shown === "string" ? extractLatestUserMessage(shown) : JSON.stringify(shown);
+              })()}
             </div>
             <div style={{ alignSelf: "flex-start", maxWidth: "70%", background: "var(--bg-hover)", color: "var(--text)", borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>
               {typeof r.output === "string" ? r.output : JSON.stringify(r.output)}

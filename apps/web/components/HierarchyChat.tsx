@@ -33,15 +33,15 @@ export function HierarchyChat({ graph }: { graph: GraphSummary }) {
         <a href={`/hierarchy?graphId=${graph.id}`}>Open full editor →</a>
       </div>
 
-      <div style={{ flex: 3, minHeight: 0 }}>
+      <div style={{ flex: 4, minHeight: 0 }}>
         {fullGraph ? (
-          <HierarchyCanvas graph={fullGraph} />
+          <HierarchyCanvas graph={fullGraph} showStartRunButton={false} />
         ) : (
           <div style={{ padding: 24, color: "var(--text-faint)" }}>Loading hierarchy…</div>
         )}
       </div>
 
-      <div style={{ flex: 2, minHeight: 0, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
+      <div style={{ flex: 1, minHeight: 0, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: 16 }}>
           {runs.map((r) => (
             <div key={r.id} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -56,7 +56,10 @@ export function HierarchyChat({ graph }: { graph: GraphSummary }) {
                   whiteSpace: "pre-wrap",
                 }}
               >
-                {typeof r.input === "string" ? extractLatestUserMessage(r.input) : JSON.stringify(r.input)}
+                {(() => {
+                  const shown = r.originalInput ?? r.input;
+                  return typeof shown === "string" ? extractLatestUserMessage(shown) : JSON.stringify(shown);
+                })()}
               </div>
               <div
                 style={{

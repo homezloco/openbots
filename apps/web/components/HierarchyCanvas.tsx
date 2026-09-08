@@ -60,8 +60,8 @@ function toFlowEdges(graph: AgentGraph): Edge[] {
   }));
 }
 
-const PROVIDERS: ProviderId[] = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"];
-const ROLES: AgentNode["role"][] = ["supervisor", "worker", "router", "reviewer"];
+export const PROVIDERS: ProviderId[] = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"];
+export const ROLES: AgentNode["role"][] = ["supervisor", "worker", "router", "reviewer"];
 
 function groupByGraph<T extends { graphName: string }>(agents: T[]): [string, T[]][] {
   const groups = new Map<string, T[]>();
@@ -81,7 +81,14 @@ function groupByGraph<T extends { graphName: string }>(agents: T[]): [string, T[
  * apps/api/src/orchestrator/resolve.ts). Dragging from a node's handle to a
  * new node creates a fresh explicit edge instead.
  */
-export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) {
+export function HierarchyCanvas({
+  graph: initialGraph,
+  showStartRunButton = true,
+}: {
+  graph: AgentGraph;
+  /** Off in embedded contexts (HierarchyChat) that already provide a real chat input with conversation memory and inline results — this toolbar button uses a raw window.prompt() with neither. Stays on for the standalone /hierarchy editor, which has no chat strip alternative. */
+  showStartRunButton?: boolean;
+}) {
   const { theme } = useTheme();
   const [graph, setGraph] = useState(initialGraph);
   const [nodes, setNodes, onNodesChange] = useNodesState(toFlowNodes(initialGraph));
@@ -277,7 +284,20 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
   }
 
   const [lastRunId, setLastRunId] = useState<string | null>(null);
-  const [openAgentPanel, setOpenAgentPanel] = useState<{ nodeId: string; nodeName: string } | null>(null);
+  const [openAgentPanel, setOpenAgentPanel] = useState<string | null>(null);
+  const openAgentNode = openAgentPanel ? graph.nodes.find((n) => n.id === openAgentPanel) ?? null : null;
+
+  /** Keeps both graph state (source of truth for settings) and the canvas label in sync after an edit. */
+  function handleNodeUpdated(updated: AgentNode) {
+    setGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === updated.id ? updated : n)) }));
+    setNodes((nds) =>
+      nds.map((n) =>
+        n.id === updated.id
+          ? { ...n, data: { label: `${ROLE_ICON[updated.role] ?? ""}${updated.name}\n${updated.provider}:${updated.model}` } }
+          : n,
+      ),
+    );
+  }
 
   /** Stays on the canvas to watch the live pulse instead of navigating away — the whole point of the animation is seeing it happen here. */
   async function startRun() {
@@ -319,12 +339,14 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
             ))}
           </select>
         </label>
-        <button onClick={startRun} disabled={!graph.entryNodeId}>
-          ▶ Start run
-        </button>
+        {showStartRunButton && (
+          <button onClick={startRun} disabled={!graph.entryNodeId}>
+            ▶ Start run
+          </button>
+        )}
         <button onClick={saveAsTemplate}>Save as template</button>
         <a href={`/runs?graphId=${graph.id}`}>View runs</a>
-        {lastRunId && <a href={`/runs/${lastRunId}`}>Run started — view full trail →</a>}
+        {showStartRunButton && lastRunId && <a href={`/runs/${lastRunId}`}>Run started — view full trail →</a>}
       </div>
 
       {showAddAgent && (
@@ -452,22 +474,20 @@ export function HierarchyCanvas({ graph: initialGraph }: { graph: AgentGraph }) 
           onEdgesChange={onEdgesChange}
           onReconnect={onReconnect}
           onConnect={onConnect}
-          onNodeClick={(_, node) => {
-            const agentNode = graph.nodes.find((n) => n.id === node.id);
-            if (agentNode) setOpenAgentPanel({ nodeId: agentNode.id, nodeName: agentNode.name });
-          }}
+          onNodeClick={(_, node) => setOpenAgentPanel(node.id)}
           colorMode={theme}
           fitView
+          fitViewOptions={{ padding: 0.2, maxZoom: 1.25 }}
         >
           <Background />
           <Controls />
         </ReactFlow>
-        {openAgentPanel && (
+        {openAgentNode && (
           <AgentConversationPanel
             graphId={graph.id}
-            nodeId={openAgentPanel.nodeId}
-            nodeName={openAgentPanel.nodeName}
+            node={openAgentNode}
             onClose={() => setOpenAgentPanel(null)}
+            onNodeUpdated={handleNodeUpdated}
           />
         )}
       </div>

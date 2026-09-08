@@ -1,6 +1,13 @@
 import { generateText, stepCountIs } from "ai";
 import { eq, desc } from "drizzle-orm";
-import { estimateCostUsd, getModel, resolveTools } from "@openbots/providers";
+import {
+  commitWorktreeChanges,
+  ensureWorktree,
+  estimateCostUsd,
+  getModel,
+  isWithinAllowedWriteRoot,
+  resolveTools,
+} from "@openbots/providers";
 import type { AgentGraph, AgentNode, ProviderId } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
 import {
@@ -12,7 +19,7 @@ import {
   runs,
   usageEvents,
 } from "../db/schema.js";
-import { resolveNextHop } from "./resolve.js";
+import { resolveNextHop, startsWithSentinel } from "./resolve.js";
 import { withNodeTimeout } from "./circuitBreaker.js";
 import { withRetry } from "./retry.js";
 import { getCredentials } from "./credentials.js";
@@ -62,9 +69,11 @@ export async function dispatchHop(runId: string): Promise<void> {
   const startedAt = new Date();
   publishRunEvent({ runId, graphId: graph.id, type: "hop_dispatched", nodeId: node.id });
 
+  const autoRoutingTargets = getAutoRoutingTargets(graph, node.id);
+
   let result: AgentCallResult;
   try {
-    result = await withNodeTimeout(node.id, () => callAgent(node, run.input, getAutoRoutingTargets(graph, node.id)));
+    result = await withNodeTimeout(node.id, () => callAgent(node, run.input, runId, autoRoutingTargets));
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     await db.insert(runEvents).values({
@@ -85,22 +94,33 @@ export async function dispatchHop(runId: string): Promise<void> {
   await recordUsage(runId, node.id, result);
   const output = result.text;
 
-  // A consensus source node bypasses normal routing: fan out to every
-  // branch concurrently, join, then continue from the aggregator.
+  // A consensus source node with NO auto edges (the original pattern)
+  // bypasses normal routing unconditionally on every hop, exactly as
+  // before. A HYBRID node — one with both auto edges and a
+  // consensusGroup — only fans out when the model explicitly signals
+  // ALL; otherwise it falls through to normal single-target auto
+  // routing below. This is what lets one router (e.g. "Lead Engineer")
+  // handle both "check on Bushwacker" (single hop) and "status update
+  // for all projects" (fan out to every configured branch) without
+  // being two different node types.
   if (node.consensusGroup) {
-    await db.insert(runEvents).values({
-      runId,
-      nodeId: node.id,
-      sequence,
-      status: "succeeded",
-      input: run.input,
-      output,
-      startedAt,
-      finishedAt: new Date(),
-    });
-    publishRunEvent({ runId, graphId: graph.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
-    await dispatchConsensus(runId, graph, node, output);
-    return;
+    const hasAutoEdges = autoRoutingTargets.length > 0;
+    const signaledAll = hasAutoEdges && startsWithSentinel(output, "all");
+    if (!hasAutoEdges || signaledAll) {
+      await db.insert(runEvents).values({
+        runId,
+        nodeId: node.id,
+        sequence,
+        status: "succeeded",
+        input: run.input,
+        output,
+        startedAt,
+        finishedAt: new Date(),
+      });
+      publishRunEvent({ runId, graphId: graph.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
+      await dispatchConsensus(runId, graph, node, output);
+      return;
+    }
   }
 
   const { edge, nextNodeId } = resolveNextHop(graph, node.id, output);
@@ -188,7 +208,7 @@ async function dispatchConsensus(
 
       try {
         const result = await withNodeTimeout(targetNode.id, () =>
-          callAgent(targetNode, input, getAutoRoutingTargets(graph, targetNode.id)),
+          callAgent(targetNode, input, runId, getAutoRoutingTargets(graph, targetNode.id)),
         );
         await recordUsage(runId, targetNode.id, result);
         await db.insert(runEvents).values({
@@ -292,10 +312,17 @@ function getAutoRoutingTargets(graph: AgentGraph, nodeId: string): { name: strin
     .map((n) => ({ name: n.name, description: n.description }));
 }
 
-function appendAutoRoutingContext(systemPrompt: string, targets: { name: string; description: string }[]): string {
+function appendAutoRoutingContext(
+  systemPrompt: string,
+  targets: { name: string; description: string }[],
+  canFanOut: boolean,
+): string {
   if (targets.length === 0) return systemPrompt;
   const list = targets.map((t) => `- ${t.name}: ${t.description || "(no description)"}`).join("\n");
-  return `${systemPrompt}\n\nYou can delegate to one of these specialists — mention the target's name clearly in your response so it can be routed correctly:\n${list}\n\nIf none of these fit, or you need the user to clarify before you can route, start your reply with the single word UNKNOWN — do not guess a specialist.`;
+  const fanOutLine = canFanOut
+    ? " If the request applies to multiple or all of these specialists at once, start your reply with the single word ALL instead of naming one."
+    : "";
+  return `${systemPrompt}\n\nYou can delegate to one of these specialists — mention the target's name clearly in your response so it can be routed correctly:\n${list}\n\nIf none of these fit, or you need the user to clarify before you can route, start your reply with the single word UNKNOWN — do not guess a specialist.${fanOutLine}`;
 }
 
 /**
@@ -309,20 +336,42 @@ function appendAutoRoutingContext(systemPrompt: string, targets: { name: string;
 async function callAgent(
   node: AgentNode,
   input: unknown,
+  runId: string,
   autoRoutingTargets: { name: string; description: string }[] = [],
 ): Promise<AgentCallResult> {
   const targets = [{ provider: node.provider, model: node.model }, ...node.fallbackChain];
   const prompt = typeof input === "string" ? input : JSON.stringify(input);
-  const systemPrompt = appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets);
+  const systemPrompt = appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup));
+
+  // Write access is a separate, independent grant from read (a node
+  // having fileAccessRoot set for reading must not imply write) — gated
+  // on the tool names actually being present AND a fresh runtime check
+  // against ALLOWED_FILE_WRITE_ROOTS, not just whatever passed validation
+  // when the node was last saved. When granted, an isolated git worktree
+  // is created ONCE per node+run (idempotent — see ensureWorktree) and
+  // used as the root for BOTH read and write tools for the rest of this
+  // call, so the agent never reads the real checkout while writing
+  // somewhere else. See docs/orchestration.md.
+  const wantsWrite = node.tools.some((t) => t === "write_file" || t === "edit_file");
+  const canWrite = wantsWrite && Boolean(node.fileAccessRoot) && isWithinAllowedWriteRoot(node.fileAccessRoot!);
+  const worktree = canWrite ? await ensureWorktree(node.fileAccessRoot!, node.id, node.name, runId) : null;
+  const effectiveFileRoot = worktree?.path ?? node.fileAccessRoot;
 
   let lastError: unknown;
   for (let i = 0; i < targets.length; i++) {
     const target = targets[i];
+    // Fresh per attempt, not shared across fallback-chain targets: if an
+    // earlier provider partially wrote files before ultimately throwing,
+    // those writes must not get silently attributed to a later,
+    // successful provider's commit.
+    const touchedFiles = new Set<string>();
     try {
       const credentials = await getCredentials(node.graphId, node.id, target.provider);
       const model = getModel(target.provider, target.model, credentials);
       const tools =
-        node.tools.length > 0 ? resolveTools(node.tools, { fileAccessRoot: node.fileAccessRoot }) : undefined;
+        node.tools.length > 0
+          ? resolveTools(node.tools, { fileAccessRoot: effectiveFileRoot, writableRoot: worktree?.path, touchedFiles })
+          : undefined;
       const result = await withRetry(() =>
         generateText({
           model,
@@ -331,8 +380,20 @@ async function callAgent(
           ...(tools ? { tools, stopWhen: stepCountIs(5) } : {}),
         }),
       );
+
+      // One commit per hop (not per tool call — a single step can make
+      // several, and per-tool-call commits would race on which "pending
+      // commit" belongs to which concurrently-running execute()).
+      let text = result.text;
+      if (worktree) {
+        const sha = await commitWorktreeChanges(worktree, node.name, touchedFiles);
+        if (sha) {
+          text = `${text}\n\n[OpenBots: committed ${sha.slice(0, 8)} to branch ${worktree.branch} in ${worktree.path}]`;
+        }
+      }
+
       return {
-        text: result.text,
+        text,
         provider: target.provider,
         model: target.model,
         inputTokens: result.usage.inputTokens ?? 0,

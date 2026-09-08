@@ -48,17 +48,35 @@ once the lazy-resolution loop above is proven in practice.
 ## `consensus` edges (fan-out/join)
 
 A node's `consensusGroup` marks it as a fan-out source: every edge in
-`consensusGroup.edgeIds` (all must be `kind: "consensus"`) fires
-concurrently with the same input, tracked via a `fanout_batches` row.
-Once every branch finishes, `aggregatorNodeId` is dispatched once with
-every branch's output — the engine only handles the fan-out/join
-mechanics, the aggregator (an ordinary agent node) makes the actual
-consensus judgment call.
+`consensusGroup.edgeIds` fires concurrently with the same input, tracked
+via a `fanout_batches` row. Once every branch finishes, `aggregatorNodeId`
+is dispatched once with every branch's output — the engine only handles
+the fan-out/join mechanics, the aggregator (an ordinary agent node) makes
+the actual consensus judgment call.
 
 `consensusGroup` can only be set via `PATCH /graphs/:id/nodes/:nodeId`,
 never at node-creation time — it references edge ids, which don't exist
 until the node and its edges already exist. This wasn't discovered until
 the e2e suite tried to exercise consensus for the first time.
+
+**Hybrid auto/consensus nodes.** `edgeIds` don't have to be `kind:
+"consensus"` edges — `dispatchConsensus` resolves them purely by id, so
+they can be a node's existing `auto` edges instead. A node with `auto`
+edges AND a `consensusGroup` is a hybrid: `dispatchHop` only fans out when
+the model's output starts with the sentinel `ALL` (taught via
+`appendAutoRoutingContext` whenever `node.consensusGroup` is set — same
+free-text-prefix convention as `UNKNOWN`, see the `auto` edges section
+above); any other output falls through to normal single-target routing.
+A node with a `consensusGroup` and *no* `auto` edges keeps the original
+behavior — unconditional fan-out on every hop. This is what lets one
+router (e.g. a "Lead Engineer" delegating to N project specialists)
+handle both "check on project X" (single hop) and "status update for all
+projects" (fan out to every branch in `consensusGroup.edgeIds`) without
+being two different node types. `computeWarnings` (`warnings.ts`) flags —
+non-blockingly — a hybrid node whose `consensusGroup.edgeIds` don't cover
+all of its own `auto` edges, since that silently breaks the "ALL means
+all of them" promise (e.g. a new specialist added and forgotten in the
+fan-out set).
 
 Branches run inline within the source's own BullMQ job (`Promise.allSettled`,
 each still behind its own `withNodeTimeout`) rather than as separately

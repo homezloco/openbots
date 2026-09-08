@@ -21,5 +21,26 @@ export function computeWarnings(graph: AgentGraph): string[] {
     }
   }
 
+  // A hybrid node (auto edges + a consensusGroup, see engine.ts's ALL
+  // fan-out) whose consensusGroup doesn't cover every one of its own auto
+  // edges silently breaks the user-facing "ALL means all of them" promise
+  // — e.g. adding a 9th specialist and forgetting to add it to the fan-out
+  // set. Soft nudge only, same as the reviewer/tier check above: no
+  // enforced coverage, consistent with how loosely-validated
+  // consensusGroup already is elsewhere.
+  for (const node of graph.nodes.filter((n) => n.consensusGroup)) {
+    const autoEdgeIds = graph.edges
+      .filter((e) => e.sourceNodeId === node.id && e.kind === "auto")
+      .map((e) => e.id);
+    if (autoEdgeIds.length === 0) continue;
+    const covered = new Set(node.consensusGroup!.edgeIds);
+    const missing = autoEdgeIds.filter((id) => !covered.has(id));
+    if (missing.length > 0) {
+      warnings.push(
+        `"${node.name}"'s ALL fan-out covers ${covered.size} of its ${autoEdgeIds.length} auto-routing targets.`,
+      );
+    }
+  }
+
   return warnings;
 }

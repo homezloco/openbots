@@ -9,3 +9,9 @@ dist/
 docker-compose.override.yml
 .DS_Store
 pnpm-lock.yaml.bak
+
+# Generated fresh before every e2e run (real git repo + symlink) — see
+# apps/api/e2e/setup-writable-fixture.mjs. Never commit a real .git
+# directory as regular tracked files.
+apps/api/e2e/fixtures/writable-testrepo/
+apps/api/e2e/fixtures/writable-testrepo-outside/

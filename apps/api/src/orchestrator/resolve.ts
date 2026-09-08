@@ -46,6 +46,20 @@ export function resolveNextHop(
  * interface stable means the canvas and engine don't change when it's
  * replaced (see docs/orchestration.md).
  */
+/**
+ * True when `text` starts (after optional leading whitespace) with `word`
+ * followed by whitespace or common sentence punctuation — not just any
+ * word-boundary. A plain `\b` check false-positives on a specialist
+ * literally named e.g. "All-Projects-Dashboard" or "Unknown-Config-Bot",
+ * since "-" already counts as a non-word boundary. Shared by matchAutoEdge's
+ * UNKNOWN check and engine.ts's ALL fan-out check — one place that knows
+ * how to parse this sentinel-prefix convention.
+ */
+export function startsWithSentinel(text: unknown, word: string): boolean {
+  const s = typeof text === "string" ? text : JSON.stringify(text ?? "");
+  return new RegExp(`^\\s*${word}(?=[\\s,.:;!]|$)`, "i").test(s);
+}
+
 function matchAutoEdge(
   graph: AgentGraph,
   candidates: RoutingEdge[],
@@ -59,7 +73,7 @@ function matchAutoEdge(
   // them) would win the keyword-overlap contest below purely by accident,
   // silently continuing the run instead of surfacing the question.
   const text = typeof lastOutput === "string" ? lastOutput : JSON.stringify(lastOutput ?? "");
-  if (/^\s*unknown\b/i.test(text)) return null;
+  if (startsWithSentinel(text, "unknown")) return null;
 
   if (candidates.length <= 1) return candidates[0] ?? null;
 

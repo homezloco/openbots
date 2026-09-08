@@ -109,7 +109,26 @@ export async function runRoutes(app: FastifyInstance) {
       .where(eq(runs.graphId, graphId))
       .orderBy(desc(runs.createdAt));
 
-    return rows.sort((a, b) => {
+    // runs.input is a scratch field the engine overwrites on every hop
+    // transition (each hop reads "its own input" from this column) — for
+    // any multi-hop run, by completion it holds the LAST hop's input (e.g.
+    // a consensus run's branch-outputs array), not what the user actually
+    // asked. The true original input is only ever written once, at
+    // sequence 0, and never touched again — restore it here so
+    // conversation-memory chaining (useBotChat) and the transcript display
+    // don't silently drop context or render raw JSON for multi-hop runs.
+    const runIds = rows.map((r) => r.id);
+    const originalInputs =
+      runIds.length > 0
+        ? await db
+            .select({ runId: runEvents.runId, input: runEvents.input })
+            .from(runEvents)
+            .where(and(inArray(runEvents.runId, runIds), eq(runEvents.sequence, 0)))
+        : [];
+    const originalInputByRun = new Map(originalInputs.map((e) => [e.runId, e.input]));
+    const withOriginalInput = rows.map((r) => ({ ...r, originalInput: originalInputByRun.get(r.id) ?? r.input }));
+
+    return withOriginalInput.sort((a, b) => {
       const priorityDiff = (STATUS_PRIORITY[a.status] ?? 99) - (STATUS_PRIORITY[b.status] ?? 99);
       if (priorityDiff !== 0) return priorityDiff;
       return b.createdAt.getTime() - a.createdAt.getTime();

@@ -47,12 +47,20 @@ export type FallbackTarget = z.infer<typeof FallbackTarget>;
 
 /**
  * Marks a node as a fan-out/aggregate ("consensus") point: every edge in
- * `edgeIds` (all must be RoutingEdgeKind "consensus" edges from this node)
- * fires concurrently with the same input, and once every branch finishes,
- * `aggregatorNodeId` is dispatched once with all branch outputs as input.
- * The engine only handles the fan-out/join mechanics; the aggregator (an
- * ordinary agent node) makes the actual consensus judgment call — see
- * docs/orchestration.md.
+ * `edgeIds` fires concurrently with the same input, and once every branch
+ * finishes, `aggregatorNodeId` is dispatched once with all branch outputs
+ * as input. The engine only handles the fan-out/join mechanics; the
+ * aggregator (an ordinary agent node) makes the actual consensus judgment
+ * call — see docs/orchestration.md.
+ *
+ * `edgeIds` don't have to be RoutingEdgeKind "consensus" edges — they can
+ * be a node's existing "auto" edges instead, which makes that node a
+ * hybrid: single-target auto routing by default, fanning out via this
+ * group only when the model's own output signals the request spans
+ * multiple/all targets (the "ALL" sentinel convention, symmetric to
+ * "UNKNOWN" — see engine.ts's appendAutoRoutingContext/dispatchHop). A
+ * node with a consensusGroup and NO auto edges (the original pattern)
+ * still fans out unconditionally on every hop.
  */
 export const ConsensusGroup = z.object({
   edgeIds: z.array(z.string().uuid()).min(2),

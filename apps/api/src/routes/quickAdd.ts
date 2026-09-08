@@ -7,7 +7,7 @@ import { getCredentialsFromEnv } from "../orchestrator/credentials.js";
 import { requireAuth } from "../auth/middleware.js";
 import { insertAgentNode } from "./graphs.js";
 import { requireGraphOwner } from "./graphs.js";
-import { fileAccessRootSchema } from "../validation/fileAccessRoot.js";
+import { checkWriteRootAllowed, fileAccessRootSchema } from "../validation/fileAccessRoot.js";
 
 const quickAddBody = z.object({
   description: z.string().min(1),
@@ -52,6 +52,8 @@ export async function quickAddRoutes(app: FastifyInstance) {
     const { id: graphId } = req.params as { id: string };
     if (!(await requireGraphOwner(req, reply, graphId))) return;
     const body = quickAddBody.parse(req.body);
+    const writeError = checkWriteRootAllowed(body.tools, body.fileAccessRoot);
+    if (writeError) return reply.code(400).send({ error: writeError });
 
     const credentials = getCredentialsFromEnv(META_PROVIDER);
     const model = getModel(META_PROVIDER, META_MODEL, credentials);

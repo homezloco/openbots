@@ -3,16 +3,25 @@
 import { useEffect, useState } from "react";
 import { createRun, fetchRun, listRuns, type GraphSummary, type Run } from "./api";
 
-/** A run's `input` holds the FULL transcript so far; this recovers just this turn's message. */
+/** A run's true original input holds the FULL transcript so far; this recovers just this turn's message. */
 export function extractLatestUserMessage(transcript: string): string {
   const idx = transcript.lastIndexOf("User: ");
   return idx === -1 ? transcript : transcript.slice(idx + "User: ".length);
 }
 
-/** Chains each completed run's own transcript forward — no backend/schema change needed. */
+/**
+ * Chains each completed run's own transcript forward — no backend/schema
+ * change needed. Reads `originalInput` (falling back to `input`), NOT
+ * `input` directly: for any multi-hop run (including every ALL fan-out),
+ * the engine overwrites `runs.input` on each hop transition, so by
+ * completion it holds the LAST hop's input rather than the original
+ * transcript. `originalInput` (set by GET /graphs/:id/runs from
+ * run_events sequence 0) is immune to that.
+ */
 export function buildNextInput(lastCompletedRun: Run | null, newMessage: string): string {
-  if (!lastCompletedRun || typeof lastCompletedRun.input !== "string") return `User: ${newMessage}`;
-  return `${lastCompletedRun.input}\nAssistant: ${lastCompletedRun.output}\nUser: ${newMessage}`;
+  const priorTranscript = lastCompletedRun?.originalInput ?? lastCompletedRun?.input;
+  if (typeof priorTranscript !== "string") return `User: ${newMessage}`;
+  return `${priorTranscript}\nAssistant: ${lastCompletedRun!.output}\nUser: ${newMessage}`;
 }
 
 /**
@@ -57,7 +66,10 @@ export function useBotChat(graph: GraphSummary) {
         final = await fetchRun(created.id);
       }
       if (final.status === "error") throw new Error("The bot failed to respond — check its Hierarchy/Runs view for details");
-      setRuns((r) => [...r, final]);
+      // fetchRun (GET /runs/:id) doesn't compute originalInput the way
+      // listRuns does — attach it directly since the client already knows
+      // exactly what it sent, rather than waiting for a reload to self-correct.
+      setRuns((r) => [...r, { ...final, originalInput: nextInput }]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send message");
     } finally {

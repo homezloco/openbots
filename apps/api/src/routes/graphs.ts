@@ -11,11 +11,11 @@ import {
   RoutingCondition,
 } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
-import { agentGraphs, agentNodes, routingEdges } from "../db/schema.js";
+import { agentGraphs, agentNodes, routingEdges, runs } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
 import { loadLiveGraph, nodeRowToAgentNode } from "../orchestrator/engine.js";
 import { requireAuth } from "../auth/middleware.js";
-import { fileAccessRootSchema } from "../validation/fileAccessRoot.js";
+import { checkWriteRootAllowed, fileAccessRootSchema } from "../validation/fileAccessRoot.js";
 
 const createGraphBody = z.object({
   name: z.string().min(1),
@@ -140,7 +140,20 @@ export async function graphRoutes(app: FastifyInstance) {
       .groupBy(agentNodes.graphId);
     const countByGraph = new Map(counts.map((c) => [c.graphId, c.count]));
 
-    return graphs.map((g) => ({ ...g, nodeCount: countByGraph.get(g.id) ?? 0 }));
+    // graph.updatedAt reflects the last STRUCTURAL edit (a node/edge
+    // change), not the last conversation — the Dashboard needs the latter
+    // to auto-select "the graph you were most recently chatting with".
+    const lastRuns = await db
+      .select({ graphId: runs.graphId, lastRunAt: sql<string>`max(${runs.createdAt})` })
+      .from(runs)
+      .groupBy(runs.graphId);
+    const lastRunByGraph = new Map(lastRuns.map((r) => [r.graphId, r.lastRunAt]));
+
+    return graphs.map((g) => ({
+      ...g,
+      nodeCount: countByGraph.get(g.id) ?? 0,
+      lastRunAt: lastRunByGraph.get(g.id) ?? null,
+    }));
   });
 
   app.get("/graphs/:id", async (req) => {
@@ -172,6 +185,8 @@ export async function graphRoutes(app: FastifyInstance) {
     const { id: graphId } = req.params as { id: string };
     if (!(await requireGraphOwner(req, reply, graphId))) return;
     const body = createNodeBody.parse(req.body);
+    const writeError = checkWriteRootAllowed(body.tools, body.fileAccessRoot);
+    if (writeError) return reply.code(400).send({ error: writeError });
     const node = await insertAgentNode(graphId, body);
     return reply.code(201).send(node);
   });
@@ -211,6 +226,8 @@ export async function graphRoutes(app: FastifyInstance) {
       fallbackChain: source.fallbackChain,
       position: body.position,
     });
+    const writeError = checkWriteRootAllowed(copied.tools, copied.fileAccessRoot);
+    if (writeError) return reply.code(400).send({ error: writeError });
     const node = await insertAgentNode(graphId, copied);
     return reply.code(201).send(node);
   });
@@ -234,6 +251,16 @@ export async function graphRoutes(app: FastifyInstance) {
       where: and(eq(agentNodes.id, nodeId), eq(agentNodes.graphId, graphId)),
     });
     if (!before) return reply.code(404).send({ error: "Node not found" });
+
+    // A PATCH is a partial update — "tools" or "fileAccessRoot" may not
+    // appear in THIS request body at all if only the other one is being
+    // changed, so the write-root check must run against the EFFECTIVE
+    // (post-merge) values, not just whatever this one request happened
+    // to include.
+    const effectiveTools = body.tools ?? (before.tools as string[] | undefined);
+    const effectiveFileAccessRoot = body.fileAccessRoot !== undefined ? body.fileAccessRoot : before.fileAccessRoot;
+    const writeError = checkWriteRootAllowed(effectiveTools, effectiveFileAccessRoot);
+    if (writeError) return reply.code(400).send({ error: writeError });
 
     const { position, ...rest } = body;
     const [after] = await db
@@ -290,6 +317,24 @@ export async function graphRoutes(app: FastifyInstance) {
       })
       .returning();
     await recordChange(graphId, "edge_added", null, edge);
+
+    // A hybrid node's ALL fan-out (see engine.ts) is a fixed edgeIds list,
+    // not derived live from the graph — without this, adding a new
+    // auto-routed specialist under an existing hybrid supervisor would
+    // silently miss it in every future ALL broadcast until someone
+    // remembered to PATCH consensusGroup by hand. Auto-sync on create;
+    // still overridable by PATCHing a specific edge back out afterward.
+    if (edge.kind === "auto") {
+      const sourceNode = await db.query.agentNodes.findFirst({ where: eq(agentNodes.id, edge.sourceNodeId) });
+      if (sourceNode?.consensusGroup) {
+        const group = sourceNode.consensusGroup as { edgeIds: string[]; aggregatorNodeId: string };
+        await db
+          .update(agentNodes)
+          .set({ consensusGroup: { ...group, edgeIds: [...group.edgeIds, edge.id] }, updatedAt: new Date() })
+          .where(eq(agentNodes.id, sourceNode.id));
+      }
+    }
+
     return reply.code(201).send(edge);
   });
 

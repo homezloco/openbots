@@ -24,6 +24,12 @@ RUN pnpm --filter @openbots/graph-schema --filter @openbots/providers --filter @
 
 FROM base AS runtime
 ENV NODE_ENV=production
+# git is a runtime dependency of the worker process, not a build-time one
+# — the write_file/edit_file tools isolate every agent write inside a git
+# worktree (see packages/providers/src/gitWorktree.ts) rather than ever
+# touching the user's real checkout directly.
+RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt/lists \
+    apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 COPY --from=build /repo /repo
 WORKDIR /repo/apps/api
 EXPOSE 4000

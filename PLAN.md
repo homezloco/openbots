@@ -6,16 +6,17 @@ no product in the "AI bot" space currently ships one (see Competitive
 notes below).
 
 **Status as of 2026-09-08: all three original phases are built and
-e2e-tested (38/38 passing, `apps/api/e2e/run.ts`), two security reviews
+e2e-tested (41/41 passing, `apps/api/e2e/run.ts`), two security reviews
 found and fixed real vulnerabilities, dark mode shipped, and the product
 grew past the original scope into a working multi-agent "engineering
 team" built from the user's own real projects — now with live run
 visualization, per-agent conversation history, a unified Dashboard
 experience, agents that can actually write code and (on explicit
-`/push` confirmation, over HTTPS+PAT or SSH) push it, and graphs that can
-run themselves on a recurring cron schedule (see "Live visualization,
-agent reuse, and dashboard unification", "Agent file-write and confirmed
-push", and "Scheduled runs" below). See "Known gaps" at the bottom
+`/push`/`/pr` confirmation, over HTTPS+PAT or SSH) push it and open a PR,
+and graphs that can run themselves on a recurring cron schedule (see
+"Live visualization, agent reuse, and dashboard unification", "Agent
+file-write and confirmed push", and "Scheduled runs" below). See "Known
+gaps" at the bottom
 for what's still actually missing.**
 
 ## Phase 1 — MVP
@@ -146,10 +147,28 @@ plain push respectively.
 
 **Known limitation, not a bug**: SSH push only supports `github.com` as
 the host (the pinned key is GitHub's) — a GitLab/Bitbucket/self-hosted
-SSH remote gets a clear rejection, not a silent failure. PR creation
-(`gh pr create`) is deliberately out of scope, same as v1's original
-scope decision — a separately-confirmable action needing broader token
-scope.
+SSH remote gets a clear rejection, not a silent failure.
+
+**Phase 3 — `/pr` (2026-09-08).** Same deterministic-command-interception
+safety property as `/push` — `/pr` (optionally `/pr <title>`) is matched
+by exact regex in `POST /runs` before any orchestration/model
+involvement. Targets the most recently *pushed* branch (reads
+`agentCommits.pushedAt`, not just the latest commit — a PR needs a branch
+GitHub already has). Always requires a GitHub PAT (`provider: "github"`)
+**regardless of whether the matching `/push` used HTTPS or SSH** — PR
+creation is a GitHub REST API call, not a git-transport operation, so an
+SSH key alone can never satisfy it; this is called out explicitly in both
+the settings-page copy and the error message a user gets if they try
+`/pr` with only an SSH key configured. Checks for an already-open PR on
+that branch first (avoids a redundant 422 from GitHub and gives a
+friendlier "PR #N already exists" message with the link), then reads the
+repo's actual `default_branch` from the GitHub API rather than assuming
+`main` — no schema changes needed; an open PR's existence is checked
+live against GitHub each time rather than tracked locally. e2e-covered
+for the three deterministic error paths (nothing pushed yet, no token
+configured, a non-github.com origin); real PR creation needs a live
+github.com repo/token to verify, same limitation as real SSH push
+transport. 41/41 passing.
 
 ## Scheduled runs (2026-09-08)
 
@@ -231,7 +250,7 @@ scheduler; not specific to this agent, works for any graph).
 2. **Team/role-based sharing does not exist.** Auth is single-owner only, by design.
 3. The tool registry is a small built-in set, not dynamic npm-package loading — deliberate (arbitrary plugin loading would let anyone who can edit a graph run arbitrary code in the API process).
 4. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
-5. `/push` only supports a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes, and no PR creation (`gh pr create`) yet. See "Agent file-write and confirmed push" above.
+5. `/push` and `/pr` only support a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes. See "Agent file-write and confirmed push" above.
 6. Scheduled triggers have no UI history of their own past firings beyond the single `lastRunId`/`lastTriggeredAt` — every firing's actual run is fully visible in the graph's normal run history, just not pre-filtered to "runs this schedule caused."
 7. No UI visibility into pending/unpushed commits — you have to remember to type `/push`; nothing in the canvas or chat currently surfaces "there are N unpushed commits on this graph."
 

@@ -1135,6 +1135,32 @@ async function main() {
     assert(before === after, "the bare remote's HEAD must be completely unchanged by free-text that merely looks like a push request");
   });
 
+  // Real PR creation needs a live github.com repo/token and can't be exercised
+  // deterministically in e2e — these three cover the error paths that can be:
+  // nothing pushed yet, no GitHub token configured, and a non-github.com origin
+  // (the local bare remote every other push test here uses). Real PR creation
+  // is the user's own responsibility to verify against a real repo.
+  await test("/pr with nothing pushed yet returns a clear message instead of erroring", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E pr — nothing pushed" }) });
+    const prRun = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: g.body.id, input: "/pr" }) });
+    assert(prRun.status === 201, `expected 201, got ${prRun.status}: ${JSON.stringify(prRun.body)}`);
+    assert(/no pushed branch/i.test(String(prRun.body.output)), `expected a clear no-op message, got: ${prRun.body.output}`);
+  });
+
+  await test("/pr requires a GitHub token even when a pushed commit exists", async () => {
+    const prRun = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: writeGraphId, input: "/pr" }) });
+    assert(prRun.status === 201, `expected 201, got ${prRun.status}: ${JSON.stringify(prRun.body)}`);
+    assert(/requires a github token/i.test(String(prRun.body.output)), `expected a missing-token message, got: ${prRun.body.output}`);
+  });
+
+  await test("/pr rejects a non-github.com origin, even with a token configured", async () => {
+    const cred = await api("/me/credentials", { method: "POST", body: JSON.stringify({ provider: "github", apiKey: "ghp_fake_pr_test_token" }) });
+    const prRun = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: writeGraphId, input: "/pr" }) });
+    assert(prRun.status === 201, `expected 201, got ${prRun.status}: ${JSON.stringify(prRun.body)}`);
+    assert(/github\.com origin/i.test(String(prRun.body.output)), `expected a github.com-only message, got: ${prRun.body.output}`);
+    await api(`/me/credentials/${cred.body.id}`, { method: "DELETE" });
+  });
+
   // The SSH transport itself needs a real SSH server/GitHub account and can't be
   // exercised deterministically in e2e — these two cover the parts that can be:
   // the github.com-only host restriction, and the missing-credential error. Real

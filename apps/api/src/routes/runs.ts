@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { RunMode } from "@openbots/graph-schema";
-import { pushBranch, type Worktree } from "@openbots/providers";
+import { getRemoteUrl, parseGithubRepo, pushBranch, type Worktree } from "@openbots/providers";
 import { db } from "../db/client.js";
 import { agentCommits, agentGraphs, agentNodes, runEvents, runs, usageEvents, userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
@@ -104,6 +104,102 @@ async function handlePushCommand(
   return reply.code(201).send(run);
 }
 
+async function githubApiRequest(path: string, token: string, init: RequestInit = {}): Promise<any> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      // GitHub's API rejects requests with no User-Agent header.
+      "User-Agent": "OpenBots",
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers as Record<string, string> | undefined),
+    },
+  });
+  const body: any = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(body?.message ? `GitHub API error: ${body.message}` : `GitHub API request failed with status ${res.status}`);
+  }
+  return body;
+}
+
+/**
+ * Opens a PR for the most recently *pushed* branch on this graph — a PR
+ * can only target a branch GitHub already has, so this deliberately reads
+ * agentCommits.pushedAt, not just the latest commit. Always needs a
+ * GitHub token (provider "github") regardless of whether the matching
+ * /push used HTTPS or SSH — PR creation is a GitHub REST API call, not a
+ * git-transport operation, so an SSH key alone can never satisfy it.
+ * Same deterministic-command-interception safety property as /push (see
+ * POST /runs below): triggered only by the user's own literal "/pr" text,
+ * checked before any orchestration/model involvement.
+ */
+async function handlePrCommand(req: FastifyRequest, reply: FastifyReply, graphId: string, title: string | null): Promise<void> {
+  if (!req.userId) return reply.code(401).send({ error: "Unauthorized" });
+  const graph = await db.query.agentGraphs.findFirst({ where: eq(agentGraphs.id, graphId) });
+  if (!graph || graph.ownerId !== req.userId) {
+    return reply.code(404).send({ error: "Graph not found" });
+  }
+
+  async function respond(output: string) {
+    const [run] = await db
+      .insert(runs)
+      .values({ graphId, mode: "pinned", status: "completed", input: title ? `/pr ${title}` : "/pr", output })
+      .returning();
+    return reply.code(201).send(run);
+  }
+
+  const [commit] = await db
+    .select()
+    .from(agentCommits)
+    .where(and(eq(agentCommits.graphId, graphId), isNotNull(agentCommits.pushedAt)))
+    .orderBy(desc(agentCommits.pushedAt))
+    .limit(1);
+  if (!commit) return respond("No pushed branch to open a PR for — push one first with /push.");
+
+  const [cred] = await db
+    .select()
+    .from(userCredentials)
+    .where(and(eq(userCredentials.userId, req.userId as string), eq(userCredentials.provider, "github")))
+    .limit(1);
+  if (!cred) {
+    return respond(
+      "Opening a PR requires a GitHub token — save one at /settings. This is needed even if you pushed over SSH: PR creation always goes through GitHub's REST API, not git's own transport.",
+    );
+  }
+  const token = decryptCredential(cred.encryptedKey);
+
+  const remote = await getRemoteUrl(commit.worktreePath);
+  const parsed = parseGithubRepo(remote);
+  if (!parsed) return respond("PR creation is only supported for a github.com origin.");
+
+  try {
+    const existing = await githubApiRequest(
+      `/repos/${parsed.owner}/${parsed.repo}/pulls?head=${parsed.owner}:${commit.branch}&state=open`,
+      token,
+    );
+    if (existing.length > 0) {
+      return respond(`A PR already exists for this branch: #${existing[0].number} — ${existing[0].html_url}`);
+    }
+
+    const repoInfo = await githubApiRequest(`/repos/${parsed.owner}/${parsed.repo}`, token);
+
+    const pr = await githubApiRequest(`/repos/${parsed.owner}/${parsed.repo}/pulls`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        title: title || `OpenBots: ${commit.branch}`,
+        head: commit.branch,
+        base: repoInfo.default_branch,
+        body: "Opened by OpenBots via the /pr command.",
+      }),
+    });
+
+    return respond(`✅ Opened PR #${pr.number}: ${pr.html_url}`);
+  } catch (err) {
+    return reply.code(400).send({ error: err instanceof Error ? err.message : "GitHub API request failed" });
+  }
+}
+
 export async function runRoutes(app: FastifyInstance) {
   app.post("/runs", { preHandler: requireAuth }, async (req, reply) => {
     const body = createRunBody.parse(req.body);
@@ -111,6 +207,10 @@ export async function runRoutes(app: FastifyInstance) {
     const pushMatch = inputString?.match(/^\/(?:push)(?:\s+(.+))?$/);
     if (pushMatch) {
       return handlePushCommand(req, reply, body.graphId, pushMatch[1]?.trim() ?? null);
+    }
+    const prMatch = inputString?.match(/^\/pr(?:\s+(.+))?$/);
+    if (prMatch) {
+      return handlePrCommand(req, reply, body.graphId, prMatch[1]?.trim() ?? null);
     }
 
     const graphRow = await db.query.agentGraphs.findFirst({

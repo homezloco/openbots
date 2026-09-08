@@ -36,6 +36,34 @@ const GITHUB_KNOWN_HOSTS =
     "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
   ].join("\n") + "\n";
 
+/**
+ * Extracts {owner, repo} from any of GitHub's three remote URL shapes
+ * (https://, git@host:, ssh://git@host/) — used by /pr, which needs
+ * owner/repo for the GitHub REST API regardless of which transport the
+ * matching /push used. Returns null for anything not on github.com.
+ */
+export function parseGithubRepo(remoteUrl: string): { owner: string; repo: string } | null {
+  let path: string;
+  if (remoteUrl.startsWith("git@github.com:")) {
+    path = remoteUrl.slice("git@github.com:".length);
+  } else {
+    try {
+      const url = new URL(remoteUrl);
+      if (url.hostname !== "github.com") return null;
+      path = url.pathname.replace(/^\//, "");
+    } catch {
+      return null;
+    }
+  }
+  const [owner, repo] = path.replace(/\.git$/, "").split("/");
+  if (!owner || !repo) return null;
+  return { owner, repo };
+}
+
+export async function getRemoteUrl(worktreePath: string): Promise<string> {
+  return (await git(["remote", "get-url", "origin"], worktreePath)).trim();
+}
+
 function isGithubSshRemote(remote: string): boolean {
   if (remote.startsWith("git@")) return remote.startsWith("git@github.com:");
   if (remote.startsWith("ssh://")) {

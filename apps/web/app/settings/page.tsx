@@ -51,9 +51,10 @@ export default function SettingsPage() {
         title="GitHub token"
         description={
           <>
-            Used by the <code>/push</code> chat command for an <code>https://</code> origin remote. One token for your whole account,
-            reused across every graph you own — see docs/orchestration.md. Needs <code>repo</code> scope for a classic token, or
-            Contents: read/write for a fine-grained one.
+            Used by the <code>/push</code> chat command for an <code>https://</code> origin remote, and always required by{" "}
+            <code>/pr</code> (opening a PR goes through GitHub&apos;s REST API, not git&apos;s transport — even if you pushed over
+            SSH). One token for your whole account, reused across every graph you own — see docs/orchestration.md. Needs{" "}
+            <code>repo</code> scope for a classic token, or Contents + Pull requests: read/write for a fine-grained one.
           </>
         }
         provider="github"

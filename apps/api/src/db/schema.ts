@@ -1,4 +1,5 @@
 import {
+  boolean,
   integer,
   jsonb,
   pgTable,
@@ -205,3 +206,30 @@ export const userCredentials = pgTable(
   // constraint matching the target columns, not just application-level intent.
   (table) => [unique().on(table.userId, table.provider)],
 );
+
+/**
+ * A repeatable BullMQ "job scheduler" fires job.data.triggerId on this
+ * row's cronExpression; the worker re-reads this row fresh on every
+ * firing rather than trusting anything captured when the schedule was
+ * registered (see orchestrator/scheduledTrigger.ts) — enabled/disabled,
+ * input, and mode can all change between when a firing was scheduled and
+ * when it actually runs. `id` is generated client-side (not
+ * defaultRandom()) so the same value can be used as BullMQ's
+ * jobSchedulerId — see queue/scheduleQueue.ts.
+ */
+export const scheduledTriggers = pgTable("scheduled_triggers", {
+  id: uuid("id").primaryKey(),
+  graphId: uuid("graph_id")
+    .notNull()
+    .references(() => agentGraphs.id, { onDelete: "cascade" }),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  name: text("name").notNull(),
+  input: jsonb("input").notNull(),
+  mode: text("mode").notNull().default("pinned"), // "pinned" | "live"
+  cronExpression: text("cron_expression").notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  lastRunId: uuid("last_run_id"),
+  lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

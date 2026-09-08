@@ -6,15 +6,16 @@ no product in the "AI bot" space currently ships one (see Competitive
 notes below).
 
 **Status as of 2026-09-08: all three original phases are built and
-e2e-tested (35/35 passing, `apps/api/e2e/run.ts`), two security reviews
+e2e-tested (38/38 passing, `apps/api/e2e/run.ts`), two security reviews
 found and fixed real vulnerabilities, dark mode shipped, and the product
 grew past the original scope into a working multi-agent "engineering
 team" built from the user's own real projects — now with live run
 visualization, per-agent conversation history, a unified Dashboard
-experience, and agents that can actually write code and (on explicit
-`/push` confirmation, over HTTPS+PAT or SSH) push it (see "Live
-visualization, agent reuse, and dashboard unification" and "Agent
-file-write and confirmed push" below). See "Known gaps" at the bottom
+experience, agents that can actually write code and (on explicit
+`/push` confirmation, over HTTPS+PAT or SSH) push it, and graphs that can
+run themselves on a recurring cron schedule (see "Live visualization,
+agent reuse, and dashboard unification", "Agent file-write and confirmed
+push", and "Scheduled runs" below). See "Known gaps" at the bottom
 for what's still actually missing.**
 
 ## Phase 1 — MVP
@@ -150,6 +151,61 @@ SSH remote gets a clear rejection, not a silent failure. PR creation
 scope decision — a separately-confirmable action needing broader token
 scope.
 
+## Scheduled runs (2026-09-08)
+
+Closes the "no scheduling capability" gap noted below and in the PC
+Health Monitor section — a graph can now run itself on a recurring cron
+schedule with no human triggering it each time.
+
+**Design**: a new `scheduled_triggers` table (`{graphId, name, input,
+cronExpression, mode, enabled, lastRunId, lastTriggeredAt}`) backed by a
+BullMQ **job scheduler** (`queue/scheduleQueue.ts`'s `upsertJobScheduler`/
+`removeJobScheduler` — the current, non-deprecated BullMQ 5.x API;
+`getRepeatableJobs`/`removeRepeatableByKey` are deprecated for removal in
+v6) rather than a naive setInterval or a second cron library. The
+trigger's own id doubles as BullMQ's `jobSchedulerId`, generated
+client-side before insert specifically so an invalid cron pattern can be
+validated (by actually attempting the registration, using cron-parser
+under the hood — the trigger's own light regex pre-check only catches
+gross shape errors like the wrong field count) and rejected with a 400
+*before* anything is persisted. A `run-scheduled-trigger` job firing just
+calls `orchestrator/scheduledTrigger.ts`, which re-reads the trigger and
+its graph **fresh from Postgres** rather than trusting anything captured
+at registration time — a trigger can be disabled/deleted, or its graph's
+`entryNodeId` cleared, between when BullMQ scheduled a firing and when it
+actually runs. It then calls a new shared `orchestrator/createRun.ts`
+helper — extracted from `POST /runs` so a scheduled run is created
+through the exact same path as a manually-started one (same
+`graphSnapshot`/`entryNodeId`/`enqueueHop` logic), not a parallel
+reimplementation that could drift.
+
+**Postgres as source of truth, Redis as derived cache.** BullMQ job
+schedulers persist in Redis independently of the API/worker process, so
+they normally survive a restart with zero extra work — but Redis can be
+wiped independently of Postgres (e.g. `docker compose down -v` on a
+volume-separated deployment). The worker re-registers every `enabled`
+trigger from Postgres on every boot (`reconcileSchedules()` in
+`worker.ts`) — idempotent, since the same trigger id always maps to the
+same `jobSchedulerId`, so this is safe to run on every single startup,
+not just recovery. `DELETE /graphs/:id` also explicitly unregisters any
+schedules the graph had before the cascade deletes their rows — Postgres
+FK cascades know nothing about Redis-side state, so skipping this would
+leave an orphaned scheduler firing forever into a no-op ("trigger not
+found" skip) with no way to stop it short of a Redis flush.
+
+**UI**: a "⏰ Schedules" toolbar button on the Hierarchy canvas opens a
+slide-over (`SchedulesPanel.tsx`, same visual pattern as
+`AgentConversationPanel`) to create/list/enable-disable/delete a graph's
+schedules; a fired run shows up in the graph's normal run history like
+any other, so no separate schedule-run viewer was needed.
+
+e2e-verified including a **real firing**, not just the CRUD contract: a
+6-field (seconds-first) cron pattern (`*/5 * * * * *` — cron-parser,
+which BullMQ uses internally, accepts an optional leading seconds field)
+lets the test observe an actual BullMQ-triggered run complete within
+~8 seconds, immediately disabling the trigger once observed to bound
+the real Anthropic API calls it can rack up. 38/38 passing.
+
 ## PC Health Monitor — capability boundary (deliberate)
 
 linux-command-centre (a sibling project) has no REST API — only a
@@ -165,19 +221,18 @@ access with no human confirmation. If real control automation is wanted
 later, scope it to a narrow, individually-reversible whitelist — never
 the full privileged operation set.
 
-**Not yet built**: an hourly/cron scheduling mechanism for runs — requested
-alongside the PC bot, not yet implemented. BullMQ (already a dependency)
-supports repeatable jobs natively and is the natural fit; needs a new
-`scheduled_triggers` table + routes + worker wiring.
+Scheduling requested alongside the PC bot is now built — see "Scheduled
+runs" above (a graph can run itself on a cron pattern via a BullMQ job
+scheduler; not specific to this agent, works for any graph).
 
 ## Known gaps (honest list)
 
-1. **No scheduling capability yet** (see above) — requested, not built.
-2. **The containerized `web` Docker image has never successfully built** in this environment (persistent npm-registry network flakiness in this sandbox on large packages like `next`/`@next/swc-*` — the `api` image, which doesn't pull those, builds fine). The web app runs via local `pnpm start` against the dockerized API.
-3. **Team/role-based sharing does not exist.** Auth is single-owner only, by design.
-4. The tool registry is a small built-in set, not dynamic npm-package loading — deliberate (arbitrary plugin loading would let anyone who can edit a graph run arbitrary code in the API process).
-5. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
-6. `/push` only supports a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes, and no PR creation (`gh pr create`) yet. See "Agent file-write and confirmed push" above.
+1. **The containerized `web` Docker image has never successfully built** in this environment (persistent npm-registry network flakiness in this sandbox on large packages like `next`/`@next/swc-*` — the `api` image, which doesn't pull those, builds fine). The web app runs via local `pnpm start` against the dockerized API.
+2. **Team/role-based sharing does not exist.** Auth is single-owner only, by design.
+3. The tool registry is a small built-in set, not dynamic npm-package loading — deliberate (arbitrary plugin loading would let anyone who can edit a graph run arbitrary code in the API process).
+4. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
+5. `/push` only supports a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes, and no PR creation (`gh pr create`) yet. See "Agent file-write and confirmed push" above.
+6. Scheduled triggers have no UI history of their own past firings beyond the single `lastRunId`/`lastTriggeredAt` — every firing's actual run is fully visible in the graph's normal run history, just not pre-filtered to "runs this schedule caused."
 7. No UI visibility into pending/unpushed commits — you have to remember to type `/push`; nothing in the canvas or chat currently surfaces "there are N unpushed commits on this graph."
 
 ## Competitive notes (xAI Grok Bot / Grok Build, researched 2026-09)

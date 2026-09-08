@@ -1211,6 +1211,112 @@ async function main() {
     assert(del.status === 204, `expected 204, got ${del.status}`);
   });
 
+  // --- Scheduled triggers ---
+  let scheduleGraphId = "";
+
+  await test("scheduled trigger CRUD: create, list, patch, delete", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E schedules" }) });
+    scheduleGraphId = g.body.id;
+
+    const bad = await api(`/graphs/${scheduleGraphId}/schedules`, {
+      method: "POST",
+      body: JSON.stringify({ name: "bad", input: "x", cronExpression: "not a cron" }),
+    });
+    assert(bad.status === 400, `expected 400 for a malformed cron shape, got ${bad.status}: ${JSON.stringify(bad.body)}`);
+
+    const badSemantics = await api(`/graphs/${scheduleGraphId}/schedules`, {
+      method: "POST",
+      body: JSON.stringify({ name: "bad", input: "x", cronExpression: "99 99 * * *" }),
+    });
+    assert(badSemantics.status === 400, `expected 400 for an out-of-range cron field, got ${badSemantics.status}: ${JSON.stringify(badSemantics.body)}`);
+
+    const created = await api(`/graphs/${scheduleGraphId}/schedules`, {
+      method: "POST",
+      body: JSON.stringify({ name: "Daily check", input: "status?", cronExpression: "0 9 * * *" }),
+    });
+    assert(created.status === 201, `create failed: ${JSON.stringify(created.body)}`);
+    assert(created.body.enabled === true, "expected enabled to default to true");
+    const scheduleId = created.body.id;
+
+    const list = await api(`/graphs/${scheduleGraphId}/schedules`);
+    assert(list.status === 200 && list.body.length === 1, `expected exactly one schedule, got: ${JSON.stringify(list.body)}`);
+
+    const patched = await api(`/graphs/${scheduleGraphId}/schedules/${scheduleId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ cronExpression: "0 10 * * *", enabled: false }),
+    });
+    assert(patched.status === 200, `patch failed: ${JSON.stringify(patched.body)}`);
+    assert(patched.body.cronExpression === "0 10 * * *" && patched.body.enabled === false, `patch did not apply: ${JSON.stringify(patched.body)}`);
+    assert(patched.body.name === "Daily check", "an unrelated field must survive a partial patch unchanged");
+
+    const del = await api(`/graphs/${scheduleGraphId}/schedules/${scheduleId}`, { method: "DELETE" });
+    assert(del.status === 204, `expected 204, got ${del.status}`);
+    const listAfter = await api(`/graphs/${scheduleGraphId}/schedules`);
+    assert(listAfter.body.length === 0, `expected the schedule to be gone, got: ${JSON.stringify(listAfter.body)}`);
+  });
+
+  await test("security: scheduled trigger routes reject a mismatched graphId (IDOR)", async () => {
+    const created = await api(`/graphs/${scheduleGraphId}/schedules`, {
+      method: "POST",
+      body: JSON.stringify({ name: "IDOR target", input: "x", cronExpression: "0 9 * * *" }),
+    });
+    const scheduleId = created.body.id;
+
+    const otherGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E schedules (other)" }) });
+
+    const patch = await api(`/graphs/${otherGraph.body.id}/schedules/${scheduleId}`, { method: "PATCH", body: JSON.stringify({ enabled: false }) });
+    assert(patch.status === 404, `expected 404 for a schedule id under the wrong graphId, got ${patch.status}`);
+
+    const del = await api(`/graphs/${otherGraph.body.id}/schedules/${scheduleId}`, { method: "DELETE" });
+    assert(del.status === 404, `expected 404 for a schedule id under the wrong graphId, got ${del.status}`);
+
+    await api(`/graphs/${scheduleGraphId}/schedules/${scheduleId}`, { method: "DELETE" });
+  });
+
+  await test("a scheduled trigger actually fires on its cron pattern and creates a real, completed run", async () => {
+    const node = await api(`/graphs/${scheduleGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Ticker",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Reply with exactly the single word: tick",
+        tools: [],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${scheduleGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    // 6-field (seconds-first) pattern — cron-parser (used internally by
+    // BullMQ) accepts this — so the test doesn't have to wait up to a full
+    // minute for a standard 5-field pattern's next boundary.
+    const created = await api(`/graphs/${scheduleGraphId}/schedules`, {
+      method: "POST",
+      body: JSON.stringify({ name: "e2e tick", input: "ping", cronExpression: "*/5 * * * * *" }),
+    });
+    assert(created.status === 201, `schedule create failed: ${JSON.stringify(created.body)}`);
+    const scheduleId = created.body.id;
+
+    let firedRunId: string | null = null;
+    for (let i = 0; i < 15 && !firedRunId; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const sched = await api(`/graphs/${scheduleGraphId}/schedules`);
+      firedRunId = sched.body.find((s: any) => s.id === scheduleId)?.lastRunId ?? null;
+    }
+
+    // Disable immediately once we've observed one firing, to bound how many
+    // real Anthropic calls this test can rack up before cleanup runs.
+    await api(`/graphs/${scheduleGraphId}/schedules/${scheduleId}`, { method: "PATCH", body: JSON.stringify({ enabled: false }) });
+    assert(firedRunId, "expected the schedule to fire and record a lastRunId within 15s");
+
+    const run = await waitForRun(firedRunId!);
+    assert(run.status === "completed", `scheduled run did not complete: ${JSON.stringify(run.events)}`);
+    assert(String(run.output).toLowerCase().includes("tick"), `unexpected scheduled run output: ${run.output}`);
+
+    await api(`/graphs/${scheduleGraphId}/schedules/${scheduleId}`, { method: "DELETE" });
+  });
+
   // --- Summary ---
   console.log("\n--- Summary ---");
   const passed = results.filter((r) => r.passed).length;

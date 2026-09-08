@@ -11,11 +11,12 @@ import {
   RoutingCondition,
 } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
-import { agentGraphs, agentNodes, routingEdges, runs } from "../db/schema.js";
+import { agentGraphs, agentNodes, routingEdges, runs, scheduledTriggers } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
 import { loadLiveGraph, nodeRowToAgentNode } from "../orchestrator/engine.js";
 import { requireAuth } from "../auth/middleware.js";
 import { checkWriteRootAllowed, fileAccessRootSchema } from "../validation/fileAccessRoot.js";
+import { unregisterSchedule } from "../queue/scheduleQueue.js";
 
 const createGraphBody = z.object({
   name: z.string().min(1),
@@ -161,11 +162,21 @@ export async function graphRoutes(app: FastifyInstance) {
     return loadLiveGraph(id);
   });
 
-  /** Cascades to the graph's nodes/edges/runs/routing-changes/credentials via FK onDelete rules in db/schema.ts. */
+  /**
+   * Cascades to the graph's nodes/edges/runs/routing-changes/credentials/
+   * scheduled-triggers via FK onDelete rules in db/schema.ts. The DB rows
+   * cascade automatically, but a scheduled trigger's BullMQ job scheduler
+   * lives in Redis, entirely independent of Postgres's FK graph — without
+   * this it would silently keep firing forever, hitting the worker's
+   * "trigger not found in DB → skip" no-op path but never actually
+   * cleaning itself up.
+   */
   app.delete("/graphs/:id", { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!(await requireGraphOwner(req, reply, id))) return;
+    const schedules = await db.select({ id: scheduledTriggers.id }).from(scheduledTriggers).where(eq(scheduledTriggers.graphId, id));
     await db.delete(agentGraphs).where(eq(agentGraphs.id, id));
+    await Promise.all(schedules.map((s) => unregisterSchedule(s.id)));
     return reply.code(204).send();
   });
 

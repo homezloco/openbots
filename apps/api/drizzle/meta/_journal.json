@@ -36,6 +36,13 @@
       "when": 1788844166148,
       "tag": "0004_lively_tony_stark",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788873676490,
+      "tag": "0005_mighty_black_tarantula",
+      "breakpoints": true
     }
   ]
 }

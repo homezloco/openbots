@@ -29,6 +29,7 @@ import {
 } from "../lib/api";
 import { useRunEventsSocket } from "../lib/useRunEventsSocket";
 import { AgentConversationPanel } from "./AgentConversationPanel";
+import { SchedulesPanel } from "./SchedulesPanel";
 import { SignalEdge, type EdgePulse } from "./SignalEdge";
 import { useTheme } from "./ThemeProvider";
 
@@ -333,6 +334,7 @@ export function HierarchyCanvas({
 
   const [lastRunId, setLastRunId] = useState<string | null>(null);
   const [openAgentPanel, setOpenAgentPanel] = useState<string | null>(null);
+  const [showSchedules, setShowSchedules] = useState(false);
   const [runInputOpen, setRunInputOpen] = useState(false);
   const [runInput, setRunInput] = useState("");
   const [templateInputOpen, setTemplateInputOpen] = useState(false);
@@ -449,6 +451,14 @@ export function HierarchyCanvas({
         ) : (
           <button onClick={() => setTemplateInputOpen(true)}>Save as template</button>
         )}
+        <button
+          onClick={() => {
+            setOpenAgentPanel(null);
+            setShowSchedules((s) => !s);
+          }}
+        >
+          ⏰ Schedules
+        </button>
         <a href={`/runs?graphId=${graph.id}`}>View runs</a>
         {showStartRunButton && lastRunId && <a href={`/runs/${lastRunId}`}>Run started — view full trail →</a>}
       </div>
@@ -614,7 +624,10 @@ export function HierarchyCanvas({
           onEdgesChange={onEdgesChange}
           onReconnect={onReconnect}
           onConnect={onConnect}
-          onNodeClick={(_, node) => setOpenAgentPanel(node.id)}
+          onNodeClick={(_, node) => {
+            setShowSchedules(false);
+            setOpenAgentPanel(node.id);
+          }}
           colorMode={theme}
           fitView
           fitViewOptions={{ padding: 0.2, maxZoom: 1.25 }}
@@ -630,6 +643,7 @@ export function HierarchyCanvas({
             onNodeUpdated={handleNodeUpdated}
           />
         )}
+        {showSchedules && <SchedulesPanel graphId={graph.id} onClose={() => setShowSchedules(false)} />}
       </div>
     </div>
   );

@@ -175,6 +175,35 @@ export const createUserCredential = (body: { provider: string; apiKey: string; l
 
 export const deleteUserCredential = (id: string) => request<void>(`/me/credentials/${id}`, { method: "DELETE" });
 
+// --- Scheduled triggers (run a graph on a recurring cron schedule) ---
+
+export interface ScheduledTrigger {
+  id: string;
+  graphId: string;
+  name: string;
+  input: unknown;
+  cronExpression: string;
+  mode: "pinned" | "live";
+  enabled: boolean;
+  lastRunId: string | null;
+  lastTriggeredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const listSchedules = (graphId: string) => request<ScheduledTrigger[]>(`/graphs/${graphId}/schedules`);
+
+export const createSchedule = (
+  graphId: string,
+  body: { name: string; input: unknown; cronExpression: string; mode?: "pinned" | "live"; enabled?: boolean },
+) => request<ScheduledTrigger>(`/graphs/${graphId}/schedules`, { method: "POST", body: JSON.stringify(body) });
+
+export const updateSchedule = (graphId: string, id: string, body: Partial<Pick<ScheduledTrigger, "name" | "input" | "cronExpression" | "mode" | "enabled">>) =>
+  request<ScheduledTrigger>(`/graphs/${graphId}/schedules/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+
+export const deleteSchedule = (graphId: string, id: string) =>
+  request<void>(`/graphs/${graphId}/schedules/${id}`, { method: "DELETE" });
+
 // --- Runs ---
 
 export interface Run {

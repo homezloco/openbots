@@ -6,8 +6,7 @@ import { pushBranch, type Worktree } from "@openbots/providers";
 import { db } from "../db/client.js";
 import { agentCommits, agentGraphs, agentNodes, runEvents, runs, usageEvents, userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
-import { loadLiveGraph } from "../orchestrator/engine.js";
-import { enqueueHop } from "../queue/runQueue.js";
+import { createRun } from "../orchestrator/createRun.js";
 import { requireAuth } from "../auth/middleware.js";
 import { requireGraphOwner } from "./graphs.js";
 
@@ -125,21 +124,7 @@ export async function runRoutes(app: FastifyInstance) {
       return reply.code(422).send({ error: "Graph has no entryNodeId set" });
     }
 
-    const graph = await loadLiveGraph(body.graphId);
-
-    const [run] = await db
-      .insert(runs)
-      .values({
-        graphId: body.graphId,
-        mode: body.mode,
-        graphSnapshot: body.mode === "pinned" ? graph : null,
-        status: "pending",
-        currentNodeId: graphRow.entryNodeId,
-        input: body.input,
-      })
-      .returning();
-
-    await enqueueHop(run.id);
+    const run = await createRun(graphRow, body.input, body.mode);
     return reply.code(201).send(run);
   });
 

@@ -6,11 +6,16 @@ import { userCredentials } from "../db/schema.js";
 import { encryptCredential } from "../auth/crypto.js";
 import { requireAuth } from "../auth/middleware.js";
 
-const createCredentialBody = z.object({
-  provider: z.string().min(1),
-  apiKey: z.string().min(1),
-  label: z.string().optional(),
-});
+const createCredentialBody = z
+  .object({
+    provider: z.string().min(1),
+    apiKey: z.string().min(1),
+    label: z.string().optional(),
+  })
+  .refine(
+    (body) => body.provider !== "github_ssh_key" || /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(body.apiKey),
+    { message: "Expected a PEM-encoded private key (starting with -----BEGIN ... PRIVATE KEY-----)", path: ["apiKey"] },
+  );
 
 function toSummary(row: typeof userCredentials.$inferSelect) {
   return {

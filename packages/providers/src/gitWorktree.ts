@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { appendFile, mkdir, readFile, stat } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -8,6 +9,67 @@ const execFileAsync = promisify(execFile);
 export interface Worktree {
   path: string;
   branch: string;
+}
+
+export interface PushCredentials {
+  /** GitHub personal access token, used for an https:// origin. */
+  token?: string;
+  /** PEM-encoded SSH private key, used for a git@/ssh:// origin. */
+  sshKey?: string;
+}
+
+/**
+ * GitHub's own published SSH host public keys (https://api.github.com/meta,
+ * "ssh_keys" — fetched and verified against that endpoint directly, not
+ * transcribed from memory). Pinned here rather than trusting whatever
+ * `ssh-keyscan` returns at push time, which would be vulnerable to a
+ * MITM on the very first connection — exactly what host-key pinning
+ * exists to prevent. Stable but not guaranteed forever: GitHub has
+ * rotated these before (e.g. after their 2023 RSA key exposure). If SSH
+ * pushes start failing with a host-key-verification error, re-fetch from
+ * the URL above.
+ */
+const GITHUB_KNOWN_HOSTS =
+  [
+    "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+    "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
+    "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
+  ].join("\n") + "\n";
+
+function isGithubSshRemote(remote: string): boolean {
+  if (remote.startsWith("git@")) return remote.startsWith("git@github.com:");
+  if (remote.startsWith("ssh://")) {
+    try {
+      return new URL(remote).hostname === "github.com";
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Runs `fn` with a GIT_SSH_COMMAND pointed at a freshly-written, mode-0600
+ * private key and a pinned known_hosts (see GITHUB_KNOWN_HOSTS) — both
+ * live only inside a fresh 0700 temp dir for the duration of this one
+ * push, deleted immediately after regardless of outcome. The key is never
+ * written into any repo, worktree, or persistent config. BatchMode=yes
+ * means a passphrase-protected key or a host-key mismatch fails fast and
+ * clearly instead of hanging the worker waiting on a prompt nothing can
+ * ever answer.
+ */
+async function withEphemeralSshKey<T>(privateKey: string, fn: (sshCommand: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), "openbots-ssh-"));
+  try {
+    const keyPath = join(dir, "key");
+    const knownHostsPath = join(dir, "known_hosts");
+    await writeFile(keyPath, privateKey.endsWith("\n") ? privateKey : `${privateKey}\n`, { mode: 0o600 });
+    await writeFile(knownHostsPath, GITHUB_KNOWN_HOSTS, { mode: 0o600 });
+    const sshCommand = `ssh -i ${keyPath} -o UserKnownHostsFile=${knownHostsPath} -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes`;
+    return await fn(sshCommand);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 function slugify(name: string): string {
@@ -146,19 +208,29 @@ export async function commitWorktreeChanges(worktree: Worktree, nodeName: string
   return sha.trim();
 }
 
-export async function pushBranch(worktree: Worktree, githubToken?: string): Promise<{ remote: string; message: string }> {
+export async function pushBranch(worktree: Worktree, credentials?: PushCredentials): Promise<{ remote: string; message: string }> {
   const remote = (await git(["remote", "get-url", "origin"], worktree.path)).trim();
   if (!remote) throw new Error("No origin remote configured");
 
   if (remote.startsWith("https://")) {
-    if (!githubToken) {
+    if (!credentials?.token) {
       throw new Error("HTTPS origin requires a GitHub token — save one via POST /me/credentials");
     }
-    const auth = Buffer.from(`x-access-token:${githubToken}`).toString("base64");
+    const auth = Buffer.from(`x-access-token:${credentials.token}`).toString("base64");
     const header = `AUTHORIZATION: basic ${auth}`;
     await git(["-c", `http.extraheader=${header}`, "push", "origin", worktree.branch], worktree.path);
   } else if (remote.startsWith("ssh://") || remote.startsWith("git@")) {
-    throw new Error("SSH origin is not supported in v1; use an HTTPS origin");
+    if (!isGithubSshRemote(remote)) {
+      throw new Error(
+        "SSH push is only supported for github.com origins (the pinned host key is GitHub's) — use an HTTPS origin for other hosts.",
+      );
+    }
+    if (!credentials?.sshKey) {
+      throw new Error("SSH origin requires a GitHub SSH private key — save one via POST /me/credentials (provider: github_ssh_key)");
+    }
+    await withEphemeralSshKey(credentials.sshKey, (sshCommand) =>
+      git(["push", "origin", worktree.branch], worktree.path, { ...process.env, GIT_SSH_COMMAND: sshCommand }),
+    );
   } else {
     // Plain (file:// or local path) — used by e2e against a local bare repo,
     // and by any self-hosted deployment pointing origin at a local/NFS path.

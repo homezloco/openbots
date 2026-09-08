@@ -65,18 +65,26 @@ async function handlePushCommand(
     return reply.code(201).send(run);
   }
 
-  const [cred] = await db
+  const creds = await db
     .select()
     .from(userCredentials)
-    .where(and(eq(userCredentials.userId, req.userId as string), eq(userCredentials.provider, "github")))
-    .limit(1);
+    .where(
+      and(
+        eq(userCredentials.userId, req.userId as string),
+        inArray(userCredentials.provider, ["github", "github_ssh_key"]),
+      ),
+    );
 
-  const token = cred ? decryptCredential(cred.encryptedKey) : undefined;
+  const token = creds.find((c) => c.provider === "github");
+  const sshKey = creds.find((c) => c.provider === "github_ssh_key");
   const worktree: Worktree = { path: commit.worktreePath, branch: commit.branch };
 
   let result: { remote: string; message: string };
   try {
-    result = await pushBranch(worktree, token);
+    result = await pushBranch(worktree, {
+      token: token ? decryptCredential(token.encryptedKey) : undefined,
+      sshKey: sshKey ? decryptCredential(sshKey.encryptedKey) : undefined,
+    });
   } catch (err) {
     return reply.code(400).send({ error: err instanceof Error ? err.message : "Push failed" });
   }

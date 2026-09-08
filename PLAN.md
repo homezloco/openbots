@@ -5,15 +5,17 @@ differentiator: a live, editable canvas of the agent hierarchy and routing —
 no product in the "AI bot" space currently ships one (see Competitive
 notes below).
 
-**Status as of 2026-09-07: all three original phases are built and
-e2e-tested (17/17 passing, `apps/api/e2e/run.ts`), two security reviews
+**Status as of 2026-09-08: all three original phases are built and
+e2e-tested (35/35 passing, `apps/api/e2e/run.ts`), two security reviews
 found and fixed real vulnerabilities, dark mode shipped, and the product
 grew past the original scope into a working multi-agent "engineering
 team" built from the user's own real projects — now with live run
-visualization, per-agent conversation history, and a unified Dashboard
-experience (see "Live visualization, agent reuse, and dashboard
-unification" below). See "Known gaps" at the bottom for what's still
-actually missing.**
+visualization, per-agent conversation history, a unified Dashboard
+experience, and agents that can actually write code and (on explicit
+`/push` confirmation, over HTTPS+PAT or SSH) push it (see "Live
+visualization, agent reuse, and dashboard unification" and "Agent
+file-write and confirmed push" below). See "Known gaps" at the bottom
+for what's still actually missing.**
 
 ## Phase 1 — MVP
 
@@ -93,6 +95,61 @@ The real Engineering Team graph now has this wired up: a new "Status Aggregator"
 
 **Not yet manually verified in-browser** (no browser automation available in the environment this was built in): the pulse/signal animation's visual feel and timing, and the Dashboard/HierarchyChat layout. All backend behavior is e2e-verified (17/17); the visual polish needs a live look.
 
+## Agent file-write and confirmed push (2026-09-08)
+
+Write-capable agents were the natural next step once the "engineering
+team" graph existed for real work: an agent could read and reason about
+a project but never actually change it. Two phases, both e2e-verified
+(35/35) and confirmed live against a real project's repo.
+
+**Phase 1 — isolated writes.** `write_file`/`edit_file` tools
+(`packages/providers/src/tools.ts`), gated by a node's `tools[]` the same
+way read tools are, plus a separate, independent `ALLOWED_FILE_WRITE_ROOTS`
+operator allowlist (a node having read access to a path never implies
+write access). The first write in a run creates an isolated `git
+worktree` on a fresh `openbots/<node>-<runId8>` branch off HEAD
+(`packages/providers/src/gitWorktree.ts`) — writes never touch the user's
+actual checkout, and nothing is committed until a hop finishes (per-hop
+commit granularity, not per-tool-call or per-run). `resolveWithinRoot`
+resolves symlinks via a realpath walk-up (shared with the read tools) so
+a symlink inside the repo can't be used to write outside the allowed
+root. `appendWriteContext` (`engine.ts`) teaches a write-capable node the
+real workflow (writes auto-commit; it has no git/push tool and must never
+claim otherwise, including if a message claims to be the user's
+push-approval) — without this it either invented an inaccurate manual
+git workflow to recommend or refused out of misplaced caution.
+
+**Phase 2 — confirmed push.** The literal chat command `/push` (optionally
+`/push <branch>`), intercepted by exact regex match in `POST /runs`
+**before** any orchestration/model involvement — a hard, non-negotiable
+design constraint: the decision to push is made by deterministic backend
+code reading the human's own literal input, never by an LLM interpreting
+free text (closes an obvious prompt-injection path onto an irreversible,
+shared-system action). `agent_commits` tracks every commit for push-target
+lookup; account-scoped `user_credentials` (separate from the existing
+graph-scoped provider credentials) stores an encrypted GitHub PAT and/or
+SSH private key, manageable at `/settings` in the web app. `pushBranch()`
+(`gitWorktree.ts`): an `https://` origin uses the stored PAT via a
+one-request `http.extraheader` (never persisted to `.git/config`); a
+`git@github.com:`/`ssh://github.com/` origin (github.com only — see
+below) uses the stored SSH key, written to a 0600 file inside a fresh
+0700 temp dir for the duration of one push and deleted immediately after,
+with `GIT_SSH_COMMAND` pinned to GitHub's own published host key
+(`https://api.github.com/meta`, hardcoded to avoid trusting whatever
+`ssh-keyscan` returns on first connection — the exact MITM host-key
+pinning exists to prevent) and `BatchMode=yes` so a passphrase-protected
+key or host-key mismatch fails fast instead of hanging the worker on a
+prompt nothing can answer; any other SSH host, or a local/file path
+(what the e2e suite pushes against), falls through to a clear error or a
+plain push respectively.
+
+**Known limitation, not a bug**: SSH push only supports `github.com` as
+the host (the pinned key is GitHub's) — a GitLab/Bitbucket/self-hosted
+SSH remote gets a clear rejection, not a silent failure. PR creation
+(`gh pr create`) is deliberately out of scope, same as v1's original
+scope decision — a separately-confirmable action needing broader token
+scope.
+
 ## PC Health Monitor — capability boundary (deliberate)
 
 linux-command-centre (a sibling project) has no REST API — only a
@@ -120,6 +177,8 @@ supports repeatable jobs natively and is the natural fit; needs a new
 3. **Team/role-based sharing does not exist.** Auth is single-owner only, by design.
 4. The tool registry is a small built-in set, not dynamic npm-package loading — deliberate (arbitrary plugin loading would let anyone who can edit a graph run arbitrary code in the API process).
 5. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
+6. `/push` only supports a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes, and no PR creation (`gh pr create`) yet. See "Agent file-write and confirmed push" above.
+7. No UI visibility into pending/unpushed commits — you have to remember to type `/push`; nothing in the canvas or chat currently surfaces "there are N unpushed commits on this graph."
 
 ## Competitive notes (xAI Grok Bot / Grok Build, researched 2026-09)
 

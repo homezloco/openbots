@@ -1135,6 +1135,48 @@ async function main() {
     assert(before === after, "the bare remote's HEAD must be completely unchanged by free-text that merely looks like a push request");
   });
 
+  // The SSH transport itself needs a real SSH server/GitHub account and can't be
+  // exercised deterministically in e2e — these two cover the parts that can be:
+  // the github.com-only host restriction, and the missing-credential error. Real
+  // SSH push mechanics are the user's own responsibility to verify against a real
+  // repo (see docs/orchestration.md).
+  await test("/push rejects a non-github SSH origin with a clear error", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: writeGraphId, input: "Create a file called ssh-test-1.txt containing exactly: ssh test" }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+
+    // Worktrees share their repo-level `origin` remote with the main checkout
+    // (only HEAD/index/working dir are per-worktree) — and the worktree's own
+    // .git pointer file was written with the CONTAINER's absolute path (it was
+    // created inside the container), so it can't be resolved from the host
+    // directly. Changing origin on the main checkout affects every worktree.
+    execFileSync("git", ["remote", "set-url", "origin", "git@gitlab.com:example/not-github.git"], { cwd: writableFixtureHostPath });
+
+    const pushRun = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: writeGraphId, input: "/push" }) });
+    assert(pushRun.status === 400, `expected 400, got ${pushRun.status}: ${JSON.stringify(pushRun.body)}`);
+    assert(/github\.com/i.test(String(pushRun.body.error)), `expected a github.com-only error, got: ${pushRun.body.error}`);
+  });
+
+  await test("/push rejects a github SSH origin with no SSH key configured", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: writeGraphId, input: "Create a file called ssh-test-2.txt containing exactly: ssh test 2" }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+
+    execFileSync("git", ["remote", "set-url", "origin", "git@github.com:homezloco/openbots-e2e-nonexistent.git"], {
+      cwd: writableFixtureHostPath,
+    });
+
+    const pushRun = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: writeGraphId, input: "/push" }) });
+    assert(pushRun.status === 400, `expected 400, got ${pushRun.status}: ${JSON.stringify(pushRun.body)}`);
+    assert(/ssh private key/i.test(String(pushRun.body.error)), `expected a missing-ssh-key error, got: ${pushRun.body.error}`);
+  });
+
   await test("user credentials: a GitHub token is stored encrypted and never returned in plaintext", async () => {
     const create = await api("/me/credentials", {
       method: "POST",
@@ -1150,6 +1192,22 @@ async function main() {
     assert(githubCred, "expected the github credential to appear in the list");
 
     const del = await api(`/me/credentials/${githubCred.id}`, { method: "DELETE" });
+    assert(del.status === 204, `expected 204, got ${del.status}`);
+  });
+
+  await test("user credentials: github_ssh_key rejects a non-PEM value and accepts a well-formed one", async () => {
+    const bad = await api("/me/credentials", {
+      method: "POST",
+      body: JSON.stringify({ provider: "github_ssh_key", apiKey: "not-a-real-key" }),
+    });
+    assert(bad.status === 400, `expected 400 for a non-PEM value, got ${bad.status}: ${JSON.stringify(bad.body)}`);
+
+    const fakeKey = "-----BEGIN OPENSSH PRIVATE KEY-----\nZmFrZWZha2VmYWtl\n-----END OPENSSH PRIVATE KEY-----";
+    const good = await api("/me/credentials", { method: "POST", body: JSON.stringify({ provider: "github_ssh_key", apiKey: fakeKey }) });
+    assert(good.status === 201, `expected 201 for a well-formed PEM header, got ${good.status}: ${JSON.stringify(good.body)}`);
+    assert(!JSON.stringify(good.body).includes("BEGIN OPENSSH"), "the raw key must never appear in the create response");
+
+    const del = await api(`/me/credentials/${good.body.id}`, { method: "DELETE" });
     assert(del.status === 204, `expected 204, got ${del.status}`);
   });
 

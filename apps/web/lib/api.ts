@@ -159,6 +159,22 @@ export const createCredential = (
 export const deleteCredential = (graphId: string, credentialId: string) =>
   request<void>(`/graphs/${graphId}/credentials/${credentialId}`, { method: "DELETE" });
 
+// --- User credentials (account-scoped, e.g. the GitHub token /push uses) ---
+
+export interface UserCredentialSummary {
+  id: string;
+  provider: string;
+  label: string;
+  createdAt: string;
+}
+
+export const listUserCredentials = () => request<UserCredentialSummary[]>("/me/credentials");
+
+export const createUserCredential = (body: { provider: string; apiKey: string; label?: string }) =>
+  request<UserCredentialSummary>("/me/credentials", { method: "POST", body: JSON.stringify(body) });
+
+export const deleteUserCredential = (id: string) => request<void>(`/me/credentials/${id}`, { method: "DELETE" });
+
 // --- Runs ---
 
 export interface Run {

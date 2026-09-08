@@ -41,6 +41,7 @@ export function NavBar() {
       <ThemeToggle />
       {!loading && (user ? (
         <>
+          <NavLink href="/settings">Settings</NavLink>
           <span style={{ color: "var(--text-muted)", fontSize: 14 }}>{user.email}</span>
           <button onClick={logout} style={{ background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}>
             Log out

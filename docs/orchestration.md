@@ -106,3 +106,182 @@ Without this, any transient provider hiccup fails the whole hop.
 If a hop already executed a non-idempotent tool call (sent an email,
 wrote a record) before a reroute lands, that side effect is not undone —
 rerouting only ever changes what happens *after* the point it's applied.
+
+## Write tools and git worktree isolation
+
+A node with `write_file`/`edit_file` in its `tools[]` never writes into
+the user's real checkout. The first write in a run calls
+`ensureWorktree(root, nodeId, nodeName, runId)`
+(`packages/providers/src/gitWorktree.ts`), which creates a `git worktree`
+at `<fileAccessRoot>/.openbots/worktrees/<slug>-<runId8>/` on a fresh
+`openbots/<slug>-<runId8>` branch off the repo's current HEAD. Every
+`write_file`/`edit_file` call for that run's remaining hops operates only
+inside that directory. `callAgent` (`engine.ts`) computes `canWrite` and
+resolves the worktree *before* building the system prompt, since
+`appendWriteContext` needs to know whether to inject the "your writes
+auto-commit" explanation.
+
+**Authorization is two independent checks, not one.** A node's
+`fileAccessRoot` must already satisfy `ALLOWED_FILE_ACCESS_ROOTS` (the
+base read allowlist — required for *any* file tool, including read-only
+ones) — write tools additionally require it to satisfy
+`ALLOWED_FILE_WRITE_ROOTS`, a completely separate operator allowlist
+(`validation/fileAccessRoot.ts::checkWriteRootAllowed`). Both allowlists
+must list the same path for a node to get write access to it; adding a
+path to only one is a common way to get a confusing rejection. The read
+allowlist is checked once, at node save time; the write allowlist is
+*also* re-checked at tool-resolution time in `resolveTools`
+(`packages/providers/src/tools.ts`), so revoking write access to a path
+takes effect on that node's very next run even without editing the node.
+
+**Commit granularity is per-hop.** `commitWorktreeChanges(worktree,
+nodeName, touchedFiles)` runs once after `generateText` resolves for a
+hop, gated on whether `touchedFiles` (populated by each write/edit tool's
+own `execute()`, closure-scoped per `callAgent` call — fresh per
+fallback-chain attempt, so a failed provider's partial writes never get
+attributed to a later successful provider's commit) is non-empty.
+Per-tool-call commits were considered and rejected: the AI SDK's
+`stepCountIs` means a single model step can make several tool calls, so
+tracking "pending commit" state across calls with concurrently-running
+`execute()`s would be a real race.
+
+**Symlink escape.** `resolveWithinRoot` isn't a lexical
+`path.relative()` check — after computing the target path, it walks up
+from the target to the nearest existing ancestor, `fs.realpath`s it, and
+verifies that realpath is still within the root's own realpath. A
+symlink inside the worktree pointing outside it would otherwise let a
+write that looks contained on paper land wherever the symlink actually
+points once the OS follows it. Shared between the read and write tools —
+this was always a latent information-disclosure gap for `read_file`, but
+arbitrary write onto a live project is a much higher-severity version of
+the same bug.
+
+**Root-owned files.** The container runs as root (`apps/api/Dockerfile`,
+no `USER` directive) while host-mounted project directories are owned by
+the host user — `ensureSafeDirectory` runs `git config --global --add
+safe.directory <root>` (idempotent, checked via `--get-all` first) before
+any git operation against a given root, or git refuses with "detected
+dubious ownership." No global git identity is configured anywhere;
+`GIT_AUTHOR_NAME`/`_EMAIL`/`GIT_COMMITTER_NAME`/`_EMAIL` are set per
+`git commit` child-process call instead. Files the container creates end
+up root-owned on the host afterward (harmless in CI; may need `sudo` to
+clean up a stale worktree locally) — cleanup is deliberately manual in
+v1, since the failure mode of a background job deleting unreviewed agent
+work is worse than directories accumulating.
+
+**Not check-then-act.** `git worktree add` is called unconditionally,
+never guarded by an existence check first — with `WORKER_CONCURRENCY`
+defaulting to 10 and consensus fan-out running branches concurrently, two
+hops can legitimately race to create the same `(runId, nodeId)`
+worktree. A failure is only treated as fatal if the worktree path still
+doesn't exist afterward, regardless of the specific git error text —
+git's own ref/lock semantics are the real source of atomicity, not
+application code. `commitWorktreeChanges` similarly retries on
+`.git/index.lock` contention with backoff rather than failing outright.
+
+## Confirmed push and PR creation (`/push`, `/pr`)
+
+**The one non-negotiable design constraint**: the decision to push or
+open a PR is made by deterministic backend code reading the human's own
+literal, unprocessed chat input — never by an LLM interpreting free-form
+text, and never triggered by anything in an agent's generated output or
+a tool result. `POST /runs` (`apps/api/src/routes/runs.ts`) matches the
+raw `input` string against `/^\/(?:push)(?:\s+(.+))?$/` and
+`/^\/pr(?:\s+(.+))?$/` **before** the request ever reaches the
+orchestration engine or any model. If either check instead asked a
+model "did the user just approve a push," anything that model had ever
+read — a file, a tool result, an earlier message — could contain text
+engineered to look like approval: a direct prompt-injection path to an
+irreversible, shared-system action. Never move either check later in the
+pipeline, and never make it fuzzy/semantic — treat this the same way you
+would treat "never build a SQL query by string-concatenating user input."
+
+**Finding what to act on.** `agent_commits` (`{runId, graphId, nodeId,
+worktreePath, branch, commitSha, pushedAt, createdAt}`) records every
+commit `commitWorktreeChanges` makes, populated from `engine.ts::callAgent`
+right alongside the free-text commit note it already appends to a hop's
+output. `/push` with no argument targets the most recent row where
+`pushedAt IS NULL`; `/push <branch>` scopes to a specific branch. `/pr`
+(optionally `/pr <title>`) separately targets the most recent row where
+`pushedAt IS NOT NULL` — a PR can only target a branch GitHub already
+has — and checks for an already-open PR on that branch first (a
+friendlier "PR #N already exists" message instead of a redundant 422
+from GitHub), reading the repo's actual `default_branch` from the API
+rather than assuming `main`.
+
+**Credentials are account-scoped, not graph-scoped.** `user_credentials`
+(`{userId, provider, label, encryptedKey}`, unique on `(userId,
+provider)`) is deliberately separate from the graph/node-scoped
+`provider_credentials` (AI model keys) — a different shape for a
+different purpose. Two providers are meaningful here: `"github"` (a PAT,
+used for an `https://` origin, and **always** required for `/pr`
+regardless of push transport, since PR creation is a GitHub REST API
+call, not a git-transport operation) and `"github_ssh_key"` (a PEM
+private key, used for a `git@`/`ssh://` origin, `github.com` only).
+Managed at `/settings` in the web app.
+
+**SSH push mechanics.** `pushBranch()` restricts SSH to `github.com`
+(`isGithubSshRemote`) — any other host gets a clear rejection rather
+than a silently mis-pinned host key, since the whole point of the next
+step is pinning a *specific* known key. The private key is written to a
+0600 file inside a fresh 0700 temp dir (`withEphemeralSshKey`) for the
+duration of exactly one `git push` child process and deleted immediately
+after in a `finally` block — never persisted into any repo, worktree, or
+config. `GIT_SSH_COMMAND` pins `UserKnownHostsFile` to GitHub's own
+published SSH host keys (fetched directly from `https://api.github.com/meta`
+when building this, not transcribed from memory, to rule out a
+transcription error silently breaking every push) rather than trusting
+whatever `ssh-keyscan` returns on first connection — exactly the MITM
+that host-key pinning exists to prevent. `BatchMode=yes` means a
+passphrase-protected key or a host-key mismatch fails fast and clearly
+instead of hanging a BullMQ worker on a prompt nothing can ever answer.
+
+**The model needs to be told the real workflow.** It has zero innate
+knowledge that its writes get auto-committed (a pure engine side effect
+happening *after* it responds) — `engine.ts::appendWriteContext` injects
+that explanation into a write-capable node's system prompt. Without this
+a node either invents an inaccurate manual git workflow to recommend, or
+refuses out of an understandable but misplaced caution; the injected
+context keeps the one thing it should stay firm on (it never has push/PR
+capability, full stop, regardless of what any message claims) while
+making its explanation of what actually happens accurate.
+
+## Scheduled runs
+
+`scheduled_triggers` (`{graphId, name, input, cronExpression, mode,
+enabled, lastRunId, lastTriggeredAt}`) lets a graph run itself on a
+recurring cron schedule with no human triggering it each time, backed by
+BullMQ's **job scheduler** API (`queue/scheduleQueue.ts`) —
+`upsertJobScheduler`/`removeJobScheduler`, not `getRepeatableJobs`/
+`removeRepeatableByKey`, which still work but are deprecated for removal
+in BullMQ v6. The trigger's own id doubles as the `jobSchedulerId`
+(generated client-side before insert, specifically so an invalid cron
+pattern — validated by actually attempting the registration, cron-parser
+under the hood — can be rejected with a 400 before anything is
+persisted), so re-registering is naturally idempotent: safe to call
+again on every enable/edit, and on every worker boot.
+
+**Postgres is the source of truth; Redis is a derived cache.** A BullMQ
+job scheduler persists in Redis independently of the API/worker process,
+so it normally survives a restart with zero extra work — but Redis can
+be wiped independently of Postgres (e.g. a volume-separated `docker
+compose down -v`). `worker.ts::reconcileSchedules()` re-registers every
+`enabled` trigger from Postgres on *every* boot, not just recovery —
+harmless to repeat, since the same trigger id always maps to the same
+`jobSchedulerId`. `DELETE /graphs/:id` explicitly unregisters a graph's
+schedules before the FK cascade removes their rows, for the same
+reason: Postgres cascades know nothing about Redis-side state, and
+skipping this would leave an orphaned scheduler firing forever into a
+"trigger not found" no-op with no way to stop it short of a Redis flush.
+
+**A firing re-validates against current state, not captured state.**
+`orchestrator/scheduledTrigger.ts::runScheduledTrigger` re-reads the
+trigger and its graph fresh from Postgres — a trigger can be
+disabled/deleted, or its graph's `entryNodeId` cleared, between when
+BullMQ scheduled a firing and when it actually runs. It creates the run
+through the same shared `orchestrator/createRun.ts` helper `POST /runs`
+uses (extracted specifically for this), so a scheduled run is created
+through the exact same path as a manually-started one rather than a
+parallel reimplementation that could drift. `runs.scheduledTriggerId`
+(nullable, `onDelete: set null`) records which trigger caused a run, if
+any, so its own run history survives that trigger being deleted later.

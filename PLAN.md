@@ -6,8 +6,8 @@ no product in the "AI bot" space currently ships one (see Competitive
 notes below).
 
 **Status as of 2026-09-08: all three original phases are built and
-e2e-tested (42/42 passing, `apps/api/e2e/run.ts`), two security reviews
-found and fixed real vulnerabilities, dark mode shipped, and the product
+e2e-tested (43/43 passing, `apps/api/e2e/run.ts`), three security review
+passes found and fixed real vulnerabilities, dark mode shipped, and the product
 grew past the original scope into a working multi-agent "engineering
 team" built from the user's own real projects — now with live run
 visualization, per-agent conversation history, a unified Dashboard
@@ -68,6 +68,22 @@ Full review + fixes documented in the session; two real, high-confidence finding
 
 All three are covered by new e2e regression tests (`security: ...` cases in `apps/api/e2e/run.ts`).
 
+## Security finding (2026-09-08): unauthenticated routing-changes leak
+
+Found while cross-referencing every route file against this plan for a
+documentation-completeness pass — the same bug class as the two 2026-09-07
+findings above, missed because it predates this session and had no e2e
+coverage. `GET /graphs/:id/routing-changes` (`routes/routingChanges.ts`)
+had **no `requireAuth` and no ownership check at all**: any caller,
+authenticated or not, could read the full mutation audit trail
+(`before`/`after` JSON — a node or edge's complete config, including
+system prompts, `fileAccessRoot`, and `tools`) for *any* graph id.
+Fixed: added `requireAuth` + `requireGraphOwner`, matching every other
+per-graph route. Covered by a new e2e case (401 unauthenticated, 403
+wrong owner, 200 owner) — 43/43 passing. The frontend client function
+(`listRoutingChanges` in `lib/api.ts`) exists but is currently unused by
+any page, which is presumably why this went unnoticed for so long.
+
 ## CI
 
 `.github/workflows/e2e.yml` runs the real e2e suite (docker compose up → migrate → build/start api+worker → wait for health → `test:e2e`) on every push to `main` and on-demand via `workflow_dispatch`. Deliberately not on every PR, since each run makes real, billed Anthropic API calls. The file-access fixture that used to be set up by hand inside the running container (`/tmp/testrepo`) is now committed at `apps/api/e2e/fixtures/testrepo/` and mounted in by `docker-compose.yml`, so this also fixed a real reproducibility gap for local dev, not just CI. **Needs three repo secrets added before it will pass**: `ANTHROPIC_API_KEY`, `E2E_SESSION_SECRET`, `E2E_CREDENTIALS_ENCRYPTION_KEY`.
@@ -95,7 +111,7 @@ The real Engineering Team graph now has this wired up: a new "Status Aggregator"
 
 **Auto-sync, not just a warning.** Initially shipped as a soft warning only (drift between `auto` edges and `consensusGroup.edgeIds` is possible but flagged) — per explicit user preference, upgraded to auto-sync: `POST /graphs/:id/edges` now appends a new `auto` edge's id to its source node's `consensusGroup.edgeIds` automatically when that source is already a hybrid node, so adding a new specialist under Lead Engineer (via any of the three Add-agent modes, which all funnel through this one endpoint) means it's included in the next "ALL" broadcast with no manual PATCH step. Still overridable — PATCH a specific edge id back out if a new agent should be excluded from broadcasts for now. 21/21 e2e passing (added a case creating a new auto edge and asserting it lands in `consensusGroup.edgeIds` with no coverage warning).
 
-**Not yet manually verified in-browser** (no browser automation available in the environment this was built in): the pulse/signal animation's visual feel and timing, and the Dashboard/HierarchyChat layout. All backend behavior is e2e-verified (17/17); the visual polish needs a live look.
+**Not yet manually verified in-browser**: the pulse/signal animation's visual feel and timing, and the Dashboard/HierarchyChat layout, specifically. (Browser automation *is* available in this environment as of 2026-09-08 — used repeatedly since for `/settings`, the Schedules panel, and the Commits panel — this note is just an honest "nobody has actually looked at this one yet," not an environment limitation anymore.) All backend behavior is e2e-verified; the visual polish needs a live look.
 
 ## Agent file-write and confirmed push (2026-09-08)
 

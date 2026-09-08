@@ -31,7 +31,16 @@ red build rather than a user bug report.
 
 ## Credentials
 
-`apps/api/src/orchestrator/credentials.ts` currently reads one API key per
-provider from the environment — a scaffold placeholder. Phase 2 replaces
-this with per-graph/per-node key management (see `PLAN.md`) so different
-agents can use different accounts/keys for the same provider.
+`apps/api/src/orchestrator/credentials.ts` resolves a model provider's
+API key in order: a node-specific stored credential, then a graph-wide
+one, then an environment variable — different agents can use different
+accounts/keys for the same provider. Stored credentials
+(`provider_credentials`) are AES-256-GCM encrypted (`auth/crypto.ts`) and
+the plaintext never appears in any API response.
+
+This is a *different* system from `user_credentials` — account-scoped,
+not graph/node-scoped, holding the GitHub PAT/SSH key `/push` and `/pr`
+use (see `docs/orchestration.md`'s "Confirmed push and PR creation"
+section). Don't conflate the two: a graph-scoped provider credential
+authenticates model calls; an account-scoped user credential
+authenticates git operations against GitHub.

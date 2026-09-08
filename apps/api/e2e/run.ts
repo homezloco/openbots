@@ -701,6 +701,25 @@ async function main() {
     assert(owner.status === 200, `expected the actual owner to be able to read their own run, got ${owner.status}`);
   });
 
+  await test("security: GET /graphs/:id/routing-changes requires authentication and ownership", async () => {
+    // Found with NO auth check at all during a documentation completeness
+    // pass — the same bug class as the GET /runs/:id finding above.
+    const ownerCookie = sessionCookie;
+
+    sessionCookie = "";
+    const unauth = await api(`/graphs/${basicGraphId}/routing-changes`);
+    assert(unauth.status === 401, `expected 401 with no session, got ${unauth.status}: ${JSON.stringify(unauth.body)}`);
+
+    const otherEmail = `e2e-other-routing-${Date.now()}@openbots.dev`;
+    await api("/auth/signup", { method: "POST", body: JSON.stringify({ email: otherEmail, password }) });
+    const wrongUser = await api(`/graphs/${basicGraphId}/routing-changes`);
+    assert(wrongUser.status === 403, `expected 403 for a non-owning authenticated user, got ${wrongUser.status}: ${JSON.stringify(wrongUser.body)}`);
+
+    sessionCookie = ownerCookie;
+    const owner = await api(`/graphs/${basicGraphId}/routing-changes`);
+    assert(owner.status === 200, `expected the actual owner to be able to read their own graph's routing changes, got ${owner.status}`);
+  });
+
   // --- Add existing agent: copies config, excludes consensusGroup, IDOR-safe in both directions ---
   await test("add existing agent copies node config, excluding consensusGroup, with IDOR checks", async () => {
     const sourceGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E source graph" }) });

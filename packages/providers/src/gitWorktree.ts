@@ -160,7 +160,14 @@ export async function pushBranch(worktree: Worktree, githubToken?: string): Prom
   } else if (remote.startsWith("ssh://") || remote.startsWith("git@")) {
     throw new Error("SSH origin is not supported in v1; use an HTTPS origin");
   } else {
-    // Plain (file:// or local path) — used by e2e against a local bare repo.
+    // Plain (file:// or local path) — used by e2e against a local bare repo,
+    // and by any self-hosted deployment pointing origin at a local/NFS path.
+    // A local push invokes git receive-pack directly against that directory,
+    // so it hits the same dubious-ownership check as the worktree root does
+    // (see ensureSafeDirectory above) if it's owned by a different UID than
+    // the container runs as (root) — most commonly the host UID, via a bind
+    // mount.
+    await ensureSafeDirectory(remote);
     await git(["push", "origin", worktree.branch], worktree.path);
   }
 

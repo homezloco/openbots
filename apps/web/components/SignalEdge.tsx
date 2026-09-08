@@ -3,6 +3,7 @@ import { BaseEdge, getBezierPath, type EdgeProps } from "@xyflow/react";
 export interface EdgePulse {
   id: string;
   edgeId: string;
+  color?: string;
 }
 
 /**
@@ -33,7 +34,7 @@ export function SignalEdge({
     <>
       <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />
       {pulses.map((p) => (
-        <circle key={p.id} r={4} fill="var(--status-running)">
+        <circle key={p.id} r={4} fill={p.color ?? "var(--status-running)"}>
           <animateMotion dur="0.6s" repeatCount={1} path={edgePath} />
         </circle>
       ))}

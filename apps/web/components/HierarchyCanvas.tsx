@@ -51,14 +51,35 @@ function edgeStyle(kind: AgentGraph["edges"][number]["kind"]): React.CSSProperti
 }
 
 function toFlowEdges(graph: AgentGraph): Edge[] {
-  return graph.edges.map((e) => ({
+  const edges = graph.edges.map((e) => ({
     id: e.id,
     source: e.sourceNodeId,
     target: e.targetNodeId,
     label: e.label,
     style: edgeStyle(e.kind),
     type: "signal",
-  }));
+  })) as Edge[];
+
+  // A consensus fan-out has a hidden-in-data but visible-in-UI "gather" edge
+  // from the source to the aggregator. This makes the join visible and gives
+  // the SignalEdge a path to animate when all branches complete.
+  for (const n of graph.nodes) {
+    if (n.consensusGroup) {
+      const id = `consensus-gather-${n.id}-${n.consensusGroup.aggregatorNodeId}`;
+      edges.push({
+        id,
+        source: n.id,
+        target: n.consensusGroup.aggregatorNodeId,
+        style: { strokeDasharray: "3 3", stroke: "var(--consensus-edge)", opacity: 0.75 },
+        type: "signal",
+        data: { isConsensusGather: true },
+        selectable: false,
+        deletable: false,
+      });
+    }
+  }
+
+  return edges;
 }
 
 export const PROVIDERS: ProviderId[] = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"];
@@ -110,6 +131,7 @@ export function HierarchyCanvas({
     systemPrompt: "",
     description: "",
     fileAccessRoot: "",
+    allowWrites: true,
   });
 
   const [pulses, setPulses] = useState<EdgePulse[]>([]);
@@ -141,11 +163,22 @@ export function HierarchyCanvas({
     [setNodes],
   );
 
-  const addPulse = useCallback((edgeId: string) => {
+  const addPulse = useCallback((edgeId: string, color?: string) => {
     const id = `${edgeId}-${Date.now()}-${Math.random()}`;
-    setPulses((ps) => [...ps, { id, edgeId }]);
+    setPulses((ps) => [...ps, { id, edgeId, color }]);
     setTimeout(() => setPulses((ps) => ps.filter((p) => p.id !== id)), 650);
   }, []);
+
+  // consensus source -> aggregator, used for the gather pulse animation.
+  const consensusGatherByAggregator = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const n of graph.nodes) {
+      if (n.consensusGroup) {
+        map.set(n.consensusGroup.aggregatorNodeId, `consensus-gather-${n.id}-${n.consensusGroup.aggregatorNodeId}`);
+      }
+    }
+    return map;
+  }, [graph]);
 
   useRunEventsSocket(graph.id, (msg) => {
     if (msg.nodeId) {
@@ -154,7 +187,13 @@ export function HierarchyCanvas({
       else if (msg.type === "hop_failed") setNodeStatus(msg.nodeId, "node-failed", 4000);
     }
     if (msg.type === "hop_succeeded" && msg.resolvedEdgeId) {
-      addPulse(msg.resolvedEdgeId);
+      // Green pulse for a completed hop "communicating" its result to the next node.
+      addPulse(msg.resolvedEdgeId, "var(--status-succeeded)");
+    }
+    if (msg.type === "hop_dispatched" && msg.nodeId && consensusGatherByAggregator.has(msg.nodeId)) {
+      // All branches are done and the aggregator is being dispatched —
+      // animate the gather from the fan-out source down into the aggregator.
+      addPulse(consensusGatherByAggregator.get(msg.nodeId)!, "var(--consensus-edge)");
     }
   });
 
@@ -169,6 +208,9 @@ export function HierarchyCanvas({
 
   const onReconnect = useCallback(
     (oldEdge: Edge, newConnection: Connection) => {
+      // The consensus gather edges are synthetic UI-only edges; they cannot be
+      // rerouted or persisted.
+      if ((oldEdge.data as { isConsensusGather?: boolean } | undefined)?.isConsensusGather) return;
       setEdges((eds) => reconnectEdge(oldEdge, newConnection, eds));
       if (newConnection.target) {
         rerouteEdge(graph.id, oldEdge.id, newConnection.target).catch((err) => {
@@ -216,16 +258,19 @@ export function HierarchyCanvas({
   async function addAgent() {
     if (!form.name.trim()) return;
     const position = connectFrom ? positionBelow(connectFrom) : { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 };
+    const { allowWrites, ...rest } = form;
     const node = await createNode(graph.id, {
-      ...form,
+      ...rest,
       fileAccessRoot: form.fileAccessRoot || undefined,
-      tools: form.fileAccessRoot ? ["read_file", "list_directory"] : [],
+      tools: form.fileAccessRoot
+        ? ["read_file", "list_directory", ...(allowWrites ? ["write_file", "edit_file"] : [])]
+        : [],
       position,
     });
     appendNode(node);
     await connectIfRequested(node);
     setShowAddAgent(false);
-    setForm({ ...form, name: "", systemPrompt: "", description: "", fileAccessRoot: "" });
+    setForm({ ...form, name: "", systemPrompt: "", description: "", fileAccessRoot: "", allowWrites: true });
   }
 
   /** The "master agent" flow: describe the agent, an LLM fills in the rest, then it's created through the same API as the manual form. */
@@ -499,12 +544,23 @@ export function HierarchyCanvas({
                 />
               </label>
               <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
-                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>File access root (optional, absolute path, read-only)</span>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>File access root (optional, absolute path)</span>
                 <input
                   placeholder="/path/to/project"
                   value={form.fileAccessRoot}
                   onChange={(e) => setForm({ ...form, fileAccessRoot: e.target.value })}
                 />
+              </label>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", gridColumn: "1 / -1", opacity: form.fileAccessRoot ? 1 : 0.5 }}>
+                <input
+                  type="checkbox"
+                  checked={form.allowWrites}
+                  disabled={!form.fileAccessRoot}
+                  onChange={(e) => setForm({ ...form, allowWrites: e.target.checked })}
+                />
+                <span style={{ fontSize: 13 }}>
+                  Allow file writes <span style={{ color: "var(--text-faint)", fontSize: 12 }}>(isolated git branch; root must be in ALLOWED_FILE_WRITE_ROOTS)</span>
+                </span>
               </label>
               <div style={{ display: "flex", alignItems: "flex-end" }}>
                 <button onClick={addAgent}>Add agent</button>

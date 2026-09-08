@@ -34,13 +34,13 @@ services:
     environment:
       DATABASE_URL: postgres://openbots:openbots@postgres:5432/openbots
       REDIS_URL: redis://redis:6379
-      ALLOWED_FILE_ACCESS_ROOTS: /tmp/testrepo,/tmp/writable-testrepo
-      ALLOWED_FILE_WRITE_ROOTS: /tmp/writable-testrepo
     ports:
       - "4000:4000"
     volumes:
       - ./apps/api/e2e/fixtures/testrepo:/tmp/testrepo:ro
       - ./apps/api/e2e/fixtures/writable-testrepo:/tmp/writable-testrepo:rw
+      - ./apps/api/e2e/fixtures/writable-testrepo-outside:/tmp/writable-testrepo-outside:rw
+      - ./apps/api/e2e/fixtures/writable-testrepo-remote.git:/tmp/writable-testrepo-remote.git:rw
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,13 +52,13 @@ services:
     command: ["node", "dist/worker.js"]
     env_file: .env
     environment:
-      ALLOWED_FILE_ACCESS_ROOTS: /tmp/testrepo,/tmp/writable-testrepo
-      ALLOWED_FILE_WRITE_ROOTS: /tmp/writable-testrepo
       DATABASE_URL: postgres://openbots:openbots@postgres:5432/openbots
       REDIS_URL: redis://redis:6379
     volumes:
       - ./apps/api/e2e/fixtures/testrepo:/tmp/testrepo:ro
       - ./apps/api/e2e/fixtures/writable-testrepo:/tmp/writable-testrepo:rw
+      - ./apps/api/e2e/fixtures/writable-testrepo-outside:/tmp/writable-testrepo-outside:rw
+      - ./apps/api/e2e/fixtures/writable-testrepo-remote.git:/tmp/writable-testrepo-remote.git:rw
     depends_on:
       postgres:
         condition: service_healthy

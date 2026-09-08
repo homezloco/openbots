@@ -5,6 +5,7 @@ import {
   real,
   text,
   timestamp,
+  unique,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -186,14 +187,21 @@ export const agentCommits = pgTable("agent_commits", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const userCredentials = pgTable("user_credentials", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  provider: text("provider").notNull(),
-  label: text("label").notNull().default(""),
-  /** AES-256-GCM ciphertext, base64 — see auth/crypto.ts. Never returned by any API response. */
-  encryptedKey: text("encrypted_key").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const userCredentials = pgTable(
+  "user_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    label: text("label").notNull().default(""),
+    /** AES-256-GCM ciphertext, base64 — see auth/crypto.ts. Never returned by any API response. */
+    encryptedKey: text("encrypted_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  // Required for routes/userCredentials.ts's onConflictDoUpdate({target: [userId, provider]})
+  // to mean anything — Postgres's ON CONFLICT needs a real unique/exclusion
+  // constraint matching the target columns, not just application-level intent.
+  (table) => [unique().on(table.userId, table.provider)],
+);

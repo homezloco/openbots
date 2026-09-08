@@ -42,7 +42,7 @@ jobs:
           SESSION_SECRET=${{ secrets.E2E_SESSION_SECRET }}
           CREDENTIALS_ENCRYPTION_KEY=${{ secrets.E2E_CREDENTIALS_ENCRYPTION_KEY }}
           WEB_ORIGIN=http://localhost:3000
-          ALLOWED_FILE_ACCESS_ROOTS=/tmp/testrepo
+          ALLOWED_FILE_ACCESS_ROOTS=/tmp/testrepo,/tmp/writable-testrepo
           ALLOWED_FILE_WRITE_ROOTS=/tmp/writable-testrepo
           COOKIE_SECURE=false
           EOF

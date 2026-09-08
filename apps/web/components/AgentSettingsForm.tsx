@@ -7,6 +7,7 @@ import { PROVIDERS, ROLES } from "./HierarchyCanvas";
 
 const TIERS: AgentNode["tier"][] = [undefined, "economy", "standard", "flagship"];
 const FILE_TOOLS = ["read_file", "list_directory"];
+const WRITE_TOOLS = ["write_file", "edit_file"];
 
 /**
  * Editing an existing agent's config — reuses the same field set as the
@@ -35,6 +36,8 @@ export function AgentSettingsForm({
     description: node.description,
     systemPrompt: node.systemPrompt,
     fileAccessRoot: node.fileAccessRoot ?? "",
+    // Existing nodes keep whatever they have; a node with no file root yet defaults to writes-on once a root is set.
+    allowWrites: node.fileAccessRoot ? node.tools.some((t) => WRITE_TOOLS.includes(t)) : true,
   });
   const [fallbackChain, setFallbackChain] = useState(node.fallbackChain);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -45,8 +48,10 @@ export function AgentSettingsForm({
     setSaving(true);
     setError(null);
     try {
-      const nonFileTools = node.tools.filter((t) => !FILE_TOOLS.includes(t));
-      const tools = form.fileAccessRoot ? [...nonFileTools, ...FILE_TOOLS] : nonFileTools;
+      const nonFileTools = node.tools.filter((t) => !FILE_TOOLS.includes(t) && !WRITE_TOOLS.includes(t));
+      const tools = form.fileAccessRoot
+        ? [...nonFileTools, ...FILE_TOOLS, ...(form.allowWrites ? WRITE_TOOLS : [])]
+        : nonFileTools;
       const updated = await updateNode(graphId, node.id, {
         name: form.name,
         role: form.role,
@@ -130,8 +135,23 @@ export function AgentSettingsForm({
       </label>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        File access root <span style={{ color: "var(--text-faint)", fontSize: 12 }}>(absolute path, read-only, subject to the operator allowlist)</span>
+        File access root <span style={{ color: "var(--text-faint)", fontSize: 12 }}>(absolute path, subject to the operator allowlist)</span>
         <input value={form.fileAccessRoot} onChange={(e) => setForm({ ...form, fileAccessRoot: e.target.value })} />
+      </label>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center", opacity: form.fileAccessRoot ? 1 : 0.5 }}>
+        <input
+          type="checkbox"
+          checked={form.allowWrites}
+          disabled={!form.fileAccessRoot}
+          onChange={(e) => setForm({ ...form, allowWrites: e.target.checked })}
+        />
+        <span>
+          Allow file writes{" "}
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            (write_file/edit_file — root must be a git repo in ALLOWED_FILE_WRITE_ROOTS; changes land on an isolated openbots/* branch, push with /push)
+          </span>
+        </span>
       </label>
 
       <button type="button" onClick={() => setShowAdvanced((s) => !s)} style={{ alignSelf: "flex-start" }}>

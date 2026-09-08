@@ -13,6 +13,7 @@ import {
   type Edge,
   type Connection,
 } from "@xyflow/react";
+// @ts-ignore — no type declarations for CSS side-effect import
 import "@xyflow/react/dist/style.css";
 import type { AgentGraph, AgentNode, ProviderId } from "@openbots/graph-schema";
 import {
@@ -231,6 +232,7 @@ export function HierarchyCanvas({
   async function quickAdd() {
     if (!quickDescription.trim()) return;
     setQuickBusy(true);
+    setQuickAddError(null);
     try {
       const position = connectFrom ? positionBelow(connectFrom) : undefined;
       const node = await quickAddAgent(graph.id, { description: quickDescription, position });
@@ -240,7 +242,7 @@ export function HierarchyCanvas({
       setShowAddAgent(false);
     } catch (err) {
       console.error("Quick-add failed:", err);
-      window.alert(err instanceof Error ? err.message : "Quick-add failed");
+      setQuickAddError(err instanceof Error ? err.message : "Quick-add failed");
     } finally {
       setQuickBusy(false);
     }
@@ -263,6 +265,7 @@ export function HierarchyCanvas({
   async function addExisting() {
     if (!existingAgentId) return;
     setExistingBusy(true);
+    setExistingError(null);
     try {
       const position = connectFrom ? positionBelow(connectFrom) : { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 };
       const node = await createNodeFromExisting(graph.id, { sourceNodeId: existingAgentId, position });
@@ -272,7 +275,7 @@ export function HierarchyCanvas({
       setShowAddAgent(false);
     } catch (err) {
       console.error("Add existing agent failed:", err);
-      window.alert(err instanceof Error ? err.message : "Failed to add existing agent");
+      setExistingError(err instanceof Error ? err.message : "Failed to add existing agent");
     } finally {
       setExistingBusy(false);
     }
@@ -285,6 +288,12 @@ export function HierarchyCanvas({
 
   const [lastRunId, setLastRunId] = useState<string | null>(null);
   const [openAgentPanel, setOpenAgentPanel] = useState<string | null>(null);
+  const [runInputOpen, setRunInputOpen] = useState(false);
+  const [runInput, setRunInput] = useState("");
+  const [templateInputOpen, setTemplateInputOpen] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const [quickAddError, setQuickAddError] = useState<string | null>(null);
+  const [existingError, setExistingError] = useState<string | null>(null);
   const openAgentNode = openAgentPanel ? graph.nodes.find((n) => n.id === openAgentPanel) ?? null : null;
 
   /** Keeps both graph state (source of truth for settings) and the canvas label in sync after an edit. */
@@ -301,17 +310,18 @@ export function HierarchyCanvas({
 
   /** Stays on the canvas to watch the live pulse instead of navigating away — the whole point of the animation is seeing it happen here. */
   async function startRun() {
-    const input = window.prompt("Run input:");
-    if (!input) return;
-    const run = await createRun(graph.id, input);
+    if (!runInput.trim() || !graph.entryNodeId) return;
+    const run = await createRun(graph.id, runInput.trim());
     setLastRunId(run.id);
+    setRunInput("");
+    setRunInputOpen(false);
   }
 
   async function saveAsTemplate() {
-    const name = window.prompt("Template name:");
-    if (!name) return;
-    await createTemplate(graph.id, name);
-    window.alert("Saved as template.");
+    if (!templateName.trim()) return;
+    await createTemplate(graph.id, templateName.trim());
+    setTemplateName("");
+    setTemplateInputOpen(false);
   }
 
   return (
@@ -339,12 +349,61 @@ export function HierarchyCanvas({
             ))}
           </select>
         </label>
-        {showStartRunButton && (
-          <button onClick={startRun} disabled={!graph.entryNodeId}>
-            ▶ Start run
-          </button>
+        {showStartRunButton &&
+          (runInputOpen ? (
+            <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              <input
+                value={runInput}
+                onChange={(e) => setRunInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && startRun()}
+                placeholder="What should the team do?"
+                style={{ width: 260 }}
+              />
+              <button onClick={startRun} disabled={!runInput.trim() || !graph.entryNodeId}>
+                Run
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRunInputOpen(false);
+                  setRunInput("");
+                }}
+                style={{ background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}
+              >
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button onClick={() => setRunInputOpen(true)} disabled={!graph.entryNodeId}>
+              ▶ Start run
+            </button>
+          ))}
+        {templateInputOpen ? (
+          <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <input
+              value={templateName}
+              onChange={(e) => setTemplateName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && saveAsTemplate()}
+              placeholder="Template name"
+              style={{ width: 200 }}
+            />
+            <button onClick={saveAsTemplate} disabled={!templateName.trim()}>
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setTemplateInputOpen(false);
+                setTemplateName("");
+              }}
+              style={{ background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}
+            >
+              Cancel
+            </button>
+          </span>
+        ) : (
+          <button onClick={() => setTemplateInputOpen(true)}>Save as template</button>
         )}
-        <button onClick={saveAsTemplate}>Save as template</button>
         <a href={`/runs?graphId=${graph.id}`}>View runs</a>
         {showStartRunButton && lastRunId && <a href={`/runs/${lastRunId}`}>Run started — view full trail →</a>}
       </div>
@@ -375,57 +434,81 @@ export function HierarchyCanvas({
           </div>
 
           {addMode === "quick" && (
-            <div style={{ display: "flex", gap: 8 }}>
-              <input
-                placeholder='e.g. "Reviews pull request diffs for security issues"'
-                value={quickDescription}
-                onChange={(e) => setQuickDescription(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && quickAdd()}
-                style={{ flex: 1 }}
-              />
-              <button onClick={quickAdd} disabled={quickBusy}>
-                {quickBusy ? "Thinking…" : "Add"}
-              </button>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  placeholder='e.g. "Reviews pull request diffs for security issues"'
+                  value={quickDescription}
+                  onChange={(e) => setQuickDescription(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && quickAdd()}
+                  style={{ flex: 1 }}
+                />
+                <button onClick={quickAdd} disabled={quickBusy}>
+                  {quickBusy ? "Thinking…" : "Add"}
+                </button>
+              </div>
+              {quickAddError && <p style={{ color: "var(--danger)", margin: 0, fontSize: 13 }}>{quickAddError}</p>}
             </div>
           )}
 
           {addMode === "manual" && (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <input placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-              <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as AgentNode["role"] })}>
-                {ROLES.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
-              <select value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value as ProviderId })}>
-                {PROVIDERS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-              <input placeholder="Model" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
-              <input
-                placeholder="Description (used for auto-routing)"
-                value={form.description}
-                onChange={(e) => setForm({ ...form, description: e.target.value })}
-                style={{ flex: 1, minWidth: 200 }}
-              />
-              <input
-                placeholder="System prompt"
-                value={form.systemPrompt}
-                onChange={(e) => setForm({ ...form, systemPrompt: e.target.value })}
-                style={{ flex: 1, minWidth: 200 }}
-              />
-              <input
-                placeholder="File access root (optional, absolute path, read-only)"
-                value={form.fileAccessRoot}
-                onChange={(e) => setForm({ ...form, fileAccessRoot: e.target.value })}
-                style={{ flex: 1, minWidth: 260 }}
-              />
-              <button onClick={addAgent}>Add</button>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Name</span>
+                <input placeholder="e.g. Security reviewer" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Role</span>
+                <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as AgentNode["role"] })}>
+                  {ROLES.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Provider</span>
+                <select value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value as ProviderId })}>
+                  {PROVIDERS.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Model</span>
+                <input placeholder="claude-sonnet-5" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Description (used for auto-routing)</span>
+                <input
+                  placeholder="What this agent does, in one line"
+                  value={form.description}
+                  onChange={(e) => setForm({ ...form, description: e.target.value })}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>System prompt</span>
+                <textarea
+                  rows={3}
+                  placeholder="Instructions for the agent"
+                  value={form.systemPrompt}
+                  onChange={(e) => setForm({ ...form, systemPrompt: e.target.value })}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>File access root (optional, absolute path, read-only)</span>
+                <input
+                  placeholder="/path/to/project"
+                  value={form.fileAccessRoot}
+                  onChange={(e) => setForm({ ...form, fileAccessRoot: e.target.value })}
+                />
+              </label>
+              <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <button onClick={addAgent}>Add agent</button>
+              </div>
             </div>
           )}
 
@@ -451,6 +534,7 @@ export function HierarchyCanvas({
               {existingAgents?.length === 0 && (
                 <p style={{ color: "var(--text-faint)", margin: 0 }}>No other agents found — describe one or add it manually instead.</p>
               )}
+              {existingError && <p style={{ color: "var(--danger)", margin: 0, fontSize: 13 }}>{existingError}</p>}
               {(() => {
                 const selected = existingAgents?.find((a) => a.id === existingAgentId);
                 if (!selected?.fileAccessRoot) return null;

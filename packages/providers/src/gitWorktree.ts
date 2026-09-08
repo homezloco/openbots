@@ -145,3 +145,24 @@ export async function commitWorktreeChanges(worktree: Worktree, nodeName: string
   const sha = await git(["rev-parse", "HEAD"], worktree.path);
   return sha.trim();
 }
+
+export async function pushBranch(worktree: Worktree, githubToken?: string): Promise<{ remote: string; message: string }> {
+  const remote = (await git(["remote", "get-url", "origin"], worktree.path)).trim();
+  if (!remote) throw new Error("No origin remote configured");
+
+  if (remote.startsWith("https://")) {
+    if (!githubToken) {
+      throw new Error("HTTPS origin requires a GitHub token — save one via POST /me/credentials");
+    }
+    const auth = Buffer.from(`x-access-token:${githubToken}`).toString("base64");
+    const header = `AUTHORIZATION: basic ${auth}`;
+    await git(["-c", `http.extraheader=${header}`, "push", "origin", worktree.branch], worktree.path);
+  } else if (remote.startsWith("ssh://") || remote.startsWith("git@")) {
+    throw new Error("SSH origin is not supported in v1; use an HTTPS origin");
+  } else {
+    // Plain (file:// or local path) — used by e2e against a local bare repo.
+    await git(["push", "origin", worktree.branch], worktree.path);
+  }
+
+  return { remote, message: `Pushed ${worktree.branch} to ${remote}` };
+}

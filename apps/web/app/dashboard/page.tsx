@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createGraph, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
 import { extractLatestUserMessage, useBotChat } from "../../lib/useBotChat";
 import { useAuth } from "../../components/AuthProvider";
@@ -68,7 +68,13 @@ export default function DashboardPage() {
     }
   }
 
-  if (loading) return null;
+  if (loading) {
+    return (
+      <div style={{ padding: 24, color: "var(--text-faint)" }}>
+        <p>Loading your bots…</p>
+      </div>
+    );
+  }
   if (!user) {
     return (
       <div style={{ padding: 24 }}>
@@ -119,13 +125,20 @@ export default function DashboardPage() {
               </button>
             </li>
           ))}
-          {graphs.length === 0 && <p style={{ color: "var(--text-faint)" }}>No bots yet — describe one above.</p>}
+          {graphs.length === 0 && (
+          <div style={{ padding: "12px 0", color: "var(--text-faint)" }}>
+            <p style={{ margin: "0 0 8px" }}>No bots yet.</p>
+            <p style={{ margin: 0, fontSize: 13 }}>Describe a job above — like <em>“Summarizes support tickets”</em> — to create your first one.</p>
+          </div>
+        )}
         </ul>
       </aside>
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
         {!selected && (
-          <div style={{ padding: 24, color: "var(--text-faint)" }}>Select a bot on the left, or describe a new one.</div>
+          <div style={{ padding: 24, color: "var(--text-faint)", textAlign: "center" }}>
+            <p style={{ margin: 0 }}>Select a bot from the sidebar, or describe a new one above.</p>
+          </div>
         )}
         {selected && selected.nodeCount === 1 && <BotChat graph={selected} />}
         {selected && selected.nodeCount !== 1 && <HierarchyChat graph={selected} />}
@@ -136,14 +149,21 @@ export default function DashboardPage() {
 
 function BotChat({ graph }: { graph: GraphSummary }) {
   const { runs, input, setInput, sending, error, send } = useBotChat(graph);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollToBottom = () => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
 
   return (
     <>
       <div style={{ padding: "8px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between" }}>
         <strong>{graph.name}</strong>
-        <a href={`/hierarchy?graphId=${graph.id}`}>View in Hierarchy</a>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <a href={`/hierarchy?graphId=${graph.id}`}>View in Hierarchy</a>
+          <button onClick={scrollToBottom} style={{ background: "transparent", color: "var(--text)", border: "1px solid var(--border)", padding: "4px 8px" }} title="Scroll to bottom">
+            ↓
+          </button>
+        </div>
       </div>
-      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: 16 }}>
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: 16 }}>
         {runs.map((r) => (
           <div key={r.id} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ alignSelf: "flex-end", maxWidth: "70%", background: "var(--accent)", color: "var(--accent-text)", borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>

@@ -1,9 +1,11 @@
-import type { FastifyInstance } from "fastify";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { RunMode } from "@openbots/graph-schema";
+import { pushBranch, type Worktree } from "@openbots/providers";
 import { db } from "../db/client.js";
-import { agentGraphs, agentNodes, runEvents, runs, usageEvents } from "../db/schema.js";
+import { agentCommits, agentGraphs, agentNodes, runEvents, runs, usageEvents, userCredentials } from "../db/schema.js";
+import { decryptCredential } from "../auth/crypto.js";
 import { loadLiveGraph } from "../orchestrator/engine.js";
 import { enqueueHop } from "../queue/runQueue.js";
 import { requireAuth } from "../auth/middleware.js";
@@ -27,9 +29,82 @@ const STATUS_PRIORITY: Record<string, number> = {
   cancelled: 4,
 };
 
+async function handlePushCommand(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  graphId: string,
+  branchName: string | null,
+): Promise<void> {
+  if (!req.userId) return reply.code(401).send({ error: "Unauthorized" });
+  const graph = await db.query.agentGraphs.findFirst({ where: eq(agentGraphs.id, graphId) });
+  if (!graph || graph.ownerId !== req.userId) {
+    return reply.code(404).send({ error: "Graph not found" });
+  }
+
+  const conditions = [eq(agentCommits.graphId, graphId), isNull(agentCommits.pushedAt)];
+  if (branchName) conditions.push(eq(agentCommits.branch, branchName));
+
+  const [commit] = await db
+    .select()
+    .from(agentCommits)
+    .where(and(...conditions))
+    .orderBy(desc(agentCommits.createdAt))
+    .limit(1);
+
+  if (!commit) {
+    const [run] = await db
+      .insert(runs)
+      .values({
+        graphId,
+        mode: "pinned",
+        status: "completed",
+        input: branchName ? `/push ${branchName}` : "/push",
+        output: branchName ? `No unpushed commit for branch ${branchName}.` : "No unpushed commits to push.",
+      })
+      .returning();
+    return reply.code(201).send(run);
+  }
+
+  const [cred] = await db
+    .select()
+    .from(userCredentials)
+    .where(and(eq(userCredentials.userId, req.userId as string), eq(userCredentials.provider, "github")))
+    .limit(1);
+
+  const token = cred ? decryptCredential(cred.encryptedKey) : undefined;
+  const worktree: Worktree = { path: commit.worktreePath, branch: commit.branch };
+
+  let result: { remote: string; message: string };
+  try {
+    result = await pushBranch(worktree, token);
+  } catch (err) {
+    return reply.code(400).send({ error: err instanceof Error ? err.message : "Push failed" });
+  }
+
+  await db.update(agentCommits).set({ pushedAt: new Date() }).where(eq(agentCommits.id, commit.id));
+
+  const [run] = await db
+    .insert(runs)
+    .values({
+      graphId,
+      mode: "pinned",
+      status: "completed",
+      input: branchName ? `/push ${branchName}` : "/push",
+      output: `✅ ${result.message}`,
+    })
+    .returning();
+
+  return reply.code(201).send(run);
+}
+
 export async function runRoutes(app: FastifyInstance) {
   app.post("/runs", { preHandler: requireAuth }, async (req, reply) => {
     const body = createRunBody.parse(req.body);
+    const inputString = typeof body.input === "string" ? body.input : null;
+    const pushMatch = inputString?.match(/^\/(?:push)(?:\s+(.+))?$/);
+    if (pushMatch) {
+      return handlePushCommand(req, reply, body.graphId, pushMatch[1]?.trim() ?? null);
+    }
 
     const graphRow = await db.query.agentGraphs.findFirst({
       where: eq(agentGraphs.id, body.graphId),

@@ -11,6 +11,7 @@ import {
 import type { AgentGraph, AgentNode, ProviderId } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
 import {
+  agentCommits,
   agentGraphs,
   agentNodes,
   fanoutBatches,
@@ -389,6 +390,15 @@ async function callAgent(
         const sha = await commitWorktreeChanges(worktree, node.name, touchedFiles);
         if (sha) {
           text = `${text}\n\n[OpenBots: committed ${sha.slice(0, 8)} to branch ${worktree.branch} in ${worktree.path}]`;
+          await db.insert(agentCommits).values({
+            runId,
+            graphId: node.graphId,
+            nodeId: node.id,
+            worktreePath: worktree.path,
+            branch: worktree.branch,
+            commitSha: sha,
+            pushedAt: null,
+          });
         }
       }
 

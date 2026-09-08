@@ -84,7 +84,22 @@ function RunsPageContent() {
           {runs.map((run) => (
             <tr key={run.id} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
               <td>
-                <span style={{ color: STATUS_COLOR[run.status] ?? "var(--text)", fontWeight: 600 }}>{run.status}</span>
+                <span
+                  style={{
+                    display: "inline-block",
+                    padding: "2px 10px",
+                    borderRadius: 12,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.04em",
+                    color: STATUS_COLOR[run.status] ?? "var(--text)",
+                    background: "var(--bg-hover)",
+                    border: `1px solid ${STATUS_COLOR[run.status] ?? "var(--border)"}`,
+                  }}
+                >
+                  {run.status}
+                </span>
               </td>
               <td>{run.mode}</td>
               <td>{new Date(run.createdAt).toLocaleString()}</td>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AgentNode } from "@openbots/graph-schema";
 import { fetchAgentConversations, type AgentConversation } from "../lib/api";
 import { AgentSettingsForm } from "./AgentSettingsForm";
@@ -29,6 +29,8 @@ export function AgentConversationPanel({
   const [nodeNames, setNodeNames] = useState<Record<string, string>>({});
   const [conversations, setConversations] = useState<AgentConversation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollToBottom = () => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
 
   useEffect(() => {
     setConversations(null);
@@ -60,11 +62,35 @@ export function AgentConversationPanel({
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: 12, borderBottom: "1px solid var(--border)" }}>
         <strong>{node.name}</strong>
-        <div style={{ display: "flex", gap: 4 }}>
-          <button onClick={() => setView((v) => (v === "history" ? "settings" : "history"))} title="Agent settings">
-            {view === "history" ? "⚙" : "← Back"}
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button
+              onClick={() => setView("history")}
+              style={{
+                background: view === "history" ? "var(--accent)" : "transparent",
+                color: view === "history" ? "var(--accent-text)" : "var(--text)",
+                border: "1px solid var(--border)",
+              }}
+            >
+              History
+            </button>
+            <button
+              onClick={() => setView("settings")}
+              style={{
+                background: view === "settings" ? "var(--accent)" : "transparent",
+                color: view === "settings" ? "var(--accent-text)" : "var(--text)",
+                border: "1px solid var(--border)",
+              }}
+            >
+              Settings
+            </button>
+          </div>
+          <button onClick={scrollToBottom} style={{ background: "transparent", color: "var(--text)", border: "1px solid var(--border)", padding: "4px 8px" }} title="Scroll to bottom">
+            ↓
           </button>
-          <button onClick={onClose}>✕</button>
+          <button onClick={onClose} style={{ background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}>
+            ✕
+          </button>
         </div>
       </div>
 
@@ -81,7 +107,7 @@ export function AgentConversationPanel({
           />
         </div>
       ) : (
-        <div style={{ flex: 1, overflowY: "auto", padding: 12 }}>
+        <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: 12 }}>
           {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
           {!error && conversations === null && <p style={{ color: "var(--text-faint)" }}>Loading…</p>}
           {conversations?.length === 0 && <p style={{ color: "var(--text-faint)" }}>No runs have involved this agent yet.</p>}

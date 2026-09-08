@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createTemplate, instantiateTemplate, listTemplates, type TemplateSummary } from "../../lib/api";
+import { createTemplate, instantiateTemplate, listGraphs, listTemplates, type GraphSummary, type TemplateSummary } from "../../lib/api";
 import { useAuth } from "../../components/AuthProvider";
 
 /** Templates are self-contained graph snapshots you can instantiate into a fresh, owned graph. See PLAN.md. */
@@ -10,6 +10,7 @@ export default function TemplatesPage() {
   const { user } = useAuth();
   const router = useRouter();
   const [templates, setTemplates] = useState<TemplateSummary[]>([]);
+  const [graphs, setGraphs] = useState<GraphSummary[]>([]);
   const [sourceGraphId, setSourceGraphId] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -17,6 +18,7 @@ export default function TemplatesPage() {
 
   useEffect(() => {
     listTemplates().then(setTemplates).catch((err) => setError(err.message));
+    listGraphs().then(setGraphs).catch((err) => setError(err.message));
   }, []);
 
   async function saveAsTemplate() {
@@ -55,10 +57,23 @@ export default function TemplatesPage() {
       {user && (
         <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 16, marginBottom: 24 }}>
           <h2 style={{ marginTop: 0 }}>Save a graph as a template</h2>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input placeholder="Graph id" value={sourceGraphId} onChange={(e) => setSourceGraphId(e.target.value)} style={{ flex: 1 }} />
-            <input placeholder="Template name" value={name} onChange={(e) => setName(e.target.value)} style={{ flex: 1 }} />
-            <button onClick={saveAsTemplate} disabled={busy}>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Source graph</span>
+              <select value={sourceGraphId} onChange={(e) => setSourceGraphId(e.target.value)} style={{ width: "100%" }}>
+                <option value="">Select a graph…</option>
+                {graphs.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name} ({g.nodeCount} agent{g.nodeCount === 1 ? "" : "s"})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Template name</span>
+              <input placeholder="e.g. PR review team" value={name} onChange={(e) => setName(e.target.value)} style={{ width: "100%" }} />
+            </label>
+            <button onClick={saveAsTemplate} disabled={busy || !sourceGraphId || !name}>
               Save
             </button>
           </div>

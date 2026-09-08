@@ -34,6 +34,8 @@ services:
     environment:
       DATABASE_URL: postgres://openbots:openbots@postgres:5432/openbots
       REDIS_URL: redis://redis:6379
+      ALLOWED_FILE_ACCESS_ROOTS: /tmp/testrepo,/tmp/writable-testrepo
+      ALLOWED_FILE_WRITE_ROOTS: /tmp/writable-testrepo
     ports:
       - "4000:4000"
     volumes:
@@ -50,6 +52,8 @@ services:
     command: ["node", "dist/worker.js"]
     env_file: .env
     environment:
+      ALLOWED_FILE_ACCESS_ROOTS: /tmp/testrepo,/tmp/writable-testrepo
+      ALLOWED_FILE_WRITE_ROOTS: /tmp/writable-testrepo
       DATABASE_URL: postgres://openbots:openbots@postgres:5432/openbots
       REDIS_URL: redis://redis:6379
     volumes:

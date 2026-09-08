@@ -169,3 +169,31 @@ export const agentTemplates = pgTable("agent_templates", {
   authorId: uuid("author_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const agentCommits = pgTable("agent_commits", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  runId: uuid("run_id")
+    .notNull()
+    .references(() => runs.id, { onDelete: "cascade" }),
+  graphId: uuid("graph_id")
+    .notNull()
+    .references(() => agentGraphs.id, { onDelete: "cascade" }),
+  nodeId: uuid("node_id").notNull(),
+  worktreePath: text("worktree_path").notNull(),
+  branch: text("branch").notNull(),
+  commitSha: text("commit_sha").notNull(),
+  pushedAt: timestamp("pushed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const userCredentials = pgTable("user_credentials", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull(),
+  label: text("label").notNull().default(""),
+  /** AES-256-GCM ciphertext, base64 — see auth/crypto.ts. Never returned by any API response. */
+  encryptedKey: text("encrypted_key").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

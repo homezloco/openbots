@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AgentGraph } from "@openbots/graph-schema";
 import { fetchGraph, type GraphSummary } from "../lib/api";
 import { extractLatestUserMessage, useBotChat } from "../lib/useBotChat";
@@ -25,15 +25,22 @@ export function HierarchyChat({ graph }: { graph: GraphSummary }) {
   }, [graph.id]);
 
   const { runs, input, setInput, sending, error, send } = useBotChat(graph);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollToBottom = () => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <div style={{ padding: "8px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between" }}>
         <strong>{graph.name}</strong>
-        <a href={`/hierarchy?graphId=${graph.id}`}>Open full editor →</a>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <a href={`/hierarchy?graphId=${graph.id}`}>Open full editor →</a>
+          <button onClick={scrollToBottom} style={{ background: "transparent", color: "var(--text)", border: "1px solid var(--border)", padding: "4px 8px" }} title="Scroll to bottom">
+            ↓
+          </button>
+        </div>
       </div>
 
-      <div style={{ flex: 4, minHeight: 0 }}>
+      <div style={{ flex: 3, minHeight: 0 }}>
         {fullGraph ? (
           <HierarchyCanvas graph={fullGraph} showStartRunButton={false} />
         ) : (
@@ -41,8 +48,8 @@ export function HierarchyChat({ graph }: { graph: GraphSummary }) {
         )}
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
-        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: 16 }}>
+      <div style={{ flex: 2, minHeight: 0, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
+        <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: 16 }}>
           {runs.map((r) => (
             <div key={r.id} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <div

@@ -45,6 +45,14 @@ function assert(cond: unknown, message: string): asserts cond {
 }
 
 async function waitForRun(runId: string, timeoutMs = 90_000): Promise<any> {
+  // Fail fast rather than silently polling GET /runs/undefined for the
+  // full timeout — found via a real CI run: with auth broken (secrets
+  // never configured), every POST /runs call itself already failed, but
+  // callers still passed the (undefined) id through to this function,
+  // burning 90s per case (some ×3 via testWithRetries) and pushing the
+  // whole suite past the workflow's 20-minute job timeout instead of
+  // failing in seconds with a clear message.
+  if (!runId) throw new Error("waitForRun called with no run id — the preceding run-creation call likely failed");
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const { body } = await api(`/runs/${runId}`);

@@ -64,6 +64,20 @@ export async function getRemoteUrl(worktreePath: string): Promise<string> {
   return (await git(["remote", "get-url", "origin"], worktreePath)).trim();
 }
 
+/**
+ * Full diff for one commit, for the GitHub tab's "view diff" expander.
+ * Worktrees are never cleaned up (see CLAUDE.md), so this normally still
+ * works long after the run that made the commit finished — but `git show`
+ * throws (ENOENT via execFile, or git's own "not a git repository") if the
+ * worktree was moved/deleted by something outside OpenBots; the route
+ * handler is responsible for turning that into a clear user-facing message
+ * rather than a raw stack trace.
+ */
+export async function getCommitDiff(worktreePath: string, sha: string): Promise<string> {
+  await ensureSafeDirectory(worktreePath);
+  return git(["show", "--no-color", sha], worktreePath);
+}
+
 function isGithubSshRemote(remote: string): boolean {
   if (remote.startsWith("git@")) return remote.startsWith("git@github.com:");
   if (remote.startsWith("ssh://")) {

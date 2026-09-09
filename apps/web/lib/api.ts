@@ -103,6 +103,7 @@ export interface CreateNodeInput {
   fileAccessRoot?: string;
   fallbackChain?: AgentNode["fallbackChain"];
   consensusGroup?: AgentNode["consensusGroup"];
+  dispatchTargets?: string[];
   position: { x: number; y: number };
 }
 
@@ -228,6 +229,25 @@ export interface AgentCommitSummary {
 }
 
 export const listCommits = (graphId: string) => request<AgentCommitSummary[]>(`/graphs/${graphId}/commits`);
+
+export const getCommitDiff = (graphId: string, commitId: string) =>
+  request<{ diff: string; truncated: boolean }>(`/graphs/${graphId}/commits/${commitId}/diff`);
+
+export interface PrStatus {
+  commitId: string;
+  branch: string;
+  repo: string | null;
+  pr: { number: number; url: string; state: string; title: string } | null;
+  tokenConfigured: boolean;
+}
+
+export const getPrStatus = (graphId: string) => request<PrStatus[]>(`/graphs/${graphId}/pr-status`);
+
+export const openPrForCommit = (graphId: string, commitId: string, title?: string) =>
+  request<{ message: string }>(`/graphs/${graphId}/commits/${commitId}/pr`, {
+    method: "POST",
+    body: JSON.stringify({ title }),
+  });
 
 // --- Runs ---
 

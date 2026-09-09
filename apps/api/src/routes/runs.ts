@@ -9,6 +9,9 @@ import { decryptCredential } from "../auth/crypto.js";
 import { createRun } from "../orchestrator/createRun.js";
 import { requireAuth } from "../auth/middleware.js";
 import { requireGraphOwner } from "./graphs.js";
+import { githubApiRequest } from "../github.js";
+
+type AgentCommitRow = typeof agentCommits.$inferSelect;
 
 const createRunBody = z.object({
   graphId: z.string().uuid(),
@@ -104,33 +107,57 @@ async function handlePushCommand(
   return reply.code(201).send(run);
 }
 
-async function githubApiRequest(path: string, token: string, init: RequestInit = {}): Promise<any> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      // GitHub's API rejects requests with no User-Agent header.
-      "User-Agent": "OpenBots",
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
-      ...(init.headers as Record<string, string> | undefined),
-    },
-  });
-  const body: any = await res.json().catch(() => null);
-  if (!res.ok) {
-    throw new Error(body?.message ? `GitHub API error: ${body.message}` : `GitHub API request failed with status ${res.status}`);
+/**
+ * Core PR-creation logic for one specific, already-pushed commit — shared
+ * by the /pr chat command below (which resolves "most recently pushed" and
+ * calls this) and the GitHub tab's POST .../commits/:commitId/pr route
+ * (routes/commits.ts), which calls it for a caller-specified commit. One
+ * code path for "how a PR actually gets opened," not two that could drift.
+ * Always needs a GitHub token (provider "github") regardless of whether the
+ * matching /push used HTTPS or SSH — PR creation is a GitHub REST API call,
+ * not a git-transport operation, so an SSH key alone can never satisfy it.
+ */
+export async function createPrForCommit(
+  commit: AgentCommitRow,
+  token: string,
+  title: string | null,
+): Promise<{ output: string } | { error: string }> {
+  const remote = await getRemoteUrl(commit.worktreePath);
+  const parsed = parseGithubRepo(remote);
+  if (!parsed) return { output: "PR creation is only supported for a github.com origin." };
+
+  try {
+    const existing = await githubApiRequest(
+      `/repos/${parsed.owner}/${parsed.repo}/pulls?head=${parsed.owner}:${commit.branch}&state=open`,
+      token,
+    );
+    if (existing.length > 0) {
+      return { output: `A PR already exists for this branch: #${existing[0].number} — ${existing[0].html_url}` };
+    }
+
+    const repoInfo = await githubApiRequest(`/repos/${parsed.owner}/${parsed.repo}`, token);
+
+    const pr = await githubApiRequest(`/repos/${parsed.owner}/${parsed.repo}/pulls`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        title: title || `OpenBots: ${commit.branch}`,
+        head: commit.branch,
+        base: repoInfo.default_branch,
+        body: "Opened by OpenBots.",
+      }),
+    });
+
+    return { output: `✅ Opened PR #${pr.number}: ${pr.html_url}` };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "GitHub API request failed" };
   }
-  return body;
 }
 
 /**
  * Opens a PR for the most recently *pushed* branch on this graph — a PR
  * can only target a branch GitHub already has, so this deliberately reads
- * agentCommits.pushedAt, not just the latest commit. Always needs a
- * GitHub token (provider "github") regardless of whether the matching
- * /push used HTTPS or SSH — PR creation is a GitHub REST API call, not a
- * git-transport operation, so an SSH key alone can never satisfy it.
- * Same deterministic-command-interception safety property as /push (see
+ * agentCommits.pushedAt, not just the latest commit. Same
+ * deterministic-command-interception safety property as /push (see
  * POST /runs below): triggered only by the user's own literal "/pr" text,
  * checked before any orchestration/model involvement.
  */
@@ -169,35 +196,9 @@ async function handlePrCommand(req: FastifyRequest, reply: FastifyReply, graphId
   }
   const token = decryptCredential(cred.encryptedKey);
 
-  const remote = await getRemoteUrl(commit.worktreePath);
-  const parsed = parseGithubRepo(remote);
-  if (!parsed) return respond("PR creation is only supported for a github.com origin.");
-
-  try {
-    const existing = await githubApiRequest(
-      `/repos/${parsed.owner}/${parsed.repo}/pulls?head=${parsed.owner}:${commit.branch}&state=open`,
-      token,
-    );
-    if (existing.length > 0) {
-      return respond(`A PR already exists for this branch: #${existing[0].number} — ${existing[0].html_url}`);
-    }
-
-    const repoInfo = await githubApiRequest(`/repos/${parsed.owner}/${parsed.repo}`, token);
-
-    const pr = await githubApiRequest(`/repos/${parsed.owner}/${parsed.repo}/pulls`, token, {
-      method: "POST",
-      body: JSON.stringify({
-        title: title || `OpenBots: ${commit.branch}`,
-        head: commit.branch,
-        base: repoInfo.default_branch,
-        body: "Opened by OpenBots via the /pr command.",
-      }),
-    });
-
-    return respond(`✅ Opened PR #${pr.number}: ${pr.html_url}`);
-  } catch (err) {
-    return reply.code(400).send({ error: err instanceof Error ? err.message : "GitHub API request failed" });
-  }
+  const result = await createPrForCommit(commit, token, title);
+  if ("error" in result) return reply.code(400).send({ error: result.error });
+  return respond(result.output);
 }
 
 export async function runRoutes(app: FastifyInstance) {

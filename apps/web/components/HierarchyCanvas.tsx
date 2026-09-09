@@ -30,7 +30,7 @@ import {
 import { useRunEventsSocket } from "../lib/useRunEventsSocket";
 import { AgentConversationPanel } from "./AgentConversationPanel";
 import { SchedulesPanel } from "./SchedulesPanel";
-import { CommitsPanel } from "./CommitsPanel";
+import { GitHubPanel } from "./GitHubPanel";
 import { SignalEdge, type EdgePulse } from "./SignalEdge";
 import { useTheme } from "./ThemeProvider";
 
@@ -336,7 +336,7 @@ export function HierarchyCanvas({
   const [lastRunId, setLastRunId] = useState<string | null>(null);
   const [openAgentPanel, setOpenAgentPanel] = useState<string | null>(null);
   const [showSchedules, setShowSchedules] = useState(false);
-  const [showCommits, setShowCommits] = useState(false);
+  const [showGitHub, setShowGitHub] = useState(false);
   const [runInputOpen, setRunInputOpen] = useState(false);
   const [runInput, setRunInput] = useState("");
   const [templateInputOpen, setTemplateInputOpen] = useState(false);
@@ -456,7 +456,7 @@ export function HierarchyCanvas({
         <button
           onClick={() => {
             setOpenAgentPanel(null);
-            setShowCommits(false);
+            setShowGitHub(false);
             setShowSchedules((s) => !s);
           }}
         >
@@ -466,10 +466,10 @@ export function HierarchyCanvas({
           onClick={() => {
             setOpenAgentPanel(null);
             setShowSchedules(false);
-            setShowCommits((s) => !s);
+            setShowGitHub((s) => !s);
           }}
         >
-          📦 Commits
+          🐙 GitHub
         </button>
         <a href={`/runs?graphId=${graph.id}`}>View runs</a>
         {showStartRunButton && lastRunId && <a href={`/runs/${lastRunId}`}>Run started — view full trail →</a>}
@@ -638,7 +638,7 @@ export function HierarchyCanvas({
           onConnect={onConnect}
           onNodeClick={(_, node) => {
             setShowSchedules(false);
-            setShowCommits(false);
+            setShowGitHub(false);
             setOpenAgentPanel(node.id);
           }}
           colorMode={theme}
@@ -657,7 +657,7 @@ export function HierarchyCanvas({
           />
         )}
         {showSchedules && <SchedulesPanel graphId={graph.id} onClose={() => setShowSchedules(false)} />}
-        {showCommits && <CommitsPanel graphId={graph.id} onClose={() => setShowCommits(false)} />}
+        {showGitHub && <GitHubPanel graphId={graph.id} onClose={() => setShowGitHub(false)} />}
       </div>
     </div>
   );

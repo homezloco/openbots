@@ -310,6 +310,41 @@ export function listAvailableTools(): { name: string; description: string; requi
       description: "Read real conversion/revenue/traffic numbers for a configured property.",
       requiresFileAccessRoot: false,
     },
+    {
+      name: "check_dispatch_status",
+      description: "Check the status/result of a run you previously started with dispatch_to_graph.",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "list_target_graph",
+      description: "List the nodes and routing edges of one of your target graphs.",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "create_target_node",
+      description: "Create a new agent node in one of your target graphs.",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "update_target_node",
+      description: "Update an existing agent node in one of your target graphs.",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "delete_target_node",
+      description: "Delete an agent node from one of your target graphs.",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "create_target_edge",
+      description: "Create a routing edge between two nodes in one of your target graphs.",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "delete_target_edge",
+      description: "Delete a routing edge between two nodes in one of your target graphs.",
+      requiresFileAccessRoot: false,
+    },
   ];
   return [...staticTools, ...fileTools, ...writeTools, ...crossServiceTools];
 }

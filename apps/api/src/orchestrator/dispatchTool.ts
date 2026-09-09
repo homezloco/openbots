@@ -1,6 +1,6 @@
 import { tool, type Tool } from "ai";
 import { z } from "zod";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { agentGraphs, runs } from "../db/schema.js";
 import { createRun } from "./createRun.js";
@@ -26,7 +26,7 @@ export interface DispatchableGraph {
  * re-verified against live ownership, never trusted from whatever
  * dispatchTargets said at node-save time. Used both to build the tool's
  * own runtime allowlist and to tell the model what it can see (see
- * engine.ts::appendDispatchContext).
+ * engine.ts::appendReachableGraphsContext).
  */
 export async function getDispatchableGraphs(
   ownerId: string | null,
@@ -48,12 +48,17 @@ export async function getDispatchableGraphs(
  * worst dispatch to a graph already in this node's own dispatchTargets,
  * never anything else, regardless of what arguments it's given.
  *
- * ownerId/dispatchTargets/callerRunId are bound in by the caller
- * (engine.ts::callAgent) at tool-resolution time, not supplied by the
- * model — the same "resolve the trust boundary in the caller, not from
+ * ownerId/dispatchTargets/callerRunId/callingGraphId are bound in by the
+ * caller (engine.ts::callAgent) at tool-resolution time, not supplied by
+ * the model — the same "resolve the trust boundary in the caller, not from
  * anything the model provides" pattern the write tools already follow.
  */
-export function createDispatchToGraphTool(ownerId: string | null, dispatchTargets: string[], callerRunId: string): Tool {
+export function createDispatchToGraphTool(
+  ownerId: string | null,
+  dispatchTargets: string[],
+  callerRunId: string,
+  callingGraphId: string,
+): Tool {
   return tool({
     description:
       "Start a new, independent run in another one of your graphs. This is fire-and-forget: " +
@@ -88,12 +93,72 @@ export function createDispatchToGraphTool(ownerId: string | null, dispatchTarget
         return { error: "Dispatch depth limit reached — this looks like a dispatch cycle between graphs; refusing." };
       }
 
-      const run = await createRun(targetRow, input, "pinned", undefined, depth);
+      const run = await createRun(targetRow, input, "pinned", undefined, depth, callingGraphId);
       return {
         dispatched: true,
         targetGraph: target.name,
         runId: run.id,
         message: `Dispatched to ${target.name} — run ${run.id} started.`,
+      };
+    },
+  });
+}
+
+/**
+ * Read-only companion to dispatch_to_graph: lets a dispatch-capable node
+ * check on a run IT PREVIOUSLY dispatched, on demand — "how did the
+ * leadgen-a task go?" — without changing dispatch's own fire-and-forget
+ * start path at all. Bound with the same ownerId/dispatchTargets the
+ * dispatch tool receives (identical trust boundary, re-verified fresh via
+ * getDispatchableGraphs on every call) plus callingGraphId, so this can
+ * only ever surface runs THIS graph itself dispatched — not just any run
+ * that happens to exist in a reachable graph.
+ */
+export function createCheckDispatchStatusTool(
+  ownerId: string | null,
+  dispatchTargets: string[],
+  callingGraphId: string,
+): Tool {
+  return tool({
+    description:
+      "Check the status/result of a run you previously started with dispatch_to_graph into one of your target graphs. " +
+      "Use this when asked about the outcome of work you dispatched earlier.",
+    inputSchema: z.object({
+      targetGraphName: z.string().describe("The exact name of the target graph, from the list you were given"),
+    }),
+    execute: async ({ targetGraphName }) => {
+      if (!ownerId || dispatchTargets.length === 0) {
+        return { error: "This agent has no configured dispatch targets." };
+      }
+
+      const candidates = await getDispatchableGraphs(ownerId, dispatchTargets);
+      const target = candidates.find((g) => g.name.trim().toLowerCase() === targetGraphName.trim().toLowerCase());
+      if (!target) {
+        const names = candidates.map((g) => g.name).join(", ") || "(none)";
+        return { error: `No dispatchable graph named "${targetGraphName}". Valid targets: ${names}` };
+      }
+
+      const [run] = await db
+        .select()
+        .from(runs)
+        .where(and(eq(runs.graphId, target.id), eq(runs.dispatchSourceGraphId, callingGraphId)))
+        .orderBy(desc(runs.createdAt))
+        .limit(1);
+
+      if (!run) {
+        return { error: `Nothing has been dispatched into "${target.name}" from here yet.` };
+      }
+
+      const MAX_OUTPUT_CHARS = 2000;
+      const outputStr = typeof run.output === "string" ? run.output : JSON.stringify(run.output ?? null);
+      const truncated = outputStr.length > MAX_OUTPUT_CHARS;
+
+      return {
+        targetGraph: target.name,
+        status: run.status,
+        output: truncated ? `${outputStr.slice(0, MAX_OUTPUT_CHARS)}\n[...truncated]` : outputStr,
+        startedAt: run.createdAt,
+        completedAt: run.completedAt,
       };
     },
   });

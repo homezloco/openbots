@@ -5,8 +5,8 @@ import { AgentRole, ProviderId } from "@openbots/graph-schema";
 import { getModel } from "@openbots/providers";
 import { getCredentialsFromEnv } from "../orchestrator/credentials.js";
 import { requireAuth } from "../auth/middleware.js";
-import { insertAgentNode } from "./graphs.js";
 import { requireGraphOwner } from "./graphs.js";
+import { insertAgentNode } from "../orchestrator/graphMutations.js";
 import { checkWriteRootAllowed, fileAccessRootSchema } from "../validation/fileAccessRoot.js";
 import { checkDispatchTargetsOwned } from "../validation/dispatchTargets.js";
 

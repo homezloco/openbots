@@ -1,0 +1,2 @@
+ALTER TABLE "runs" ADD COLUMN "dispatch_source_graph_id" uuid;--> statement-breakpoint
+ALTER TABLE "runs" ADD CONSTRAINT "runs_dispatch_source_graph_id_agent_graphs_id_fk" FOREIGN KEY ("dispatch_source_graph_id") REFERENCES "public"."agent_graphs"("id") ON DELETE set null ON UPDATE no action;

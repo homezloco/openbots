@@ -1,13 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { AgentNode, ProviderId } from "@openbots/graph-schema";
-import { updateNode } from "../lib/api";
+import { listGraphs, updateNode, type GraphSummary } from "../lib/api";
 import { PROVIDERS, ROLES } from "./HierarchyCanvas";
 
 const TIERS: AgentNode["tier"][] = [undefined, "economy", "standard", "flagship"];
 const FILE_TOOLS = ["read_file", "list_directory"];
 const WRITE_TOOLS = ["write_file", "edit_file"];
+const DISPATCH_TOOL = "dispatch_to_graph";
+const MANAGE_TOOL = "manage_target_graphs";
 
 /**
  * Editing an existing agent's config — reuses the same field set as the
@@ -40,18 +42,41 @@ export function AgentSettingsForm({
     allowWrites: node.fileAccessRoot ? node.tools.some((t) => WRITE_TOOLS.includes(t)) : true,
   });
   const [fallbackChain, setFallbackChain] = useState(node.fallbackChain);
+  const [dispatchEnabled, setDispatchEnabled] = useState(node.tools.includes(DISPATCH_TOOL));
+  const [manageEnabled, setManageEnabled] = useState(node.tools.includes(MANAGE_TOOL));
+  const [dispatchTargets, setDispatchTargets] = useState<string[]>(node.dispatchTargets ?? []);
+  const [availableGraphs, setAvailableGraphs] = useState<GraphSummary[] | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    listGraphs()
+      .then((graphs) => setAvailableGraphs(graphs.filter((g) => g.id !== graphId)))
+      .catch(() => setAvailableGraphs([]));
+  }, [graphId]);
+
+  function toggleDispatchTarget(id: string) {
+    setDispatchTargets((prev) => (prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]));
+  }
+
   async function save() {
+    if ((dispatchEnabled || manageEnabled) && dispatchTargets.length === 0) {
+      setError("Pick at least one target graph, or turn off dispatch/graph-editing.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      const nonFileTools = node.tools.filter((t) => !FILE_TOOLS.includes(t) && !WRITE_TOOLS.includes(t));
-      const tools = form.fileAccessRoot
-        ? [...nonFileTools, ...FILE_TOOLS, ...(form.allowWrites ? WRITE_TOOLS : [])]
-        : nonFileTools;
+      const nonFileTools = node.tools.filter(
+        (t) => !FILE_TOOLS.includes(t) && !WRITE_TOOLS.includes(t) && t !== DISPATCH_TOOL && t !== MANAGE_TOOL,
+      );
+      const tools = [
+        ...nonFileTools,
+        ...(form.fileAccessRoot ? [...FILE_TOOLS, ...(form.allowWrites ? WRITE_TOOLS : [])] : []),
+        ...(dispatchEnabled ? [DISPATCH_TOOL] : []),
+        ...(manageEnabled ? [MANAGE_TOOL] : []),
+      ];
       const updated = await updateNode(graphId, node.id, {
         name: form.name,
         role: form.role,
@@ -63,6 +88,10 @@ export function AgentSettingsForm({
         fileAccessRoot: form.fileAccessRoot || undefined,
         tools,
         fallbackChain,
+        // Sent as [] (not omitted) when disabled, since omitting a field
+        // leaves the PATCH route's previous value untouched — see the PATCH
+        // handler's `effectiveDispatchTargets` merge in routes/graphs.ts.
+        dispatchTargets: dispatchEnabled || manageEnabled ? dispatchTargets : [],
       });
       onSaved(updated);
     } catch (err) {
@@ -153,6 +182,61 @@ export function AgentSettingsForm({
           </span>
         </span>
       </label>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="checkbox" checked={dispatchEnabled} onChange={(e) => setDispatchEnabled(e.target.checked)} />
+        <span>
+          Allow dispatch to other graphs{" "}
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            (dispatch_to_graph — fire-and-forget starts a run in a graph below; check_dispatch_status lets it check back later)
+          </span>
+        </span>
+      </label>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="checkbox" checked={manageEnabled} onChange={(e) => setManageEnabled(e.target.checked)} />
+        <span>
+          Allow full editing of dispatch-target graphs{" "}
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            (create/update/delete agents and routing edges in a graph below — held to the same file-access/dispatch
+            rules a human editing it directly would be; never grants dispatchTargets or consensusGroup itself)
+          </span>
+        </span>
+      </label>
+
+      {(dispatchEnabled || manageEnabled) && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginLeft: 24 }}>
+          {availableGraphs === null && <span style={{ color: "var(--text-faint)", fontSize: 13 }}>Loading your graphs…</span>}
+          {availableGraphs?.length === 0 && (
+            <span style={{ color: "var(--text-faint)", fontSize: 13 }}>You have no other graphs to dispatch into yet.</span>
+          )}
+          {availableGraphs && availableGraphs.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+                maxHeight: 160,
+                overflowY: "auto",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                padding: 8,
+              }}
+            >
+              {availableGraphs.map((g) => (
+                <label key={g.id} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    checked={dispatchTargets.includes(g.id)}
+                    onChange={() => toggleDispatchTarget(g.id)}
+                  />
+                  <span>{g.name}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <button type="button" onClick={() => setShowAdvanced((s) => !s)} style={{ alignSelf: "flex-start" }}>
         {showAdvanced ? "Hide" : "Show"} advanced (fallback chain)

@@ -40,6 +40,26 @@ export const fileAccessRootSchema = z
   );
 
 /**
+ * Same two checks as fileAccessRootSchema's refinements, callable directly
+ * rather than only via zod.parse() — needed by any mutation path that
+ * doesn't run a request body through createNodeBody.parse() first (e.g.
+ * the cross-graph management tools in orchestrator/graphManagementTools.ts,
+ * which build a plain object rather than parsing an HTTP request body).
+ * Found missing during e2e testing of those tools: fileAccessRoot could be
+ * set to an operator-disallowed path with no rejection at all, the exact
+ * HIGH-severity gap the original ALLOWED_FILE_ACCESS_ROOTS allowlist was
+ * built to close.
+ */
+export function checkFileAccessRootAllowed(fileAccessRoot: string | null | undefined): string | null {
+  if (!fileAccessRoot) return null;
+  if (!fileAccessRoot.startsWith("/")) return "fileAccessRoot must be an absolute path";
+  if (!isWithinAnAllowedRoot(fileAccessRoot)) {
+    return "fileAccessRoot must be within an operator-configured root (see ALLOWED_FILE_ACCESS_ROOTS)";
+  }
+  return null;
+}
+
+/**
  * A separate, independent allowlist from ALLOWED_FILE_ACCESS_ROOTS — a
  * node having read access to a path must never imply write access to it.
  * This is the save-time check (rejects the node config outright with a

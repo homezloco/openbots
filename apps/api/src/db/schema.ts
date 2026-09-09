@@ -108,6 +108,12 @@ export const runs = pgTable("runs", {
   // by schedule, never by dispatch). Caps cross-graph dispatch cycles — see
   // orchestrator/dispatchTool.ts's MAX_DISPATCH_DEPTH.
   dispatchDepth: integer("dispatch_depth").notNull().default(0),
+  // Set iff this run was created by dispatch_to_graph, to the DISPATCHING
+  // node's own graphId — lets check_dispatch_status find "the run I fired
+  // into graph X" later without trusting anything the model remembers from
+  // its own tool-call output. set null on the source graph's deletion, same
+  // "survive the thing that created it" shape as scheduledTriggerId above.
+  dispatchSourceGraphId: uuid("dispatch_source_graph_id").references(() => agentGraphs.id, { onDelete: "set null" }),
   input: jsonb("input"),
   output: jsonb("output"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -18,6 +18,7 @@ export async function createRun(
   mode: "pinned" | "live",
   scheduledTriggerId?: string,
   dispatchDepth = 0,
+  dispatchSourceGraphId?: string,
 ) {
   const graph = await loadLiveGraph(graphRow.id);
 
@@ -32,6 +33,7 @@ export async function createRun(
       input,
       scheduledTriggerId: scheduledTriggerId ?? null,
       dispatchDepth,
+      dispatchSourceGraphId: dispatchSourceGraphId ?? null,
     })
     .returning();
 

@@ -47,7 +47,12 @@ export function HierarchyChat({ graph }: { graph: GraphSummary }) {
 
       <div style={{ flex: 3, minHeight: 0 }}>
         {fullGraph ? (
-          <HierarchyCanvas graph={fullGraph} showStartRunButton={false} />
+          // key={fullGraph.id}: HierarchyCanvas seeds its state from this
+          // prop via useState(initialGraph), which doesn't re-run on a
+          // prop change alone — without a key, switching between graphs
+          // in the Dashboard sidebar would keep rendering the previous
+          // graph's stale nodes/edges. Same fix as app/hierarchy/page.tsx.
+          <HierarchyCanvas key={fullGraph.id} graph={fullGraph} showStartRunButton={false} />
         ) : (
           <div style={{ padding: 24, color: "var(--text-faint)" }}>Loading hierarchy…</div>
         )}

@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ReactFlow,
   Background,
@@ -23,6 +24,7 @@ import {
   createRun,
   createTemplate,
   listAllAgents,
+  listGraphs,
   quickAddAgent,
   rerouteEdge,
   updateGraph,
@@ -84,6 +86,29 @@ function toFlowEdges(graph: AgentGraph): Edge[] {
   return edges;
 }
 
+const GATEWAY_NODE_PREFIX = "gateway:";
+const GATEWAY_EDGE_PREFIX = "gateway-edge:";
+
+/**
+ * Every OTHER graph reachable from this one via dispatch_to_graph or
+ * manage_target_graphs — a completely separate mechanism from
+ * routing_edges (node.dispatchTargets, resolved at tool-call time), so
+ * it's otherwise invisible on this canvas. Deduped by target graph id;
+ * a graph pointing at itself (shouldn't happen, but harmless if it did)
+ * is filtered out rather than rendering a self-loop.
+ */
+function getGatewayTargetIds(graph: AgentGraph): string[] {
+  const ids = new Set<string>();
+  for (const n of graph.nodes) {
+    const wantsReach = n.tools.includes("dispatch_to_graph") || n.tools.includes("manage_target_graphs");
+    if (!wantsReach) continue;
+    for (const targetId of n.dispatchTargets ?? []) {
+      if (targetId !== graph.id) ids.add(targetId);
+    }
+  }
+  return [...ids];
+}
+
 export const PROVIDERS: ProviderId[] = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"];
 export const ROLES: AgentNode["role"][] = ["supervisor", "worker", "router", "reviewer"];
 
@@ -114,6 +139,7 @@ export function HierarchyCanvas({
   showStartRunButton?: boolean;
 }) {
   const { theme } = useTheme();
+  const router = useRouter();
   const [graph, setGraph] = useState(initialGraph);
   const [nodes, setNodes, onNodesChange] = useNodesState(toFlowNodes(initialGraph));
   const [edges, setEdges, onEdgesChange] = useEdgesState(toFlowEdges(initialGraph));
@@ -171,6 +197,103 @@ export function HierarchyCanvas({
     setTimeout(() => setPulses((ps) => ps.filter((p) => p.id !== id)), 650);
   }, []);
 
+  // Cross-graph reach (dispatch_to_graph/manage_target_graphs) is invisible
+  // otherwise — it's node.dispatchTargets, a completely separate mechanism
+  // from routing_edges. Strips and re-adds its own gateway:/gateway-edge:
+  // -prefixed entries each time rather than diffing, mirroring toFlowEdges'
+  // consensus-gather recompute-fresh approach. Pulled out of the effect
+  // below so the "Reset layout" button can also call it directly, right
+  // after restoring nodes/edges to their base (DB) positions.
+  const applyGatewayNodes = useCallback(() => {
+    const targetIds = getGatewayTargetIds(graph);
+    if (targetIds.length === 0) {
+      setNodes((nds) => nds.filter((n) => !n.id.startsWith(GATEWAY_NODE_PREFIX)));
+      setEdges((eds) => eds.filter((e) => !e.id.startsWith(GATEWAY_EDGE_PREFIX)));
+      return;
+    }
+
+    listGraphs().then((graphs) => {
+      const targets = graphs.filter((g) => targetIds.includes(g.id));
+      // Kept close to the real nodes (not maxY + a large offset) — long
+      // dashed edges down to a far-away gateway row were reported as hard
+      // to follow visually.
+      const maxExistingY = Math.max(0, ...graph.nodes.map((n) => n.position.y));
+
+      const gatewayNodes: Node[] = targets.map((t, i) => ({
+        id: `${GATEWAY_NODE_PREFIX}${t.id}`,
+        position: { x: i * 220, y: maxExistingY + 140 },
+        data: { label: `🔗 ${t.name}`, isGateway: true, targetGraphId: t.id },
+        style: { border: "2px dashed var(--text-faint)", opacity: 0.85 },
+        connectable: false,
+      }));
+
+      const gatewayEdges: Edge[] = [];
+      for (const n of graph.nodes) {
+        const wantsReach = n.tools.includes("dispatch_to_graph") || n.tools.includes("manage_target_graphs");
+        if (!wantsReach) continue;
+        for (const targetId of n.dispatchTargets ?? []) {
+          if (!targetIds.includes(targetId)) continue;
+          gatewayEdges.push({
+            id: `${GATEWAY_EDGE_PREFIX}${n.id}-${targetId}`,
+            source: n.id,
+            target: `${GATEWAY_NODE_PREFIX}${targetId}`,
+            type: "signal",
+            style: { strokeDasharray: "2 6", stroke: "var(--text-faint)" },
+            selectable: false,
+            deletable: false,
+            data: { isGatewayEdge: true },
+          } as Edge);
+        }
+      }
+
+      setNodes((nds) => [...nds.filter((n) => !n.id.startsWith(GATEWAY_NODE_PREFIX)), ...gatewayNodes]);
+      setEdges((eds) => [...eds.filter((e) => !e.id.startsWith(GATEWAY_EDGE_PREFIX)), ...gatewayEdges]);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graph]);
+
+  // Re-runs whenever a node's dispatch config changes (e.g. after a
+  // Settings save), so gateways stay live without a reload.
+  useEffect(() => {
+    applyGatewayNodes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graph.nodes, graph.id]);
+
+  /**
+   * Node positions aren't persisted anywhere today (dragging is purely
+   * local view state), so a rearrangement that gets confusing — nodes
+   * dragged far apart, long/crossed edges — has no way back except
+   * reloading the page. This snaps nodes/edges back to their real (DB)
+   * positions plus a freshly recomputed gateway row, and remounts
+   * <ReactFlow> (via resetCounter as its key) so the one-shot `fitView`
+   * prop re-fits the viewport too.
+   */
+  const [resetCounter, setResetCounter] = useState(0);
+  const resetLayout = useCallback(() => {
+    setNodes(toFlowNodes(graph));
+    setEdges(toFlowEdges(graph));
+    applyGatewayNodes();
+    setResetCounter((c) => c + 1);
+  }, [graph, applyGatewayNodes, setNodes, setEdges]);
+
+  // Generous but bounded — keeps a dragged node from ending up far off in
+  // empty canvas space (reported as "pushing" the rest of the diagram out
+  // of view) while still leaving real room to rearrange. Scales with the
+  // graph's own footprint rather than a fixed box so a bigger team isn't
+  // cramped.
+  const nodeExtent = useMemo((): [[number, number], [number, number]] => {
+    const xs = graph.nodes.map((n) => n.position.x);
+    const ys = graph.nodes.map((n) => n.position.y);
+    const minX = Math.min(0, ...xs) - 400;
+    const minY = Math.min(0, ...ys) - 400;
+    const maxX = Math.max(600, ...xs) + 800;
+    const maxY = Math.max(600, ...ys) + 1000;
+    return [
+      [minX, minY],
+      [maxX, maxY],
+    ];
+  }, [graph.nodes]);
+
   // consensus source -> aggregator, used for the gather pulse animation.
   const consensusGatherByAggregator = useMemo(() => {
     const map = new Map<string, string>();
@@ -210,9 +333,14 @@ export function HierarchyCanvas({
 
   const onReconnect = useCallback(
     (oldEdge: Edge, newConnection: Connection) => {
-      // The consensus gather edges are synthetic UI-only edges; they cannot be
-      // rerouted or persisted.
+      // The consensus gather and cross-graph gateway edges are synthetic,
+      // UI-only edges with no backing routing_edges row; they cannot be
+      // rerouted or persisted. Checked by id prefix, not oldEdge.data —
+      // the edges prop ReactFlow actually sees (edgesWithPulses below)
+      // overwrites .data with { pulses } on every render, so a data-based
+      // check here would never see isConsensusGather/isGatewayEdge.
       if ((oldEdge.data as { isConsensusGather?: boolean } | undefined)?.isConsensusGather) return;
+      if (oldEdge.id.startsWith(GATEWAY_EDGE_PREFIX)) return;
       setEdges((eds) => reconnectEdge(oldEdge, newConnection, eds));
       if (newConnection.target) {
         rerouteEdge(graph.id, oldEdge.id, newConnection.target).catch((err) => {
@@ -471,6 +599,9 @@ export function HierarchyCanvas({
         >
           🐙 GitHub
         </button>
+        <button type="button" onClick={resetLayout} title="Snap nodes back to their saved positions and re-fit the view">
+          ↺ Reset layout
+        </button>
         <a href={`/runs?graphId=${graph.id}`}>View runs</a>
         {showStartRunButton && lastRunId && <a href={`/runs/${lastRunId}`}>Run started — view full trail →</a>}
       </div>
@@ -629,19 +760,36 @@ export function HierarchyCanvas({
 
       <div style={{ flex: 1, position: "relative" }}>
         <ReactFlow
+          // Remounts on "Reset layout" so the one-shot fitView prop below
+          // re-fits against the restored positions too, not just the nodes/
+          // edges state.
+          key={resetCounter}
           nodes={nodes}
           edges={edgesWithPulses}
           edgeTypes={EDGE_TYPES}
+          nodeExtent={nodeExtent}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onReconnect={onReconnect}
           onConnect={onConnect}
           onNodeClick={(_, node) => {
+            const gatewayTargetId = (node.data as { isGateway?: boolean; targetGraphId?: string } | undefined)
+              ?.targetGraphId;
+            if (gatewayTargetId) {
+              router.push(`/hierarchy?graphId=${gatewayTargetId}`);
+              return;
+            }
             setShowSchedules(false);
             setShowGitHub(false);
             setOpenAgentPanel(node.id);
           }}
           colorMode={theme}
+          // Default minZoom (0.5) blocks fitView from zooming out past
+          // that, so a graph with real vertical span (gateway row below
+          // the real team) plus a short container (HierarchyChat's
+          // embedded canvas splits the screen with the chat panel below
+          // it) clips the bottom rather than shrinking further to fit it.
+          minZoom={0.1}
           fitView
           fitViewOptions={{ padding: 0.2, maxZoom: 1.25 }}
         >

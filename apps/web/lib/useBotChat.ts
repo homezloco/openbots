@@ -69,14 +69,33 @@ export function useBotChat(graph: GraphSummary) {
       const created = await createRun(graph.id, nextInput);
       setPending({ message, status: created.status });
 
+      // A real, previously-shipped bug: this used to give up after a fixed
+      // 30 iterations (~30s) and fall through UNCONDITIONALLY to setRuns
+      // below, treating a still-"running" run (output still null) as if it
+      // were the final answer — the chat would then render
+      // JSON.stringify(null), literally the text "null", as the bot's
+      // reply. Cross-graph tools (business_metrics doing real external
+      // HTTP calls per source, dispatch_to_graph chains, multi-step tool
+      // use up to engine.ts's stepCountIs(8)) can easily run past 30s, so
+      // this became far more likely to hit once those shipped. Now polls
+      // for up to POLL_TIMEOUT_MS and never treats a non-"completed"
+      // status as success.
+      const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+      const deadline = Date.now() + POLL_TIMEOUT_MS;
       let final = await fetchRun(created.id);
       setPending({ message, status: final.status });
-      for (let i = 0; i < 30 && final.status !== "completed" && final.status !== "error"; i++) {
+      while (final.status !== "completed" && final.status !== "error" && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1000));
         final = await fetchRun(created.id);
         setPending({ message, status: final.status });
       }
-      if (final.status === "error") throw new Error("The bot failed to respond — check its Hierarchy/Runs view for details");
+      if (final.status !== "completed") {
+        throw new Error(
+          final.status === "error"
+            ? "The bot failed to respond — check its Hierarchy/Runs view for details"
+            : "Still running after a long wait — check the graph's Runs page; it may complete in the background.",
+        );
+      }
       // fetchRun (GET /runs/:id) doesn't compute originalInput the way
       // listRuns does — attach it directly since the client already knows
       // exactly what it sent, rather than waiting for a reload to self-correct.

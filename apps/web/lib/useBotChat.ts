@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { RunStatus } from "@openbots/graph-schema";
 import { createRun, fetchRun, listRuns, type GraphSummary, type Run } from "./api";
 
 /** A run's true original input holds the FULL transcript so far; this recovers just this turn's message. */
@@ -35,6 +36,12 @@ export function useBotChat(graph: GraphSummary) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The in-flight turn, shown immediately on send rather than waiting for
+  // the full round trip (including the poll loop below) to resolve — the
+  // status here tracks the real backend value (pending -> running ->
+  // completed/error) so the UI reflects actual progress, not just a static
+  // "Sending…" label.
+  const [pending, setPending] = useState<{ message: string; status: RunStatus } | null>(null);
 
   async function loadHistory() {
     const rows = await listRuns(graph.id);
@@ -55,15 +62,19 @@ export function useBotChat(graph: GraphSummary) {
     setInput("");
     setSending(true);
     setError(null);
+    setPending({ message, status: "pending" });
     try {
       const lastRun = runs.length > 0 ? runs[runs.length - 1] : null;
       const nextInput = buildNextInput(lastRun, message);
       const created = await createRun(graph.id, nextInput);
+      setPending({ message, status: created.status });
 
       let final = await fetchRun(created.id);
+      setPending({ message, status: final.status });
       for (let i = 0; i < 30 && final.status !== "completed" && final.status !== "error"; i++) {
         await new Promise((r) => setTimeout(r, 1000));
         final = await fetchRun(created.id);
+        setPending({ message, status: final.status });
       }
       if (final.status === "error") throw new Error("The bot failed to respond — check its Hierarchy/Runs view for details");
       // fetchRun (GET /runs/:id) doesn't compute originalInput the way
@@ -73,9 +84,10 @@ export function useBotChat(graph: GraphSummary) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send message");
     } finally {
+      setPending(null);
       setSending(false);
     }
   }
 
-  return { runs, input, setInput, sending, error, send };
+  return { runs, input, setInput, sending, error, send, pending };
 }

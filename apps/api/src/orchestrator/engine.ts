@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { generateText, stepCountIs } from "ai";
 import { eq, desc } from "drizzle-orm";
 import {
@@ -25,7 +27,15 @@ import { withNodeTimeout } from "./circuitBreaker.js";
 import { withRetry } from "./retry.js";
 import { getCredentials } from "./credentials.js";
 import { classifyProviderError } from "./providerErrors.js";
-import { createDispatchToGraphTool, getDispatchableGraphs, type DispatchableGraph } from "./dispatchTool.js";
+import { createCheckDispatchStatusTool, createDispatchToGraphTool, getDispatchableGraphs, type DispatchableGraph } from "./dispatchTool.js";
+import {
+  createCreateTargetEdgeTool,
+  createCreateTargetNodeTool,
+  createDeleteTargetEdgeTool,
+  createDeleteTargetNodeTool,
+  createListTargetGraphTool,
+  createUpdateTargetNodeTool,
+} from "./graphManagementTools.js";
 import { createBusinessMetricsTool } from "./businessMetricsTool.js";
 import { computeWarnings } from "./warnings.js";
 import { enqueueHop } from "../queue/runQueue.js";
@@ -343,17 +353,58 @@ function appendWriteContext(systemPrompt: string, canWrite: boolean): string {
 }
 
 /**
- * Mirrors appendAutoRoutingContext exactly, for the same reason: the
- * model dispatching to another graph has zero built-in knowledge of what
- * those graphs even are. Also teaches the fire-and-forget contract up
- * front — without this a node would naturally assume dispatch_to_graph
- * behaves like a normal synchronous tool call and try to relay a "result"
- * it was never actually given.
+ * Mirrors appendAutoRoutingContext exactly, for the same reason: a model
+ * with dispatch_to_graph and/or manage_target_graphs has zero built-in
+ * knowledge of what its target graphs even are. Covers BOTH capabilities
+ * (previously named appendDispatchContext and gated on wantsDispatch
+ * alone) — a manage_target_graphs-only node's tools all require a
+ * targetGraphName, but until this fix nothing ever told such a node any
+ * target's name at all, since the list was only ever computed/injected
+ * when dispatch_to_graph was also present. Found during a context-
+ * consistency review; see PLAN.md.
  */
-function appendDispatchContext(systemPrompt: string, targets: DispatchableGraph[]): string {
+function appendReachableGraphsContext(
+  systemPrompt: string,
+  targets: DispatchableGraph[],
+  wantsDispatch: boolean,
+  wantsGraphManagement: boolean,
+): string {
   if (targets.length === 0) return systemPrompt;
   const list = targets.map((t) => `- ${t.name}: ${t.description || "(no description)"}`).join("\n");
-  return `${systemPrompt}\n\nYou can start independent work in these other graphs using dispatch_to_graph:\n${list}\n\nThis is fire-and-forget — it only starts that graph's own run, it does NOT wait for or return that run's result. Always tell the user you've dispatched it and that they (or you, later) should check that graph's own run history for the outcome — you will never see that run's actual output yourself, so never describe or guess at what it found.`;
+  const capabilities: string[] = [];
+  if (wantsDispatch) {
+    capabilities.push(
+      "start independent work in one of them with dispatch_to_graph (fire-and-forget — it does NOT wait for or return that run's result; use check_dispatch_status later if asked how it went)",
+    );
+  }
+  if (wantsGraphManagement) {
+    capabilities.push(
+      "inspect and edit one of them (list_target_graph, create/update/delete_target_node, create/delete_target_edge) — held to the same rules a human editing it directly would be",
+    );
+  }
+  return `${systemPrompt}\n\nYou can ${capabilities.join(", or ")} for these graphs:\n${list}`;
+}
+
+/**
+ * Checks the file's real, live existence via the already-resolved
+ * effective root (the isolated worktree path when write access is on —
+ * a full git checkout, so a tracked CLAUDE.md is present there too —
+ * or node.fileAccessRoot otherwise) rather than assuming one exists.
+ * Found via a direct question about whether agents know to use their
+ * project's CLAUDE.md: only 6 of 20 real file-scoped agents had this
+ * instruction, hand-written into individual system prompts inconsistently
+ * (quick-add sometimes bakes it in, sometimes doesn't — non-deterministic,
+ * and even where present it's a one-time snapshot, not a guarantee).
+ * Engine-level and automatic fixes this for every current and future
+ * node at once, the same fix already applied once for auto-routing
+ * candidates — see PLAN.md.
+ */
+const PROJECT_CONTEXT_FILE = "CLAUDE.md";
+
+function appendProjectContext(systemPrompt: string, fileRoot: string | undefined, canRead: boolean): string {
+  if (!canRead || !fileRoot) return systemPrompt;
+  if (!existsSync(join(fileRoot, PROJECT_CONTEXT_FILE))) return systemPrompt;
+  return `${systemPrompt}\n\nThis project has a ${PROJECT_CONTEXT_FILE} file in its root — read it first, before making changes or answering questions about the codebase. It documents real, project-specific conventions and gotchas that aren't obvious from the code alone.`;
 }
 
 /**
@@ -396,15 +447,31 @@ async function callAgent(
   // push capability, since push is genuinely never available to it) while
   // fixing what it tells the user to actually do next.
   const wantsDispatch = node.tools.includes("dispatch_to_graph");
-  const dispatchableGraphs = wantsDispatch ? await getDispatchableGraphs(ownerId, node.dispatchTargets) : [];
   const wantsMetrics = node.tools.includes("business_metrics");
+  // A separate opt-in from dispatch_to_graph — sharing the SAME
+  // dispatchTargets allowlist (which graphs are reachable at all) while
+  // letting "can fire a run into X" and "can restructure X" be granted
+  // independently. See PLAN.md's "Cross-graph supervisor control".
+  const wantsGraphManagement = node.tools.includes("manage_target_graphs");
+  // Computed whenever EITHER capability wants it — not just wantsDispatch
+  // alone, which used to leave a manage_target_graphs-only node with no
+  // idea what any of its target graphs were even named. See PLAN.md.
+  const reachableGraphs =
+    wantsDispatch || wantsGraphManagement ? await getDispatchableGraphs(ownerId, node.dispatchTargets) : [];
+  const canRead = Boolean(node.fileAccessRoot) && node.tools.includes("read_file");
 
-  const systemPrompt = appendDispatchContext(
-    appendWriteContext(
-      appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
-      canWrite,
+  const systemPrompt = appendProjectContext(
+    appendReachableGraphsContext(
+      appendWriteContext(
+        appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
+        canWrite,
+      ),
+      reachableGraphs,
+      wantsDispatch,
+      wantsGraphManagement,
     ),
-    dispatchableGraphs,
+    effectiveFileRoot,
+    canRead,
   );
 
   let lastError: unknown;
@@ -429,17 +496,46 @@ async function callAgent(
       // resolveTools silently skips them and they're merged in here.
       let tools = baseTools;
       if (wantsDispatch) {
-        tools = { ...(tools ?? {}), dispatch_to_graph: createDispatchToGraphTool(ownerId, node.dispatchTargets ?? [], runId) };
+        tools = {
+          ...(tools ?? {}),
+          dispatch_to_graph: createDispatchToGraphTool(ownerId, node.dispatchTargets ?? [], runId, node.graphId),
+          // Granted automatically alongside dispatch_to_graph — checking on
+          // your own prior dispatch is a pure safety improvement over
+          // today's "fire and forget with no recourse," not new exposure,
+          // so this doesn't need its own node-level toggle.
+          check_dispatch_status: createCheckDispatchStatusTool(ownerId, node.dispatchTargets ?? [], node.graphId),
+        };
       }
       if (wantsMetrics) {
         tools = { ...(tools ?? {}), business_metrics: createBusinessMetricsTool(ownerId) };
+      }
+      if (wantsGraphManagement) {
+        // NOT named `targets` — that identifier is already this loop's
+        // fallback-chain target array; shadowing it here would be a real,
+        // easy-to-miss bug.
+        const managementTargets = node.dispatchTargets ?? [];
+        tools = {
+          ...(tools ?? {}),
+          list_target_graph: createListTargetGraphTool(ownerId, managementTargets),
+          create_target_node: createCreateTargetNodeTool(ownerId, managementTargets),
+          update_target_node: createUpdateTargetNodeTool(ownerId, managementTargets),
+          delete_target_node: createDeleteTargetNodeTool(ownerId, managementTargets),
+          create_target_edge: createCreateTargetEdgeTool(ownerId, managementTargets),
+          delete_target_edge: createDeleteTargetEdgeTool(ownerId, managementTargets),
+        };
       }
       const result = await withRetry(() =>
         generateText({
           model,
           system: systemPrompt,
           prompt,
-          ...(tools ? { tools, stopWhen: stepCountIs(5) } : {}),
+          // 8, not 5: a tool-using turn that's still mid-investigation
+          // (e.g. list a directory, then read a couple of files, then
+          // summarize) can genuinely need more than 5 steps — hitting the
+          // cap mid-tool-call previously left result.text silently empty
+          // (a real run that shipped exactly this: succeeded, no error,
+          // blank output, e2e-invisible since it's not a thrown error).
+          ...(tools ? { tools, stopWhen: stepCountIs(8) } : {}),
         }),
       );
 
@@ -447,6 +543,15 @@ async function callAgent(
       // several, and per-tool-call commits would race on which "pending
       // commit" belongs to which concurrently-running execute()).
       let text = result.text;
+      // Defensive fallback for the same failure shape regardless of cause
+      // (step limit hit mid-tool-call, or a model that just returns no
+      // text) — an empty completed run previously looked identical to a
+      // real (if terse) answer, with nothing surfacing that anything went
+      // wrong.
+      if (!text.trim() && tools) {
+        text =
+          "(No final answer — I used tools to investigate but didn't reach a text response within my step limit. Try asking again, or narrow the question.)";
+      }
       if (worktree) {
         const sha = await commitWorktreeChanges(worktree, node.name, touchedFiles);
         if (sha) {

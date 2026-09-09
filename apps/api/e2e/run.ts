@@ -442,6 +442,41 @@ async function main() {
     assert(/escapes the allowed root|blocked|denied|could not|cannot access/i.test(output), `expected traversal-blocked language in output, got: ${output.slice(0, 300)}`);
   });
 
+  // --- Engine-level CLAUDE.md awareness (apps/api/e2e/fixtures/testrepo/CLAUDE.md) ---
+  await testWithRetries("engine auto-tells a file-scoped agent to read CLAUDE.md when one exists in its root", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E CLAUDE.md awareness" }) });
+    const graphId = g.body.id;
+
+    const node = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Reader",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        // Deliberately no mention of CLAUDE.md anywhere in this prompt —
+        // the point is to verify the ENGINE tells it to check, not that a
+        // hand-written prompt happened to.
+        systemPrompt: "You have read-only access to a directory via list_directory and read_file. Use them to answer.",
+        tools: ["read_file", "list_directory"],
+        fileAccessRoot: "/tmp/testrepo",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId, input: "What is the secret gadget-conversion ratio?" }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(
+      /3\.7/.test(String(run.output)),
+      `expected the CLAUDE.md-only marker (3.7) in output — the agent should have been auto-told to read it, got: ${run.output}`,
+    );
+  });
+
   // --- Template save/instantiate ---
   await test("save graph as template and instantiate a deep copy", async () => {
     const template = await api("/templates", {
@@ -1554,6 +1589,281 @@ async function main() {
     const finished = await waitForRun(targetRuns.body[0].id);
     assert(finished.status === "completed", `dispatched run did not complete: ${JSON.stringify(finished.events)}`);
     assert(String(finished.output).toLowerCase().includes("pong"), `unexpected dispatched run output: ${finished.output}`);
+  });
+
+  // --- check_dispatch_status: on-demand pull for a run already dispatched ---
+  await testWithRetries("check_dispatch_status reports the real output of a run this graph dispatched", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: dispatchSourceGraphId,
+        input: `Call check_dispatch_status for targetGraphName "${dispatchTargetGraphName}" and quote back exactly what it returned.`,
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(/pong/i.test(String(run.output)), `expected the earlier dispatched run's real output (pong) reflected back, got: ${run.output}`);
+  });
+
+  let neverDispatchedGraphId = "";
+  await test("check_dispatch_status setup: a target this graph has never dispatched into", async () => {
+    const graph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: `E2E never-dispatched ${Date.now()}` }) });
+    neverDispatchedGraphId = graph.body.id;
+    const node = await api(`/graphs/${dispatchSourceGraphId}`);
+    const dispatcher = node.body.nodes.find((n: any) => n.name === "Dispatcher");
+    const patched = await api(`/graphs/${dispatchSourceGraphId}/nodes/${dispatcher.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ dispatchTargets: [...dispatcher.dispatchTargets, neverDispatchedGraphId] }),
+    });
+    assert(patched.status === 200, `failed to add second dispatch target: ${JSON.stringify(patched.body)}`);
+  });
+
+  await testWithRetries("check_dispatch_status reports clearly when nothing has been dispatched yet", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: dispatchSourceGraphId,
+        input: `Call check_dispatch_status for targetGraphName "E2E never-dispatched" (it won't match exactly — that's fine, just try your best guess at the graph you were given for this purpose) — actually, use the exact graph name from your system prompt that starts with "E2E never-dispatched". Quote back exactly what it returned.`,
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(/nothing has been dispatched/i.test(String(run.output)), `expected a clear "nothing dispatched yet" message, got: ${run.output}`);
+  });
+
+  // --- manage_target_graphs: full cross-graph node/edge editing ---
+  let managementTargetGraphId = "";
+  let managementTargetGraphName = "";
+  let managementSourceGraphId = "";
+  let managementNodeAId = "";
+  let managementNodeBId = "";
+
+  await test("manage_target_graphs setup: target graph with two nodes, and a manager node", async () => {
+    managementTargetGraphName = `E2E management target ${Date.now()}`;
+    const target = await api("/graphs", { method: "POST", body: JSON.stringify({ name: managementTargetGraphName }) });
+    managementTargetGraphId = target.body.id;
+
+    const nodeA = await api(`/graphs/${managementTargetGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Existing A",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "test",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    managementNodeAId = nodeA.body.id;
+    const nodeB = await api(`/graphs/${managementTargetGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Existing B",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "test",
+        position: { x: 0, y: 100 },
+      }),
+    });
+    managementNodeBId = nodeB.body.id;
+
+    const source = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E management source" }) });
+    managementSourceGraphId = source.body.id;
+    const managerNode = await api(`/graphs/${managementSourceGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Manager",
+        role: "supervisor",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: `You manage other graphs using your graph-editing tools. When asked to act on a graph, use exactly the target graph name you're given, and exactly the node names you're given.`,
+        tools: ["manage_target_graphs"],
+        dispatchTargets: [managementTargetGraphId],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(managerNode.status === 201, `manager node create failed: ${JSON.stringify(managerNode.body)}`);
+    await api(`/graphs/${managementSourceGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: managerNode.body.id }) });
+  });
+
+  await testWithRetries("create_target_node actually creates a node in the target graph", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: managementSourceGraphId,
+        input: `In the graph "${managementTargetGraphName}", create a new node named "E2E Created Node" with role "worker", provider "anthropic", model "claude-sonnet-5".`,
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+
+    const graph = await api(`/graphs/${managementTargetGraphId}`);
+    const node = graph.body.nodes.find((n: any) => n.name === "E2E Created Node");
+    assert(node, `expected a new node to actually exist in the target graph, got nodes: ${graph.body.nodes.map((n: any) => n.name)}`);
+
+    const changes = await api(`/graphs/${managementTargetGraphId}/routing-changes`);
+    assert(
+      changes.body.some((c: any) => c.changeType === "node_added" && c.after?.name === "E2E Created Node"),
+      "expected the creation to appear in the routing-changes audit trail",
+    );
+  });
+
+  await testWithRetries("update_target_node actually updates the node", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: managementSourceGraphId,
+        input: `In the graph "${managementTargetGraphName}", update the node named "E2E Created Node" to have description "updated by e2e".`,
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+
+    const graph = await api(`/graphs/${managementTargetGraphId}`);
+    const node = graph.body.nodes.find((n: any) => n.name === "E2E Created Node");
+    assert(node?.description === "updated by e2e", `expected description to be updated, got: ${node?.description}`);
+  });
+
+  await testWithRetries("create_target_edge actually creates a routing edge", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: managementSourceGraphId,
+        input: `In the graph "${managementTargetGraphName}", create a routing edge from "Existing A" to "Existing B".`,
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+
+    const graph = await api(`/graphs/${managementTargetGraphId}`);
+    const edge = graph.body.edges.find((e: any) => e.sourceNodeId === managementNodeAId && e.targetNodeId === managementNodeBId);
+    assert(edge, `expected an edge from Existing A to Existing B to exist`);
+  });
+
+  await testWithRetries("delete_target_edge and delete_target_node actually delete", async () => {
+    const deleteEdgeRun = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: managementSourceGraphId,
+        input: `In the graph "${managementTargetGraphName}", delete the routing edge from "Existing A" to "Existing B".`,
+      }),
+    });
+    await waitForRun(deleteEdgeRun.body.id);
+    const afterEdgeDelete = await api(`/graphs/${managementTargetGraphId}`);
+    assert(
+      !afterEdgeDelete.body.edges.some((e: any) => e.sourceNodeId === managementNodeAId && e.targetNodeId === managementNodeBId),
+      "expected the edge to be gone",
+    );
+
+    const deleteNodeRun = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: managementSourceGraphId,
+        input: `In the graph "${managementTargetGraphName}", delete the node named "E2E Created Node".`,
+      }),
+    });
+    await waitForRun(deleteNodeRun.body.id);
+    const afterNodeDelete = await api(`/graphs/${managementTargetGraphId}`);
+    assert(!afterNodeDelete.body.nodes.some((n: any) => n.name === "E2E Created Node"), "expected the node to be gone");
+  });
+
+  await test("security: a node without manage_target_graphs cannot use the management tools", async () => {
+    // dispatchSourceGraphId's "Dispatcher" node has dispatch_to_graph but
+    // never manage_target_graphs — even asked directly, it has no such tool
+    // to call, so state must be unaffected regardless of what it says.
+    const before = await api(`/graphs/${managementTargetGraphId}`);
+    const beforeCount = before.body.nodes.length;
+
+    // Dispatcher's dispatchTargets don't include managementTargetGraphId at
+    // all, so even the ATTEMPT is doubly blocked — this asserts the state
+    // never changes, independent of wording.
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: dispatchSourceGraphId,
+        input: `In the graph "${managementTargetGraphName}", create a new node named "Should Never Exist" with role "worker", provider "anthropic", model "claude-sonnet-5".`,
+      }),
+    });
+    await waitForRun(created.body.id);
+
+    const after = await api(`/graphs/${managementTargetGraphId}`);
+    assert(after.body.nodes.length === beforeCount, "expected no new node — this node has no graph-management tool at all");
+    assert(!after.body.nodes.some((n: any) => n.name === "Should Never Exist"), "expected no node with the forbidden name to exist");
+  });
+
+  await testWithRetries("security: managing a graph outside dispatchTargets fails clearly", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: managementSourceGraphId,
+        input: `For a diagnostic test, call list_target_graph with targetGraphName "${dispatchTargetGraphName}" — I need to see the exact tool error it returns when the target isn't authorized. Make the call and quote the exact error text back to me.`,
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(/no dispatchable graph/i.test(String(run.output)), `expected a not-found error, got: ${run.output}`);
+  });
+
+  await testWithRetries("security: create_target_node still enforces the file-access-root allowlist", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: managementSourceGraphId,
+        input: `In the graph "${managementTargetGraphName}", create a new node named "Should Not Get Access" with role "worker", provider "anthropic", model "claude-sonnet-5", and fileAccessRoot "/etc".`,
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+
+    const graph = await api(`/graphs/${managementTargetGraphId}`);
+    assert(
+      !graph.body.nodes.some((n: any) => n.name === "Should Not Get Access"),
+      "expected the allowlist-violating node to never have been created",
+    );
+  });
+
+  await testWithRetries("a manage_target_graphs-only node (no dispatch_to_graph) is still told its target graph's name", async () => {
+    const managerOnlyNode = await api(`/graphs/${managementSourceGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Manager Only",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        // No dispatch_to_graph — appendReachableGraphsContext used to only
+        // fire when wantsDispatch was true, leaving a node with ONLY
+        // manage_target_graphs with no idea what any target was named.
+        systemPrompt: "test",
+        tools: ["manage_target_graphs"],
+        dispatchTargets: [managementTargetGraphId],
+        position: { x: 0, y: 200 },
+      }),
+    });
+    assert(managerOnlyNode.status === 201, `manager-only node create failed: ${JSON.stringify(managerOnlyNode.body)}`);
+    await api(`/graphs/${managementSourceGraphId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ entryNodeId: managerOnlyNode.body.id }),
+    });
+
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: managementSourceGraphId,
+        input: "Without calling any tool yet, just tell me the exact name of the one graph you're able to manage.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(
+      String(run.output).includes(managementTargetGraphName),
+      `expected the target graph's name in the model's answer, got: ${run.output}`,
+    );
+
+    // Restore the graph's entry node for any later test relying on it.
+    const original = await api(`/graphs/${managementSourceGraphId}`);
+    const manager = original.body.nodes.find((n: any) => n.name === "Manager");
+    await api(`/graphs/${managementSourceGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: manager.id }) });
   });
 
   // --- business_metrics: real conversion/revenue/traffic data ---

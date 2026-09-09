@@ -5,8 +5,8 @@ differentiator: a live, editable canvas of the agent hierarchy and routing —
 no product in the "AI bot" space currently ships one (see Competitive
 notes below).
 
-**Status as of 2026-09-08: all three original phases are built and
-e2e-tested (52/52 passing, `apps/api/e2e/run.ts`), three security review
+**Status as of 2026-09-09: all three original phases are built and
+e2e-tested (65/65 passing, `apps/api/e2e/run.ts`), four security review
 passes found and fixed real vulnerabilities, dark mode shipped, and the product
 grew past the original scope into a working multi-agent "engineering
 team" built from the user's own real projects — now with live run
@@ -14,12 +14,20 @@ visualization, per-agent conversation history, a unified Dashboard
 experience, agents that can actually write code and (on explicit
 `/push`/`/pr` confirmation, over HTTPS+PAT or SSH) push it and open a PR,
 graphs that can run themselves on a recurring cron schedule, one graph
-that can fire work into another it owns, and agents that can read real
-conversion/revenue/traffic numbers instead of only chat-supplied ones
-(see "Live visualization, agent reuse, and dashboard unification",
-"Agent file-write and confirmed push", "Scheduled runs", and "Cross-graph
-dispatch and business metrics" below). See "Known gaps" at the bottom
-for what's still actually missing.**
+that can fire work into another it owns, a canvas UI for configuring that
+cross-graph reach, a GitHub tab (commits/push/PR status/diffs) replacing
+the old Commits panel, real supervisor control letting one graph fully
+edit and query the outcome of graphs it dispatches into, and agents that
+can read real conversion/revenue/traffic numbers instead of only
+chat-supplied ones (see "Live visualization, agent reuse, and dashboard
+unification", "Agent file-write and confirmed push", "Scheduled runs",
+"Cross-graph dispatch and business metrics", and "GitHub tab and
+cross-graph supervisor control" below). OpenBots itself now also has a
+graph in its own dashboard (dogfooding — see that section), and every
+file-scoped agent is now automatically told to read its project's
+`CLAUDE.md` when one exists, engine-level rather than per-prompt (see
+"Context consistency across agents"). See "Known gaps" at the bottom for
+what's still actually missing.**
 
 ## Phase 1 — MVP
 
@@ -359,6 +367,158 @@ Scheduling requested alongside the PC bot is now built — see "Scheduled
 runs" above (a graph can run itself on a cron pattern via a BullMQ job
 scheduler; not specific to this agent, works for any graph).
 
+## GitHub tab and cross-graph supervisor control (2026-09-09)
+
+Two follow-ons after closing the `dispatchTargets`-has-no-canvas-UI gap
+(below, now fixed: `AgentSettingsForm.tsx` got a graph-picker checkbox
+list, live-verified against the real Agency Portfolio graph).
+
+**GitHub tab.** Replaces the old commits-only `CommitsPanel` with
+`GitHubPanel.tsx`: commits grouped by branch, push status/action (same
+underlying `/push` chat-command path, just a UI shortcut, per the existing
+Commits-panel pattern), PR status fetched live from GitHub and batched by
+distinct `{owner, repo}` (one `pulls?state=all` call per repo, not per
+branch), an "Open PR" action for a specific pushed branch (a new
+`POST /graphs/:id/commits/:commitId/pr`, sharing `createPrForCommit` —
+extracted from the `/pr` chat command's handler — rather than only being
+able to PR "the most recently pushed" branch like the command does), and a
+per-commit diff viewer (`getCommitDiff` in `gitWorktree.ts`, a plain `git
+show` against the commit's still-on-disk worktree — worktrees are never
+cleaned up, see "Agent file-write and confirmed push"). Found and fixed a
+real deployment gap live-testing this: the diff route runs in the `api`
+process, but `docker-compose.override.yml` only mounted real project
+directories into `worker` (the only process that previously ever touched
+them, via `engine.ts::callAgent`) — added the same read-only mount to
+`api`.
+
+**Cross-graph supervisor control.** A deliberate, explicit reversal of
+"dispatch is fire-and-forget, graphs are fully self-contained" — confirmed
+with the user, who chose the maximal option. Two independent opt-ins,
+sharing the same `dispatchTargets` allowlist (which graphs are reachable
+at all) so "can fire a run" and "can restructure" are grantable
+separately:
+- `check_dispatch_status` — granted automatically alongside
+  `dispatch_to_graph` (pure safety improvement, not new exposure): lets a
+  node ask "how did the run I dispatched into X go?" on demand. Needed a
+  schema addition, `runs.dispatchSourceGraphId` (nullable, `onDelete: set
+  null`, same shape as `scheduledTriggerId`), set by `createRun()` when a
+  dispatch creates the run, so a later query can find "the run THIS graph
+  fired into that one" without trusting anything the model remembers.
+- `manage_target_graphs` — six tools (`list_target_graph`,
+  `create/update/delete_target_node`, `create/delete_target_edge`) that
+  resolve names (never raw ids — same principle `dispatch_to_graph`
+  already follows) and call shared, newly-extracted mutation functions
+  (`orchestrator/graphMutations.ts`: `insertAgentNodeValidated`,
+  `updateAgentNode`, `deleteAgentNode`, `insertRoutingEdge`,
+  `deleteRoutingEdge`) — the exact same functions `routes/graphs.ts`'s
+  human-facing POST/PATCH/DELETE routes now call too, so a cross-graph
+  tool edit is held to the identical write-root-allowlist and
+  dispatch-ownership standard a human editing the node directly would be,
+  not a separately-maintained subset of it. Deliberately still
+  **not** settable by any of these tools: `dispatchTargets` (the actual
+  reachability boundary — kept human/PATCH-only so it can't be silently
+  expanded from inside a dispatch) and `consensusGroup` (needs edge-id
+  resolution by name to be usable from a tool call; real complexity, no
+  clear v1 need).
+
+**A real, HIGH-severity gap was found and fixed by the e2e suite while
+building this**: the new tools' `fileAccessRoot` field bypassed
+`ALLOWED_FILE_ACCESS_ROOTS` entirely — `checkWriteRootAllowed` only checks
+the *write* allowlist when write tools are present, and the *read*
+allowlist refine lives on `fileAccessRootSchema`, which only runs during
+`createNodeBody.parse()` at the HTTP boundary; the tools build a plain
+object and call the mutation functions directly, skipping that parse
+entirely. A new `checkFileAccessRootAllowed()` (validation/fileAccessRoot.ts)
+closes this by running the same check *inside*
+`insertAgentNodeValidated`/`updateAgentNode` themselves, so every caller
+gets it for free regardless of whether it went through zod first — the e2e
+test that caught this (`create_target_node still enforces the
+file-access-root allowlist`) asserts on real state (no node with the
+disallowed root exists), not on model wording. 63/63 e2e passing after the
+fix, including a full new suite for both features above.
+
+**Also this session**: `apps/web/lib/useBotChat.ts` gained a `pending`
+turn shown immediately on send (previously the UI stayed blank through the
+entire round-trip, including a 1s-interval poll loop, before showing
+anything) — the underlying poll loop's real backend status
+(`pending`→`running`→`completed`) now drives a live "Sending…"/"Thinking…"
+indicator instead of a static label. Separately, `engine.ts`'s tool-use
+step cap went from `stepCountIs(5)` to `8`, plus a fallback message when
+`result.text` is empty after the loop — found live via a real run that
+had shipped exactly this failure mode (a tool-using turn hit the old cap
+mid-investigation, completed with `status: "completed"` and zero output,
+with nothing surfacing that as a problem).
+
+**OpenBots now has its own graph** (dogfooding): a single "OpenBots
+Engineer" node scoped to read/write `/home/shane/Development/openbots`
+itself (same pattern as every other real project — added to
+`ALLOWED_FILE_ACCESS_ROOTS`/`ALLOWED_FILE_WRITE_ROOTS` and the
+`docker-compose.override.yml` worker mount), wired into Agency Portfolio's
+`dispatchTargets` so Portfolio Lead can reach it too. Verified live: asked
+it to summarize its own `dispatchTool.ts`, got a correct answer back.
+
+## Context consistency across agents (2026-09-09)
+
+Triggered by a direct question: do agents know to use their project's
+`CLAUDE.md`? Checked the real data instead of assuming — of the 20 real,
+file-scoped agents across the user's projects, only 6 had a "read
+CLAUDE.md first" instruction, and it was inconsistent even within one
+team (every "Backend Specialist" across every project had it; every
+"Frontend"/"Growth" specialist didn't, with one exception). The reason:
+the *only* place this instruction could live was inside each node's
+manually-authored (or quick-add LLM-generated, non-deterministically)
+`systemPrompt` — no engine-level guarantee, so it drifted by construction.
+
+This is the exact same failure shape as the auto-routing-context bug
+fixed earlier ("a hand-written prompt that happened to list its routing
+candidates worked by accident; a quick-add-generated one didn't" — see
+"Real bugs found and fixed this session" above), so it got the same fix:
+**engine-level and automatic, not per-prompt.** `engine.ts::appendProjectContext`
+checks the real, live existence of a `CLAUDE.md` at the node's effective
+file root (the isolated worktree path when write access is on — a full
+git checkout, so a tracked `CLAUDE.md` is present there too) and, only if
+one actually exists, appends an instruction to read it first. This fixes
+all 20 current agents and every future one (manually created or
+quick-add-generated) with one code change — no per-node prompt editing
+needed. The 6 agents that already had a hand-written version of this
+instruction were cleaned up (via PATCH) to remove the now-redundant text,
+preserving any genuinely unique content that happened to be phrased
+alongside it (e.g. Leadgen B Backend Specialist's prompt still notes it's
+a fork of leadgen-a with divergence tracked in CLAUDE.md — just without
+the now-redundant "go read it" imperative).
+
+While reviewing every other context-injection mechanism for the same
+class of bug (the user's ask: "review what else we use as context and
+make sure it's all consistent and pertinent"), found one more real gap:
+`appendDispatchContext` (the function that tells a `dispatch_to_graph`
+node what its target graphs are named) was gated on `wantsDispatch`
+alone — a node with `manage_target_graphs` but **not** `dispatch_to_graph`
+got an empty list and was never told any target graph's name at all, even
+though all six of its tools require one. Renamed to
+`appendReachableGraphsContext`, now computed whenever either capability
+is present and describing whichever tools are actually granted.
+`business_metrics`/`pc_telemetry` were checked too and found fine — both
+fully self-document their small, fixed set of sources/channels in the
+tool's own schema, needing no per-node dynamic injection.
+
+**Explicitly decided out of scope**: hierarchy self-awareness (a business
+graph's Lead knowing Portfolio Lead can dispatch into it; a specialist
+knowing which Lead it reports to) doesn't exist anywhere today, and the
+user chose to leave it that way rather than add it here — graphs stay
+fully self-contained, which matters for `agent_templates`' deep-copy reuse
+(a template shouldn't carry a baked-in claim about a hierarchy it's no
+longer part of once copied) and avoids reintroducing the exact same
+staleness problem this fix just closed, one level up.
+
+e2e-verified (65/65 passing): a node with `read_file` and no mention of
+CLAUDE.md anywhere in its prompt correctly answers a question whose answer
+exists *only* in a fixture's `CLAUDE.md` (added to
+`apps/api/e2e/fixtures/testrepo/CLAUDE.md`); a `manage_target_graphs`-only
+node (no `dispatch_to_graph`) correctly names its one target graph
+unprompted. Confirmed live too: asked the real `OpenBots Engineer` (itself
+one of the 20 agents that lacked this) an architecture question, and it
+explicitly cited "From the CLAUDE.md file" in its answer.
+
 ## Known gaps (honest list)
 
 1. **The containerized `web` Docker image has never successfully built** in this environment (persistent npm-registry network flakiness in this sandbox on large packages like `next`/`@next/swc-*` — the `api` image, which doesn't pull those, builds fine). The web app runs via local `pnpm start` against the dockerized API.
@@ -367,7 +527,7 @@ scheduler; not specific to this agent, works for any graph).
 4. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
 5. `/push` and `/pr` only support a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes. See "Agent file-write and confirmed push" above.
 6. `business_metrics` covers leadgen-a/leadgen-b/saas-b-traffic only. No revenue for saas-a/saas-b (needs new endpoint code in each app), no Railway hosting cost (needs the user's own API token), no Render hosting cost (hard blocker — Render's API has no billing endpoint, full stop). See "Cross-graph dispatch and business metrics" above.
-7. `dispatch_to_graph` has no canvas UI for configuring `dispatchTargets` — API/PATCH only, consistent with `consensusGroup` already being backend-only everywhere.
+7. `manage_target_graphs` has no canvas UI beyond the settings-panel checkbox — the six tools themselves have no visual affordance (e.g. no "see what an agent changed in graph X" diff view yet, beyond the existing `GET /graphs/:id/routing-changes` audit trail, which still has no page consuming it).
 
 ## Competitive notes (xAI Grok Bot / Grok Build, researched 2026-09)
 

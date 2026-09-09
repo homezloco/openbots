@@ -163,9 +163,14 @@ export default function DashboardPage() {
 }
 
 function BotChat({ graph }: { graph: GraphSummary }) {
-  const { runs, input, setInput, sending, error, send } = useBotChat(graph);
+  const { runs, input, setInput, sending, error, send, pending } = useBotChat(graph);
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollToBottom = () => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+
+  useEffect(() => {
+    scrollToBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs.length, pending]);
 
   return (
     <>
@@ -192,6 +197,16 @@ function BotChat({ graph }: { graph: GraphSummary }) {
             </div>
           </div>
         ))}
+        {pending && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ alignSelf: "flex-end", maxWidth: "70%", background: "var(--accent)", color: "var(--accent-text)", borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>
+              {pending.message}
+            </div>
+            <div style={{ alignSelf: "flex-start", maxWidth: "70%", color: "var(--text-faint)", borderRadius: 8, padding: "8px 12px" }}>
+              {pending.status === "running" ? "Thinking…" : "Sending…"}
+            </div>
+          </div>
+        )}
       </div>
       {error && <p style={{ color: "var(--danger)", padding: "0 16px" }}>{error}</p>}
       <div style={{ display: "flex", gap: 8, padding: 16 }}>

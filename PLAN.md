@@ -26,8 +26,11 @@ cross-graph supervisor control" below). OpenBots itself now also has a
 graph in its own dashboard (dogfooding — see that section), and every
 file-scoped agent is now automatically told to read its project's
 `CLAUDE.md` when one exists, engine-level rather than per-prompt (see
-"Context consistency across agents"). See "Known gaps" at the bottom for
-what's still actually missing.**
+"Context consistency across agents"). The Hierarchy canvas now visualizes
+cross-graph dispatch/manage reach too, and CI is fixed after having
+silently failed on every run (see "Cross-graph hierarchy on the canvas"
+and "CI" below). See "Known gaps" at the bottom for what's still actually
+missing.**
 
 ## Phase 1 — MVP
 
@@ -97,6 +100,8 @@ any page, which is presumably why this went unnoticed for so long.
 ## CI
 
 `.github/workflows/e2e.yml` runs the real e2e suite (docker compose up → migrate → build/start api+worker → wait for health → `test:e2e`) on every push to `main` and on-demand via `workflow_dispatch`. Deliberately not on every PR, since each run makes real, billed Anthropic API calls. The file-access fixture that used to be set up by hand inside the running container (`/tmp/testrepo`) is now committed at `apps/api/e2e/fixtures/testrepo/` and mounted in by `docker-compose.yml`, so this also fixed a real reproducibility gap for local dev, not just CI. **Needs three repo secrets added before it will pass**: `ANTHROPIC_API_KEY`, `E2E_SESSION_SECRET`, `E2E_CREDENTIALS_ENCRYPTION_KEY`.
+
+**Was actually failing on every single run (found 2026-09-09).** Every recorded run (`gh run list`) failed in under 20 seconds, always at the same step: `pnpm/action-setup@v4`'s explicit `version: 9` input conflicts with `package.json`'s `"packageManager": "pnpm@12.3.4"` field ("Multiple versions of pnpm specified") — install never ran, so `.env` was never written, so the two `if: always()`/`if: failure()` cleanup steps (`docker compose logs`/`down -v`) then ALSO failed trying to read a `.env` that didn't exist. Three visible errors, one root cause. Fixed by dropping the explicit `version:` input — the action reads `packageManager` from `package.json` on its own, its documented default. Confirmed the fix works: the triggering run progressed past a minute (vs. instant failure before). **Still won't fully pass**: `gh secret list` shows zero repo secrets configured — the three above still need to be added under Settings → Secrets and variables → Actions before a run can reach a real green state, left for the user since it involves a real API key.
 
 ## Live visualization, agent reuse, and dashboard unification (2026-09-07)
 
@@ -519,6 +524,100 @@ unprompted. Confirmed live too: asked the real `OpenBots Engineer` (itself
 one of the 20 agents that lacked this) an architecture question, and it
 explicitly cited "From the CLAUDE.md file" in its answer.
 
+## Cross-graph hierarchy on the canvas (2026-09-09)
+
+Portfolio Lead's `dispatch_to_graph`/`manage_target_graphs` reach was
+invisible on the Hierarchy canvas — `node.dispatchTargets` is a
+completely separate mechanism from `routing_edges`, so nothing ever drew
+it. User confirmed the fix: a synthetic **gateway node** per reachable
+target graph (dashed border, deduped by target, one dashed edge per
+`(node, target)` pair) — not the target's full internal team, which
+would get unreadable fast across 6 targets. Clicking a gateway node
+navigates into that graph's own full canvas (`useRouter`, matching the
+app's existing `next/navigation` usage) — "click the individual node to
+see its hierarchy within." Built in `HierarchyCanvas.tsx` alone, no
+backend change, following the exact pattern the consensus fan-out's
+synthetic "gather" edge already established (a UI-only node/edge derived
+from config, not a real DB row).
+
+**Three real bugs found live-testing this, all fixed:**
+1. `HierarchyCanvas` seeds its node/edge/graph state from a `graph` prop
+   via `useState(initialGraph)` — which does not re-run on a prop change
+   alone. Clicking a gateway node updated the URL/searchParams and
+   refetched server-side correctly, but the component instance survived
+   navigation and kept rendering the *previous* graph's stale state.
+   Fixed with `key={graph.id}` at both render sites
+   (`app/hierarchy/page.tsx`, `HierarchyChat.tsx`) — a real gotcha for
+   any future page that swaps this component's `graph` prop without a
+   full remount.
+2. React Flow's default `minZoom` (0.5) blocked `fitView` from zooming
+   out far enough to fit a tall diagram (gateway row below the real team)
+   inside a short container — `HierarchyChat`'s embedded Dashboard canvas
+   splits the screen with the chat panel below it, so the bottom row of
+   nodes was clipped even though `fitView` "succeeded." Fixed with
+   `minZoom={0.1}`.
+3. No node position is persisted anywhere today, so a drag that got
+   confusing (reported: dragging Portfolio Lead in the cramped Dashboard
+   view looked like it was "pushing" everything else) had no way back
+   except reloading the page. Added a bounded `nodeExtent` (scales with
+   the graph's own footprint, so a drag can't send a node far into empty
+   canvas space) and a "↺ Reset layout" toolbar button that snaps
+   nodes/edges back to their real (DB) positions plus a freshly
+   recomputed gateway row and remounts `<ReactFlow>` to re-fit the view.
+
+**A fourth, unrelated but more serious bug surfaced while using the new
+dispatch/manage tools for real** ("give me project updates on all
+projects" → a follow-up answer came back as the literal text `null`):
+`useBotChat.ts`'s send-and-poll loop had a hard-coded 30-iteration
+(~30s) cap, and on timeout fell through **unconditionally** to display
+whatever it last fetched — including a still-`"running"` run whose
+`output` column is still `null` — as if it were the finished answer
+(`JSON.stringify(null)` renders as the text `"null"`). This was always
+latently possible, but `business_metrics` doing real external HTTP
+logins per source, chained across multiple tool-call steps
+(`stepCountIs(8)`), made it far more likely to actually trip — confirmed
+by reproducing the user's exact prompt (took ~18-20s; a heavier one
+easily crosses 30s). Fixed: polls for up to 10 minutes, and a
+non-`"completed"` status is now always surfaced as a real error, never
+silently displayed as a successful answer.
+
+## Credential security review and a real external-drift finding (2026-09-09)
+
+Prompted by a direct question about whether stored credentials
+(`user_credentials` — GitHub PAT/SSH key, `metrics_<source>` logins) are
+ever exposed via the API. Reviewed `routes/userCredentials.ts` and
+`auth/crypto.ts` line by line: `POST`/`GET`/`DELETE /me/credentials` are
+all `requireAuth`-scoped to `eq(userCredentials.userId, req.userId)` (no
+IDOR), and every response path returns only `{id, provider, label,
+createdAt}` via `toSummary()` — the plaintext is only ever accepted in
+the POST body and immediately passed through `encryptCredential()`
+(real AES-256-GCM, random 12-byte IV, auth tag verified) before storage;
+decryption only ever happens in-memory inside a tool's own outbound call
+(`businessMetricsTool.ts`, `/push`'s GitHub PAT usage), never returned in
+any response. No code changes needed — already correct.
+
+Also bootstrapped `metrics_saas-b` from a real source: `saas-b`'s own
+`.env.local` already had `ADMIN_USERNAME`/`ADMIN_PASSWORD` in exactly the
+shape `business_metrics` needs (confirmed by checking all 5 real
+projects' env files — only Saas B had this shape; leadgen-a/leadgen-b
+have no admin-login credential in any env file at all, and
+saas-a/saas-c have raw `SUPABASE_SERVICE_ROLE_KEY`/
+`DATABASE_URL` instead — a meaningfully more powerful, riskier class of
+secret than a scoped dashboard login, deliberately NOT wired into any
+tool). Stored via the verified-safe `POST /me/credentials` endpoint.
+
+**Real finding**: the credential is now recognized (no longer
+"not configured"), but the live call to `https://saas-b.example/api/auth/login`
+with it returns **HTTP 200 with an empty body** instead of `{token,
+user}` — confirmed directly with `curl`, not just via the agent's own
+report. Not an OpenBots bug: the plumbing works end-to-end (store →
+decrypt → real HTTP call); `.env.local`'s `ADMIN_PASSWORD` is a
+local-dev value that's evidently drifted from whatever's actually
+configured on the live deployment. `leadgen-a`/`leadgen-b` still have no
+credential source at all (nothing in either project's env files), so
+`business_metrics` genuinely cannot report real numbers for either yet —
+see "Known gaps" below.
+
 ## Known gaps (honest list)
 
 1. **The containerized `web` Docker image has never successfully built** in this environment (persistent npm-registry network flakiness in this sandbox on large packages like `next`/`@next/swc-*` — the `api` image, which doesn't pull those, builds fine). The web app runs via local `pnpm start` against the dockerized API.
@@ -526,8 +625,9 @@ explicitly cited "From the CLAUDE.md file" in its answer.
 3. The tool registry is a small built-in set, not dynamic npm-package loading — deliberate (arbitrary plugin loading would let anyone who can edit a graph run arbitrary code in the API process).
 4. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
 5. `/push` and `/pr` only support a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes. See "Agent file-write and confirmed push" above.
-6. `business_metrics` covers leadgen-a/leadgen-b/saas-b-traffic only. No revenue for saas-a/saas-b (needs new endpoint code in each app), no Railway hosting cost (needs the user's own API token), no Render hosting cost (hard blocker — Render's API has no billing endpoint, full stop). See "Cross-graph dispatch and business metrics" above.
-7. `manage_target_graphs` has no canvas UI beyond the settings-panel checkbox — the six tools themselves have no visual affordance (e.g. no "see what an agent changed in graph X" diff view yet, beyond the existing `GET /graphs/:id/routing-changes` audit trail, which still has no page consuming it).
+6. `business_metrics` covers leadgen-a/leadgen-b/saas-b-traffic only, and **none of the three actually return real data yet even with a credential**: `metrics_saas-b` is now configured (bootstrapped from `.env.local`) but the live login endpoint returns an empty body — the value has drifted from what's actually deployed, needs checking on the live host itself; `metrics_leadgen-a`/`metrics_leadgen-b` have no credential at all, since neither project's env files contain an admin login (would need the user to supply real staff credentials some other way). No revenue for saas-a/saas-b (needs new endpoint code in each app), no Railway hosting cost (needs the user's own API token), no Render hosting cost (hard blocker — Render's API has no billing endpoint, full stop). See "Cross-graph dispatch and business metrics" and "Credential security review and a real external-drift finding" above.
+7. `manage_target_graphs`'s *reach* is now visible on the canvas (gateway nodes, above), but the six tools themselves still have no visual affordance for what an agent actually *did* — no "see what changed in graph X" diff view yet, beyond the existing `GET /graphs/:id/routing-changes` audit trail, which still has no page consuming it.
+8. No breadcrumb/"back to parent" link on a gateway-target graph's own canvas — the browser Back button works (gateway navigation pushes a real history entry), but there's no on-canvas affordance, deliberately: a graph can be a dispatch target of more than one parent, so there's no single "the" parent to hard-code a link to.
 
 ## Competitive notes (xAI Grok Bot / Grok Build, researched 2026-09)
 

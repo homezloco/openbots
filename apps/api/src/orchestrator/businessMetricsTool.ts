@@ -1,37 +1,41 @@
 import { tool, type Tool } from "ai";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
 
 /**
- * Read-only, hardcoded-endpoint sources only — the same "read-only wire
- * protocol in, no control/write path, full stop" rule pc_telemetry
- * already follows (packages/providers/src/tools.ts). Never a POST/PUT/
- * DELETE against anything state-changing on any of these apps.
+ * Read-only sources only — the same "read-only wire protocol in, no
+ * control/write path, full stop" rule pc_telemetry already follows
+ * (packages/providers/src/tools.ts). Never a POST/PUT/DELETE against
+ * anything state-changing on any source.
  *
- * Credential shape (no schema change — user_credentials.encryptedKey
- * already stores an arbitrary string): for leadgen-a/leadgen-b/saas-b the
- * stored value is JSON.stringify({username, password}) for that app's
- * own staff/admin login; the settings-page form JSON-encodes this
- * client-side before POST /me/credentials.
- *
- * "railway" (hosting cost) and revenue endpoints for saas-a/saas-b
- * are NOT implemented here yet — see PLAN.md's business_metrics section
- * for exactly why (Railway needs a real API token to finalize the query
- * against its live GraphQL schema; saas-a/saas-b don't expose
- * revenue via any API today, pending new endpoint code in each app).
- * Adding a new source later is a new case in fetchMetrics() below, not a
- * redesign.
+ * Sources are user-configured, not hardcoded: a "metrics_<slug>"
+ * user_credentials row (any slug the user picks at /settings) stores
+ * JSON.stringify({username, password, baseUrl, style}) — no schema
+ * change, user_credentials.encryptedKey already stores an arbitrary
+ * string. "style" selects which of the two known integration shapes
+ * below to speak (see fetchMetrics()); adding a genuinely new shape
+ * later is a new case there, not a redesign. Previously this file
+ * hardcoded three of the maintainer's own personal-project domains
+ * directly in source — moved to per-user config so the OSS default has
+ * no site names baked in.
  */
 
-const SOURCES = ["leadgen-a", "leadgen-b", "saas-b"] as const;
-type Source = (typeof SOURCES)[number];
+export const METRICS_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
+export const METRICS_STYLES = ["dashboard", "login"] as const;
+export type MetricsStyle = (typeof METRICS_STYLES)[number];
+
+export function metricsSourceProvider(slug: string): string {
+  return `metrics_${slug}`;
+}
 
 interface StoredLogin {
   username: string;
   password: string;
+  baseUrl: string;
+  style: MetricsStyle;
 }
 
 async function loginJwt(baseUrl: string, path: string, creds: StoredLogin, tokenField: string): Promise<string> {
@@ -60,13 +64,11 @@ async function getJson(url: string, token: string): Promise<any> {
 }
 
 /**
- * leadgen-a and leadgen-b are the same codebase (leadgen-b is a fork) —
- * confirmed identical route names/shapes directly in each repo's own
- * server/routes.ts: POST /auth/token (NOT under /api) -> {access_token},
+ * "dashboard" style: POST /auth/token (NOT under /api) -> {access_token},
  * then Bearer-authenticated GET /api/admin/dashboard and
- * GET /api/analytics/summary?days=N under the apiRoutes router.
+ * GET /api/analytics/summary?days=N. Revenue/MRR/conversion + traffic.
  */
-async function fetchLeadgenAStyleDashboard(baseUrl: string, creds: StoredLogin, days?: number) {
+async function fetchDashboardStyle(baseUrl: string, creds: StoredLogin, days?: number) {
   const token = await loginJwt(baseUrl, "/auth/token", creds, "access_token");
   const [dashboard, summary] = await Promise.all([
     getJson(`${baseUrl}/api/admin/dashboard`, token),
@@ -76,36 +78,46 @@ async function fetchLeadgenAStyleDashboard(baseUrl: string, creds: StoredLogin, 
 }
 
 /**
- * saas-b: POST /api/auth/login -> {token, user}, then Bearer-authenticated
- * GET /api/analytics/summary -> {success, data}. Confirmed directly in
- * saas-b's own backend/src/routes/auth.js + controllers/authController.js
- * + routes/analytics.js. Revenue is NOT available here — only Stripe
- * checkout-session creation exists, no revenue/MRR endpoint at all.
+ * "login" style: POST /api/auth/login -> {token, user}, then
+ * Bearer-authenticated GET /api/analytics/summary -> {success, data}.
+ * Usage/traffic only — no revenue/MRR endpoint in this shape.
  */
-async function fetchSaas BSummary(baseUrl: string, creds: StoredLogin) {
+async function fetchLoginStyleSummary(baseUrl: string, creds: StoredLogin) {
   const token = await loginJwt(baseUrl, "/api/auth/login", creds, "token");
   const body = await getJson(`${baseUrl}/api/analytics/summary`, token);
   return {
     usageAndTraffic: body?.data ?? body,
-    note: "saas-b has no revenue/MRR endpoint yet — this is usage/traffic only. See PLAN.md.",
+    note: "This source has no revenue/MRR endpoint configured — usage/traffic only.",
   };
 }
 
-const SOURCE_BASE_URLS: Record<Source, string> = {
-  leadgen-a: "https://www.leadgen-a.example",
-  leadgen-b: "https://www.leadgen-b.example",
-  saas-b: "https://saas-b.example",
-};
-
-async function fetchMetrics(source: Source, creds: StoredLogin, days?: number): Promise<unknown> {
-  switch (source) {
-    case "leadgen-a":
-      return fetchLeadgenAStyleDashboard(SOURCE_BASE_URLS.leadgen-a, creds, days);
-    case "leadgen-b":
-      return fetchLeadgenAStyleDashboard(SOURCE_BASE_URLS.leadgen-b, creds, days);
-    case "saas-b":
-      return fetchSaas BSummary(SOURCE_BASE_URLS.saas-b, creds);
+async function fetchMetrics(creds: StoredLogin, days?: number): Promise<unknown> {
+  switch (creds.style) {
+    case "dashboard":
+      return fetchDashboardStyle(creds.baseUrl, creds, days);
+    case "login":
+      return fetchLoginStyleSummary(creds.baseUrl, creds);
   }
+}
+
+export interface MetricsSource {
+  slug: string;
+  label: string;
+}
+
+/**
+ * Mirrors dispatchTool.ts's getDispatchableGraphs: a node with
+ * business_metrics has zero built-in knowledge of which sources this
+ * owner has actually configured, so engine.ts uses this to inject that
+ * list into the system prompt (appendMetricsSourcesContext) — the
+ * model is never expected to guess a slug.
+ */
+export async function getMetricsSources(ownerId: string | null): Promise<MetricsSource[]> {
+  if (!ownerId) return [];
+  const rows = await db.query.userCredentials.findMany({
+    where: and(eq(userCredentials.userId, ownerId), like(userCredentials.provider, "metrics_%")),
+  });
+  return rows.map((r) => ({ slug: r.provider.slice("metrics_".length), label: r.label || r.provider }));
 }
 
 /**
@@ -116,19 +128,22 @@ async function fetchMetrics(source: Source, creds: StoredLogin, days?: number): 
 export function createBusinessMetricsTool(ownerId: string | null): Tool {
   return tool({
     description:
-      "Get real conversion/revenue/traffic numbers for one of the agency's properties. " +
-      "Sources: 'leadgen-a' and 'leadgen-b' (admin dashboard: revenue, MRR, conversion rate, " +
-      "traffic), 'saas-b' (usage/traffic only — no revenue data exists for it yet). " +
-      "Returns an error naming the missing credential if a source isn't configured — " +
-      "never fabricate a number when that happens.",
+      "Get real conversion/revenue/traffic numbers for a metrics source configured at " +
+      "/settings. 'source' is the name the source was given when its credential was saved — " +
+      "see the list of configured sources in your instructions, or ask the user to add one " +
+      "at /settings if none is listed. Returns an error naming the missing credential if a " +
+      "source isn't configured — never fabricate a number when that happens.",
     inputSchema: z.object({
-      source: z.enum(SOURCES),
+      source: z
+        .string()
+        .min(1)
+        .regex(METRICS_SLUG_PATTERN, "source must be the lowercase slug it was configured with at /settings"),
       days: z.number().int().min(1).max(365).optional().describe("Lookback window for traffic/analytics, if applicable"),
     }),
     execute: async ({ source, days }) => {
       if (!ownerId) return { error: "No owner context available for this run." };
 
-      const provider = `metrics_${source}`;
+      const provider = metricsSourceProvider(source);
       const cred = await db.query.userCredentials.findFirst({
         where: and(eq(userCredentials.userId, ownerId), eq(userCredentials.provider, provider)),
       });
@@ -144,7 +159,7 @@ export function createBusinessMetricsTool(ownerId: string | null): Tool {
       }
 
       try {
-        return await fetchMetrics(source, creds, days);
+        return await fetchMetrics(creds, days);
       } catch (err) {
         return { error: err instanceof Error ? err.message : `Failed to fetch metrics for ${source}` };
       }

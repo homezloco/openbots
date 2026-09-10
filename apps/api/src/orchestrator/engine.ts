@@ -6,6 +6,7 @@ import {
   commitWorktreeChanges,
   ensureWorktree,
   estimateCostUsd,
+  getCommitDiff,
   getModel,
   isWithinAllowedWriteRoot,
   resolveTools,
@@ -36,7 +37,7 @@ import {
   createListTargetGraphTool,
   createUpdateTargetNodeTool,
 } from "./graphManagementTools.js";
-import { createBusinessMetricsTool } from "./businessMetricsTool.js";
+import { createBusinessMetricsTool, getMetricsSources, type MetricsSource } from "./businessMetricsTool.js";
 import { createRunRemoteCommandTool } from "./remoteCommandTool.js";
 import { computeWarnings } from "./warnings.js";
 import { enqueueHop } from "../queue/runQueue.js";
@@ -184,8 +185,14 @@ export async function dispatchHop(runId: string): Promise<void> {
  * simpler join. Each branch still has its own timeout, and one branch's
  * rejection doesn't cancel its siblings (Promise.allSettled).
  *
- * v1 has no partial-failure tolerance: any branch failing fails the whole
- * batch and the run, rather than letting the aggregator judge on a subset.
+ * Partial-failure tolerant: the aggregator still runs on whatever branches
+ * succeeded, with a placeholder output for each one that failed, as long as
+ * AT LEAST ONE branch succeeded. Only a total wipeout (every branch failed)
+ * fails the whole batch and the run — there's nothing for the aggregator to
+ * synthesize from otherwise. Found as a real bug: one slow/timed-out branch
+ * (e.g. an investigation that ran long) discarded every sibling branch's
+ * output, including a genuinely useful, successfully-completed one, in
+ * favor of a bare run-level "error" with no output at all.
  */
 async function dispatchConsensus(
   runId: string,
@@ -266,8 +273,14 @@ async function dispatchConsensus(
     }),
   );
 
-  const failures = settled.filter((r): r is PromiseRejectedResult => r.status === "rejected");
-  if (failures.length > 0) {
+  const succeeded = settled.filter(
+    (r): r is PromiseFulfilledResult<{ nodeId: string; output: string }> => r.status === "fulfilled",
+  );
+  const failedCount = settled.length - succeeded.length;
+
+  // Every branch failed — there's genuinely nothing for the aggregator to
+  // synthesize from, so this really is a run-level error, not a partial one.
+  if (succeeded.length === 0) {
     await db.update(fanoutBatches).set({ status: "error" }).where(eq(fanoutBatches.id, batch.id));
     await db.update(runs).set({ status: "error", updatedAt: new Date() }).where(eq(runs.id, runId));
     publishRunEvent({
@@ -275,18 +288,38 @@ async function dispatchConsensus(
       graphId: graph.id,
       type: "hop_failed",
       nodeId: sourceNode.id,
-      payload: { error: `${failures.length}/${branches.length} consensus branches failed` },
+      payload: { error: `${failedCount}/${branches.length} consensus branches failed` },
     });
     return;
   }
 
-  const branchOutputs = (settled as PromiseFulfilledResult<{ nodeId: string; output: string }>[]).map(
-    (r) => r.value,
-  );
+  if (failedCount > 0) {
+    publishRunEvent({
+      runId,
+      graphId: graph.id,
+      type: "hop_failed",
+      nodeId: sourceNode.id,
+      payload: { error: `${failedCount}/${branches.length} consensus branches failed — continuing with ${succeeded.length} that succeeded` },
+    });
+  }
+
+  // A placeholder for each failed branch, not a silently dropped slot — the
+  // aggregator's own prompt already asks it to call out gaps/disagreement
+  // between specialists, so this gives it something concrete to say that
+  // about instead of just never knowing a branch was missing at all.
+  const failedPlaceholders = settled
+    .map((r, i) => ({ result: r, targetNode: branches[i].targetNode }))
+    .filter((x): x is { result: PromiseRejectedResult; targetNode: AgentNode } => x.result.status === "rejected")
+    .map(({ result, targetNode }) => ({
+      nodeId: targetNode.id,
+      output: `[This specialist failed to respond: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}]`,
+    }));
+
+  const branchOutputs = [...succeeded.map((r) => r.value), ...failedPlaceholders];
 
   await db
     .update(fanoutBatches)
-    .set({ completedBranches: branches.length, status: "completed" })
+    .set({ completedBranches: succeeded.length, status: failedCount > 0 ? "partial" : "completed" })
     .where(eq(fanoutBatches.id, batch.id));
 
   await db
@@ -401,6 +434,20 @@ function appendRemoteCommandContext(systemPrompt: string, allowedCommands: { lab
 }
 
 /**
+ * Same family again: business_metrics' "source" argument is a slug the
+ * user picked at /settings, not something a model could ever guess.
+ * Without this, a node has to be told its sources by hand in its own
+ * system prompt (drifts exactly like the auto-routing-candidates bug
+ * this whole appendXContext family was built to stop) or the model just
+ * invents a plausible-sounding source name that fails.
+ */
+function appendMetricsSourcesContext(systemPrompt: string, sources: MetricsSource[]): string {
+  if (sources.length === 0) return systemPrompt;
+  const list = sources.map((s) => `- ${s.slug}${s.label ? ` (${s.label})` : ""}`).join("\n");
+  return `${systemPrompt}\n\nYou can call business_metrics with these configured sources (use the slug before any parenthetical label):\n${list}`;
+}
+
+/**
  * Checks the file's real, live existence via the already-resolved
  * effective root (the isolated worktree path when write access is on —
  * a full git checkout, so a tracked CLAUDE.md is present there too —
@@ -479,20 +526,24 @@ async function callAgent(
   // idea what any of its target graphs were even named. See PLAN.md.
   const reachableGraphs =
     wantsDispatch || wantsGraphManagement ? await getDispatchableGraphs(ownerId, node.dispatchTargets) : [];
+  const metricsSources = wantsMetrics ? await getMetricsSources(ownerId) : [];
   const canRead = Boolean(node.fileAccessRoot) && node.tools.includes("read_file");
 
   const systemPrompt = appendProjectContext(
-    appendRemoteCommandContext(
-      appendReachableGraphsContext(
-        appendWriteContext(
-          appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
-          canWrite,
+    appendMetricsSourcesContext(
+      appendRemoteCommandContext(
+        appendReachableGraphsContext(
+          appendWriteContext(
+            appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
+            canWrite,
+          ),
+          reachableGraphs,
+          wantsDispatch,
+          wantsGraphManagement,
         ),
-        reachableGraphs,
-        wantsDispatch,
-        wantsGraphManagement,
+        wantsRemoteCommand ? node.sshTarget!.allowedCommands : [],
       ),
-      wantsRemoteCommand ? node.sshTarget!.allowedCommands : [],
+      metricsSources,
     ),
     effectiveFileRoot,
     canRead,
@@ -559,13 +610,17 @@ async function callAgent(
           model,
           system: systemPrompt,
           prompt,
-          // 8, not 5: a tool-using turn that's still mid-investigation
-          // (e.g. list a directory, then read a couple of files, then
-          // summarize) can genuinely need more than 5 steps — hitting the
-          // cap mid-tool-call previously left result.text silently empty
-          // (a real run that shipped exactly this: succeeded, no error,
-          // blank output, e2e-invisible since it's not a thrown error).
-          ...(tools ? { tools, stopWhen: stepCountIs(8) } : {}),
+          // 20, not 8: a write-capable investigative specialist doing real
+          // work (read CLAUDE.md, read a schema file, read the actual
+          // routes file, cross-reference a couple of helpers, THEN write a
+          // real fix) routinely needs more than 8 steps — a real run that
+          // shipped exactly this bailed out of an in-progress multi-file
+          // investigation and wrote its intended fix into a throwaway
+          // reference file instead of actually editing the real file,
+          // since it ran out of budget before it could. Still bounded, not
+          // unlimited — this stops runaway loops, it just stops giving up
+          // on genuine, in-progress multi-file work quite this early.
+          ...(tools ? { tools, stopWhen: stepCountIs(20) } : {}),
         }),
       );
 
@@ -586,6 +641,21 @@ async function callAgent(
         const sha = await commitWorktreeChanges(worktree, node.name, touchedFiles);
         if (sha) {
           text = `${text}\n\n[OpenBots: committed ${sha.slice(0, 8)} to branch ${worktree.branch} in ${worktree.path}]`;
+          // The actual diff, not just the model's own narration of what it
+          // did — whatever consumes this output next (an explicit-edge
+          // reviewer, a consensus aggregator, or the end user) can only
+          // catch a broken/inert "fix" (e.g. real code pasted into a
+          // throwaway reference file instead of the real one, or escaped
+          // into one unusable line) by seeing the real committed lines,
+          // not by trusting a confident-sounding self-report. Found as a
+          // real bug: a reviewer synthesizing only specialists' own prose
+          // had no way to tell a genuine edit apart from an inert one.
+          const diff = await getCommitDiff(worktree.path, sha).catch(() => "");
+          const MAX_DIFF_CHARS = 4000;
+          if (diff.trim()) {
+            const truncated = diff.length > MAX_DIFF_CHARS ? `${diff.slice(0, MAX_DIFF_CHARS)}\n[...diff truncated]` : diff;
+            text = `${text}\n\n[Actual diff committed:]\n\`\`\`diff\n${truncated}\n\`\`\``;
+          }
           await db.insert(agentCommits).values({
             runId,
             graphId: node.graphId,

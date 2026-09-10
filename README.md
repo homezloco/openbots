@@ -74,10 +74,16 @@ pnpm --filter @openbots/api db:migrate
 pnpm dev   # runs web + api in parallel via turbo
 ```
 
-Or run the backend containerized: `docker compose up postgres redis api worker -d`. The `web` service can also be built with `docker compose up --build web`, though in some sandboxed environments its build has hit npm-registry flakiness on large packages (`next`, `@next/swc-*`) — if that happens, `pnpm --filter @openbots/web build && pnpm --filter @openbots/web start` runs it locally against the dockerized API just as well.
+Or run the backend containerized: `docker compose up postgres redis api worker -d`. The `web` service can also be built with `docker compose up --build web`; if a sandboxed environment's registry connection is flaky on large packages (`next`, `@next/swc-*`), `pnpm --filter @openbots/web build && pnpm --filter @openbots/web start` runs it locally against the dockerized API just as well.
 
 Sign up your first user at `/login`, then use "New graph" (or Dashboard's "+ New bot") to get started — no API calls needed for normal use. See `CLAUDE.md` for the full command reference and `pnpm --filter @openbots/api test:e2e` for the real end-to-end test suite, which is the fastest way to confirm a fresh setup actually works end to end (it runs real model calls, no mocks).
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](./LICENSE).
+Apache License 2.0, plus one narrow addition: you can self-host, modify,
+fork, and run OpenBots for your own organization (any size) or on behalf
+of one consulting client at a time, entirely free — you just can't stand
+up your own hosted multi-tenant "OpenBots as a service" for third parties
+without a commercial agreement. See [`LICENSE`](./LICENSE) for the exact
+terms (GitHub's detector may show this as "Other" rather than
+"Apache-2.0" because of that addition — that's expected).

@@ -188,3 +188,45 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+   ===========================================================================
+
+   ADDITIONAL USE GRANT
+
+   The Apache License, Version 2.0 above governs all use of this software,
+   with one narrow addition. This section is not part of the Apache
+   License, Version 2.0 — it is a separate restriction layered on top of
+   it, and it does not affect anything else the Apache License grants You.
+
+   Everything below remains completely free and unrestricted under the
+   Apache License alone:
+
+     - Self-hosting OpenBots for your own use, including internal use by
+       an organization of any size.
+     - Modifying, forking, and redistributing the source, under the terms
+       of the Apache License above.
+     - Running a dedicated, single-tenant instance of OpenBots on behalf
+       of one client at a time, as a consultancy or agency would.
+     - Contributing changes back to the project.
+
+   The one restriction: You may not offer this software, or a Derivative
+   Work of it, to third parties as a hosted or managed multi-tenant
+   service — that is, a product where You operate the software on Your
+   own infrastructure and provide access to it to multiple customers who
+   are not Your own organization, for a fee, subscription, or usage
+   charge — without a separate written commercial agreement with the
+   Licensor.
+
+   If You want to offer OpenBots as a hosted service to third parties,
+   open an issue on the project's GitHub repository to discuss a
+   commercial license.
+
+   This Additional Use Grant is intentionally narrow and is not a general
+   restriction on commercial use — running OpenBots to make money for
+   your own business, or for one client's dedicated instance, is not
+   restricted by it. It exists solely to reserve the right to offer
+   OpenBots itself as a hosted product to the Licensor.
+
+   This text is not legal advice. If this restriction needs to hold up in
+   an actual dispute, have it reviewed by a lawyer familiar with software
+   licensing before relying on it.

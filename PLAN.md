@@ -620,14 +620,63 @@ credential source at all (nothing in either project's env files), so
 `business_metrics` genuinely cannot report real numbers for either yet —
 see "Known gaps" below.
 
+## Pre-launch hardening (2026-09-10)
+
+Prompted by a go-to-market review: before this repo goes public, two
+real, code-level blockers needed closing rather than deferring.
+
+**Relicensing.** See the "License" section at the bottom — Apache-2.0 plus
+a narrow Additional Use Grant, changed now while the repo is still
+private with zero forks/stars (the cheapest this will ever be to do).
+
+**`business_metrics` no longer hardcodes personal domains.** The tool
+previously hardcoded three of the maintainer's own real side-project
+domains (`SOURCES`/`SOURCE_BASE_URLS` in `businessMetricsTool.ts`) —
+fine for internal dogfooding, a real privacy/professionalism problem if
+shipped to a public repo as-is, since it would reveal which other
+businesses the maintainer runs and read as personal tooling rather than
+a product feature. Genericized: a metrics source is now any user-chosen
+slug configured at `/settings`, not a fixed enum. No schema change —
+`user_credentials.encryptedKey` already stored an arbitrary JSON blob for
+this table; it now carries `{username, password, baseUrl, style}`
+instead of just `{username, password}`, where `style` (`"dashboard"` |
+`"login"`) selects which of the two already-generic fetch functions to
+call (they took `baseUrl` as a parameter all along — only the
+name→URL/style mapping around them was hardcoded). `engine.ts` gained
+`appendMetricsSourcesContext`, mirroring `appendReachableGraphsContext`
+exactly: a node with `business_metrics` gets its owner's actually-
+configured source slugs injected into its system prompt automatically,
+so nothing has to hardcode or guess a source name anywhere, on either
+side. `/settings`' three hardcoded site cards became one dynamic
+"add a source" form. e2e-covered (credential slug/shape validation, the
+missing-credential error path, and a new context-injection case
+asserting a configured source's slug reaches the model unprompted).
+**Follow-up, not automated**: the maintainer's own real `leadgen-a`/
+`leadgen-b`/`saas-b` sources predate `baseUrl`/`style` and need
+re-entering once through the new form — three rows, one user, not worth
+a migration script.
+
+**The `web` Docker build now actually works.** Previously documented as
+"has never successfully built in this environment" (known gap #1,
+below) — `apps/web/Dockerfile` was missing pnpm's own retry/timeout
+tuning, so a slow tarball fetch (`next`, `@next/swc-*`) had no real
+retry budget before failing outright. Added `fetch-retries 5`,
+`fetch-retry-mintimeout`/`fetch-retry-maxtimeout`, and a lower
+`network-concurrency` before the install step. Confirmed with a real
+`docker compose build web` run: full clean build, including
+`next build`'s type-check/lint pass over the genericized `/settings`
+page above. This was a real, if minor, first-impression risk for a
+public launch — "clone the repo, `docker compose up`, it just works" is
+the highest-leverage moment there is.
+
 ## Known gaps (honest list)
 
-1. **The containerized `web` Docker image has never successfully built** in this environment (persistent npm-registry network flakiness in this sandbox on large packages like `next`/`@next/swc-*` — the `api` image, which doesn't pull those, builds fine). The web app runs via local `pnpm start` against the dockerized API.
+1. ~~The containerized `web` Docker image has never successfully built in this environment~~ — fixed 2026-09-10, see "Pre-launch hardening" below. Local `pnpm --filter @openbots/web build && start` against the dockerized API remains a valid fallback if a build ever hits the same network flakiness again.
 2. **Team/role-based sharing does not exist.** Auth is single-owner only, by design.
 3. The tool registry is a small built-in set, not dynamic npm-package loading — deliberate (arbitrary plugin loading would let anyone who can edit a graph run arbitrary code in the API process).
 4. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
 5. `/push` and `/pr` only support a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes. See "Agent file-write and confirmed push" above.
-6. `business_metrics` covers leadgen-a/leadgen-b/saas-b-traffic only, and **none of the three actually return real data yet even with a credential**: `metrics_saas-b` is now configured (bootstrapped from `.env.local`) but the live login endpoint returns an empty body — the value has drifted from what's actually deployed, needs checking on the live host itself; `metrics_leadgen-a`/`metrics_leadgen-b` have no credential at all, since neither project's env files contain an admin login (would need the user to supply real staff credentials some other way). No revenue for saas-a/saas-b (needs new endpoint code in each app), no Railway hosting cost (needs the user's own API token), no Render hosting cost (hard blocker — Render's API has no billing endpoint, full stop). See "Cross-graph dispatch and business metrics" and "Credential security review and a real external-drift finding" above.
+6. `business_metrics` now supports two integration *styles* ("dashboard" and "login" — see "Pre-launch hardening" below) rather than a fixed list of named sites, but only two real sources were ever actually wired up on the live account (the former `leadgen-a`/`leadgen-b`/`saas-b` credentials), and **neither integration style actually returns real data reliably today**: the "login" style's live login endpoint has previously returned an empty body — the stored value had drifted from what's actually deployed on that host — and the "dashboard" style's sources have no credential at all today (would need the user to re-add real staff credentials through the new generic /settings form). No revenue source exists yet for either style (needs new endpoint code in the target app), no Railway hosting cost (needs the user's own API token), no Render hosting cost (hard blocker — Render's API has no billing endpoint, full stop). See "Cross-graph dispatch and business metrics" and "Credential security review and a real external-drift finding" above.
 7. `manage_target_graphs`'s *reach* is now visible on the canvas (gateway nodes, above), but the six tools themselves still have no visual affordance for what an agent actually *did* — no "see what changed in graph X" diff view yet, beyond the existing `GET /graphs/:id/routing-changes` audit trail, which still has no page consuming it.
 8. No breadcrumb/"back to parent" link on a gateway-target graph's own canvas — the browser Back button works (gateway navigation pushes a real history entry), but there's no on-canvas affordance, deliberately: a graph can be a dispatch target of more than one parent, so there's no single "the" parent to hard-code a link to.
 
@@ -644,6 +693,58 @@ see "Known gaps" below.
   fragility (one stuck bot can take down a whole roster); paywalled
   behind a $300/mo bundle with reported compute ceilings.
 
+### Wider competitive scan (CrewAI, LangGraph, n8n, Dify, MCP ecosystem — 2026-09-10)
+
+Broader research pass beyond Grok, to find real feature gaps rather than
+just pricing/positioning. None of this is built yet — recorded here so
+the prioritization survives past this session.
+
+**Next — highest leverage, fits the existing architecture:**
+- **MCP (Model Context Protocol) client support.** By 2026 MCP is the
+  default tool-calling protocol across LangChain/CrewAI/LangGraph/
+  LlamaIndex and natively supported by Anthropic/OpenAI/Google/Microsoft.
+  The tool registry's "no dynamic plugin/npm loading" rule (see
+  "Providers, credentials, and tools" above) doesn't have to block this —
+  an MCP *client* is a network connection to a user-configured remote
+  server, the same shape as `pc_telemetry`'s WebSocket or
+  `dispatch_to_graph`'s cross-graph call, not code loading into the API
+  process. Single biggest ecosystem-compatibility gap found.
+- **`useBotChat.ts::buildNextInput` has no memory bound.** It concatenates
+  the entire prior transcript plus the new message, every turn, forever —
+  no summarization or pruning. Both a competitive gap (vs. CrewAI's
+  short/long-term/entity memory) and a live latent bug: a long-running
+  bot's context window and per-turn cost both grow unboundedly.
+- **OpenTelemetry trace export for `run_events`.** Rather than competing
+  with the observability category (Langfuse — MIT core, acquired by
+  ClickHouse Jan 2026; LangSmith; Arize/Phoenix), export the existing
+  hop-by-hop trail in OTel format so it plugs into tools people already
+  use — integration, not a rebuild.
+
+**Later — real value, bigger lift, best done post-traction:**
+- **Time-travel / rewind-and-fork from a past hop**, LangGraph-style
+  checkpoint rewind. Natural extension of the per-hop
+  `dispatchHop`/`run_events` architecture already in place, and pairs
+  narratively with the live-reroute differentiator ("steer forward *and*
+  rewind the past") — but a real engine feature, not a quick add.
+- **Lightweight knowledge-base/RAG tool** (embed + search a folder), to
+  stop being a hard "no" on the most commonly expected AI-app-builder
+  feature (Dify's strongest area) without trying to become a RAG platform.
+- **Template/graph sharing marketplace** — extends the existing
+  `agent_templates` export/instantiate mechanism, blocked on real
+  multi-user/team sharing (known gap #2) landing first.
+
 ## License
 
-Apache-2.0 — explicit patent grant, standard for OSS infra/agent tooling.
+Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,
+relicensed 2026-09-10 — before the repo went public, while it was still
+private with zero forks/stars, specifically to avoid the exact sequence
+n8n went through in public (Apache-2.0 → Commons Clause → Sustainable
+Use License, each move reacting to someone reselling their code as a
+hosted service). Self-hosting, modifying, forking, and running OpenBots
+for your own org or one consulting client at a time stays fully free;
+the one restriction is offering it to third parties as a hosted
+multi-tenant service without a commercial agreement — see `LICENSE`.
+Modeled on Dify's real precedent (a modified Apache-2.0 with the same
+kind of carve-out), written original rather than copied. Not legal
+advice; wants a real license-focused lawyer's review before it needs to
+hold up in an actual dispute.

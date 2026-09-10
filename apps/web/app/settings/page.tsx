@@ -87,34 +87,11 @@ export default function SettingsPage() {
       <h2 style={{ marginTop: 32, marginBottom: 4 }}>Business metrics</h2>
       <p style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 0 }}>
         Lets an agent with the <code>business_metrics</code> tool read real conversion/revenue/traffic numbers instead of only
-        what you type in chat. Each property logs in with its own existing staff/admin account — nothing new to create there.
+        what you type in chat. Add a source below for each property you want an agent to read — it logs in with that
+        property&apos;s own existing staff/admin account, nothing new to create there.
       </p>
 
-      <MetricsCredentialSection
-        title="leadgen-a.example"
-        provider="metrics_leadgen-a"
-        credentials={credentials}
-        loading={loading}
-        onError={setError}
-        onSaved={refresh}
-      />
-      <MetricsCredentialSection
-        title="leadgen-b.example"
-        provider="metrics_leadgen-b"
-        credentials={credentials}
-        loading={loading}
-        onError={setError}
-        onSaved={refresh}
-      />
-      <MetricsCredentialSection
-        title="saas-b.example"
-        provider="metrics_saas-b"
-        description="Traffic/usage only — saas-b has no revenue endpoint yet."
-        credentials={credentials}
-        loading={loading}
-        onError={setError}
-        onSaved={refresh}
-      />
+      <MetricsSourcesSection credentials={credentials} loading={loading} onError={setError} onSaved={refresh} />
     </div>
   );
 }
@@ -222,43 +199,56 @@ function CredentialSection({
   );
 }
 
+const METRICS_PROVIDER_PREFIX = "metrics_";
+const METRICS_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
 /**
- * Separate from CredentialSection because the underlying credential value
- * is a username+password pair, not a single token/key — JSON-encoded
- * client-side into the same encryptedKey string field before POST
- * /me/credentials (no schema change on the backend), decoded back out by
- * businessMetricsTool.ts on use. Never render the raw JSON to the user.
+ * Sources are user-defined, not a fixed list — each one is a
+ * "metrics_<slug>" credential whose value is a JSON-encoded
+ * {username, password, baseUrl, style} object (no schema change on the
+ * backend; decoded back out by businessMetricsTool.ts on use). Never
+ * render the raw JSON or password back to the user. "style" selects
+ * which of the two integration shapes businessMetricsTool.ts speaks:
+ * "dashboard" (revenue/MRR/conversion + traffic) or "login" (usage/
+ * traffic only).
  */
-function MetricsCredentialSection({
-  title,
-  provider,
-  description,
+function MetricsSourcesSection({
   credentials,
   loading,
   onError,
   onSaved,
 }: {
-  title: string;
-  provider: string;
-  description?: string;
   credentials: UserCredentialSummary[];
   loading: boolean;
   onError: (message: string | null) => void;
   onSaved: () => Promise<void>;
 }) {
+  const [slug, setSlug] = useState("");
+  const [label, setLabel] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [style, setStyle] = useState<"dashboard" | "login">("dashboard");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const existing = credentials.find((c) => c.provider === provider);
+  const sources = credentials.filter((c) => c.provider.startsWith(METRICS_PROVIDER_PREFIX));
+  const validSlug = METRICS_SLUG_PATTERN.test(slug);
+  const validUrl = /^https?:\/\//.test(baseUrl);
 
   async function save() {
-    if (!username.trim() || !password) return;
+    if (!validSlug || !validUrl || !username.trim() || !password) return;
     setBusy(true);
     onError(null);
     try {
-      await createUserCredential({ provider, apiKey: JSON.stringify({ username: username.trim(), password }) });
+      await createUserCredential({
+        provider: `${METRICS_PROVIDER_PREFIX}${slug}`,
+        apiKey: JSON.stringify({ username: username.trim(), password, baseUrl, style }),
+        label: label.trim() || undefined,
+      });
       await onSaved();
+      setSlug("");
+      setLabel("");
+      setBaseUrl("");
       setUsername("");
       setPassword("");
     } catch (err) {
@@ -283,32 +273,66 @@ function MetricsCredentialSection({
 
   return (
     <section style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 16, marginTop: 12 }}>
-      <h3 style={{ marginTop: 0, marginBottom: description ? 4 : 12 }}>{title}</h3>
-      {description && <p style={{ color: "var(--text-muted)", fontSize: 13, marginTop: 0 }}>{description}</p>}
-
       {loading ? (
         <p>Loading…</p>
-      ) : existing ? (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-          <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 13 }}>Saved {new Date(existing.createdAt).toLocaleDateString()}</p>
-          <button onClick={() => remove(existing.id)} disabled={busy}>
-            Remove
-          </button>
-        </div>
+      ) : sources.length === 0 ? (
+        <p style={{ color: "var(--text-muted)", fontSize: 13, marginTop: 0 }}>No metrics sources configured yet.</p>
       ) : (
-        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Username</span>
-            <input value={username} onChange={(e) => setUsername(e.target.value)} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Password</span>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-          </label>
-          <button onClick={save} disabled={busy || !username.trim() || !password}>
-            Save
-          </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+          {sources.map((s) => (
+            <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <div>
+                <strong>{s.provider.slice(METRICS_PROVIDER_PREFIX.length)}</strong>
+                {s.label && <span style={{ color: "var(--text-muted)", fontSize: 13 }}> — {s.label}</span>}
+                <p style={{ margin: "2px 0 0", color: "var(--text-muted)", fontSize: 13 }}>
+                  Saved {new Date(s.createdAt).toLocaleDateString()}
+                </p>
+              </div>
+              <button onClick={() => remove(s.id)} disabled={busy}>
+                Remove
+              </button>
+            </div>
+          ))}
         </div>
+      )}
+
+      <h3 style={{ marginTop: 0, marginBottom: 8 }}>Add a source</h3>
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Source name</span>
+          <input placeholder="e.g. mysite" value={slug} onChange={(e) => setSlug(e.target.value.toLowerCase())} />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Label (optional)</span>
+          <input placeholder="e.g. My Site" value={label} onChange={(e) => setLabel(e.target.value)} />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Base URL</span>
+          <input placeholder="https://example.com" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Integration style</span>
+          <select value={style} onChange={(e) => setStyle(e.target.value as "dashboard" | "login")}>
+            <option value="dashboard">Dashboard (revenue, MRR, conversion, traffic)</option>
+            <option value="login">Login + analytics summary (usage/traffic only)</option>
+          </select>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Username</span>
+          <input value={username} onChange={(e) => setUsername(e.target.value)} />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Password</span>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        <button onClick={save} disabled={busy || !validSlug || !validUrl || !username.trim() || !password}>
+          Save
+        </button>
+      </div>
+      {slug.length > 0 && !validSlug && (
+        <p style={{ color: "var(--danger)", fontSize: 12, marginTop: 4 }}>
+          Source name must be 1-32 lowercase letters, digits, or hyphens.
+        </p>
       )}
     </section>
   );

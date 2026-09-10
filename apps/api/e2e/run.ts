@@ -415,6 +415,102 @@ async function main() {
     assert(typeof run.output === "string" && run.output.length > 20, "aggregator produced no meaningful output");
   });
 
+  await test("consensus fan-out: one branch failing doesn't discard a successful sibling's output", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E consensus partial failure" }) });
+    const graphId = g.body.id;
+
+    const source = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Source",
+        role: "router",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Repeat the user's message back verbatim, unchanged. Output nothing else.",
+        position: { x: 300, y: 0 },
+      }),
+    });
+
+    const branchA = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "WorkingEstimator",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Give one brief sentence estimating the answer.",
+        position: { x: 0, y: 180 },
+      }),
+    });
+
+    // No fallbackChain — a classified auth error from a bad node-specific
+    // credential throws immediately (see callAgent), rather than needing
+    // the real node timeout (circuitBreaker.ts) to elapse, so this stays a fast test.
+    const branchB = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "BrokenEstimator",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Give one brief sentence estimating the answer.",
+        position: { x: 600, y: 180 },
+      }),
+    });
+    await api(`/graphs/${graphId}/credentials`, {
+      method: "POST",
+      body: JSON.stringify({ provider: "anthropic", apiKey: "sk-ant-invalid-key-for-e2e-000000", nodeId: branchB.body.id }),
+    });
+
+    const aggregator = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Aggregator",
+        role: "reviewer",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt:
+          "You receive a JSON array of {nodeId, output} reports from different analysts. Synthesize them into one final answer, and explicitly call out if any analyst failed to respond rather than ignoring the gap.",
+        position: { x: 300, y: 360 },
+      }),
+    });
+
+    const edgeA = await api(`/graphs/${graphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: source.body.id, targetNodeId: branchA.body.id, kind: "consensus" }),
+    });
+    const edgeB = await api(`/graphs/${graphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: source.body.id, targetNodeId: branchB.body.id, kind: "consensus" }),
+    });
+    await api(`/graphs/${graphId}/nodes/${source.body.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        consensusGroup: { edgeIds: [edgeA.body.id, edgeB.body.id], aggregatorNodeId: aggregator.body.id },
+      }),
+    });
+    await api(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: source.body.id }) });
+
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId, input: "How long will this migration project take?" }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(
+      run.status === "completed",
+      `expected the run to complete on the surviving branch instead of erroring out entirely: ${run.status} ${JSON.stringify(run.events)}`,
+    );
+
+    const branchAEvent = run.events.find((e: any) => e.nodeId === branchA.body.id);
+    const branchBEvent = run.events.find((e: any) => e.nodeId === branchB.body.id);
+    assert(branchAEvent?.status === "succeeded", `expected the working branch to succeed, got: ${JSON.stringify(branchAEvent)}`);
+    assert(branchBEvent?.status === "failed" && branchBEvent?.error, `expected the broken branch to be recorded as failed with an error, got: ${JSON.stringify(branchBEvent)}`);
+
+    const aggregatorEvent = run.events.find((e: any) => e.nodeId === aggregator.body.id);
+    assert(aggregatorEvent, "aggregator never ran despite one branch succeeding");
+    assert(typeof run.output === "string" && run.output.length > 20, "aggregator produced no meaningful output");
+  });
+
   // --- File-access tool: read within root + blocked traversal ---
   await test("file-access tool reads within its root and blocks path traversal", async () => {
     const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E file access" }) });
@@ -1884,34 +1980,88 @@ async function main() {
         role: "worker",
         provider: "anthropic",
         model: "claude-sonnet-5",
-        systemPrompt: "When asked for metrics, call business_metrics with source 'leadgen-a'. Report the exact error text if you get one.",
+        systemPrompt: "When asked for metrics, call business_metrics with source 'acme'. Report the exact error text if you get one.",
         tools: ["business_metrics"],
         position: { x: 0, y: 0 },
       }),
     });
     await api(`/graphs/${graph.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
 
-    const created = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: graph.body.id, input: "Get me leadgen-a's conversion metrics." }) });
+    const created = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: graph.body.id, input: "Get me acme's conversion metrics." }) });
     const run = await waitForRun(created.body.id);
     assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
     assert(/no.*credential|settings/i.test(String(run.output)), `expected a missing-credential message, got: ${run.output}`);
   });
 
-  await test("user credentials: metrics_leadgen-a rejects a non-login value and accepts a well-formed one", async () => {
-    const bad = await api("/me/credentials", { method: "POST", body: JSON.stringify({ provider: "metrics_leadgen-a", apiKey: "not-json" }) });
-    assert(bad.status === 400, `expected 400 for a non-JSON value, got ${bad.status}: ${JSON.stringify(bad.body)}`);
+  await test("user credentials: metrics_<slug> validates the slug, the login shape, and accepts a well-formed source", async () => {
+    const badSlug = await api("/me/credentials", {
+      method: "POST",
+      body: JSON.stringify({ provider: "metrics_Not Valid!", apiKey: JSON.stringify({ username: "staff", password: "hunter2", baseUrl: "https://example.com", style: "dashboard" }) }),
+    });
+    assert(badSlug.status === 400, `expected 400 for an invalid slug, got ${badSlug.status}: ${JSON.stringify(badSlug.body)}`);
+
+    const notJson = await api("/me/credentials", { method: "POST", body: JSON.stringify({ provider: "metrics_acme", apiKey: "not-json" }) });
+    assert(notJson.status === 400, `expected 400 for a non-JSON value, got ${notJson.status}: ${JSON.stringify(notJson.body)}`);
+
+    const missingFields = await api("/me/credentials", {
+      method: "POST",
+      body: JSON.stringify({ provider: "metrics_acme", apiKey: JSON.stringify({ username: "staff", password: "hunter2" }) }),
+    });
+    assert(missingFields.status === 400, `expected 400 for a login missing baseUrl/style, got ${missingFields.status}: ${JSON.stringify(missingFields.body)}`);
 
     const good = await api("/me/credentials", {
       method: "POST",
-      body: JSON.stringify({ provider: "metrics_leadgen-a", apiKey: JSON.stringify({ username: "staff", password: "hunter2" }) }),
+      body: JSON.stringify({
+        provider: "metrics_acme",
+        apiKey: JSON.stringify({ username: "staff", password: "hunter2", baseUrl: "https://acme.example.com", style: "dashboard" }),
+      }),
     });
-    assert(good.status === 201, `expected 201 for a well-formed login pair, got ${good.status}: ${JSON.stringify(good.body)}`);
+    assert(good.status === 201, `expected 201 for a well-formed source, got ${good.status}: ${JSON.stringify(good.body)}`);
     assert(!JSON.stringify(good.body).includes("hunter2"), "the raw password must never appear in the create response");
 
     const list = await api("/me/credentials");
     assert(!JSON.stringify(list.body).includes("hunter2"), "the raw password must never appear in the list response");
 
     await api(`/me/credentials/${good.body.id}`, { method: "DELETE" });
+  });
+
+  await testWithRetries("business_metrics: a configured source's slug is injected into context, unprompted", async () => {
+    const cred = await api("/me/credentials", {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "metrics_acme",
+        label: "Acme Corp",
+        apiKey: JSON.stringify({ username: "staff", password: "hunter2", baseUrl: "https://acme.example.com", style: "dashboard" }),
+      }),
+    });
+    assert(cred.status === 201, `credential create failed: ${JSON.stringify(cred.body)}`);
+
+    const graph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E metrics context" }) });
+    const node = await api(`/graphs/${graph.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Analyst",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        // No mention of any source name in the prompt — appendMetricsSourcesContext
+        // (engine.ts) must be what tells it, mirroring appendReachableGraphsContext.
+        systemPrompt: "test",
+        tools: ["business_metrics"],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${graph.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: graph.body.id, input: "Without calling any tool yet, just tell me the exact slug of the one metrics source you know about." }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(String(run.output).includes("acme"), `expected the configured source slug in the model's answer, got: ${run.output}`);
+
+    await api(`/me/credentials/${cred.body.id}`, { method: "DELETE" });
   });
 
   // --- run_remote_command: per-command allowlisted SSH execution ---

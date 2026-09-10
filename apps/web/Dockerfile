@@ -2,6 +2,14 @@
 FROM node:22-slim AS base
 RUN corepack enable
 RUN pnpm config set store-dir /pnpm-store
+# Large tarballs (next, @next/swc-*) have repeatedly hit transient
+# registry-fetch failures (ERR_PNPM_TARBALL_FETCH_TARBALL) in sandboxed
+# build environments — not a dependency problem. Give pnpm a real retry
+# budget and cap concurrency instead of retrying the whole build by hand.
+RUN pnpm config set fetch-retries 5 && \
+    pnpm config set fetch-retry-mintimeout 20000 && \
+    pnpm config set fetch-retry-maxtimeout 120000 && \
+    pnpm config set network-concurrency 4
 WORKDIR /repo
 
 # Every workspace package.json must be present for pnpm to reconcile the

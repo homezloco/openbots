@@ -5,13 +5,22 @@ import { db } from "../db/client.js";
 import { userCredentials } from "../db/schema.js";
 import { encryptCredential } from "../auth/crypto.js";
 import { requireAuth } from "../auth/middleware.js";
+import { METRICS_SLUG_PATTERN, METRICS_STYLES } from "../orchestrator/businessMetricsTool.js";
 
-const METRICS_PROVIDERS = ["metrics_leadgen-a", "metrics_leadgen-b", "metrics_saas-b"];
+const METRICS_PROVIDER_PREFIX = "metrics_";
 
 function isValidMetricsLogin(value: string): boolean {
   try {
     const parsed = JSON.parse(value);
-    return typeof parsed?.username === "string" && parsed.username.length > 0 && typeof parsed?.password === "string" && parsed.password.length > 0;
+    return (
+      typeof parsed?.username === "string" &&
+      parsed.username.length > 0 &&
+      typeof parsed?.password === "string" &&
+      parsed.password.length > 0 &&
+      typeof parsed?.baseUrl === "string" &&
+      /^https?:\/\//.test(parsed.baseUrl) &&
+      (METRICS_STYLES as readonly string[]).includes(parsed?.style)
+    );
   } catch {
     return false;
   }
@@ -36,8 +45,15 @@ const createCredentialBody = z
     (body) => !body.provider.startsWith("ssh_target_") || PEM_KEY_PATTERN.test(body.apiKey),
     { message: "Expected a PEM-encoded private key (starting with -----BEGIN ... PRIVATE KEY-----)", path: ["apiKey"] },
   )
-  .refine((body) => !METRICS_PROVIDERS.includes(body.provider) || isValidMetricsLogin(body.apiKey), {
-    message: 'Expected a JSON-encoded {"username", "password"} pair',
+  .refine(
+    // metricsSourceProvider() (orchestrator/businessMetricsTool.ts) names
+    // these "metrics_<slug>" — a user-chosen slug per source, not a
+    // fixed list, so the slug itself needs validating here too.
+    (body) => !body.provider.startsWith(METRICS_PROVIDER_PREFIX) || METRICS_SLUG_PATTERN.test(body.provider.slice(METRICS_PROVIDER_PREFIX.length)),
+    { message: "Expected a source name of 1-32 lowercase letters, digits, or hyphens", path: ["provider"] },
+  )
+  .refine((body) => !body.provider.startsWith(METRICS_PROVIDER_PREFIX) || isValidMetricsLogin(body.apiKey), {
+    message: 'Expected a JSON-encoded {"username", "password", "baseUrl", "style"} object',
     path: ["apiKey"],
   });
 

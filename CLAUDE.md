@@ -30,7 +30,7 @@ There is no unit test suite — `pnpm test` at the root is a no-op (no package d
 
 ### Running the web app
 
-The containerized `web` service has never successfully built in some sandboxed dev environments (a persistent npm-registry network flakiness fetching large tarballs like `next`/`@next/swc-*`, not a code problem — `docker compose build api` is unaffected since the api image doesn't pull those packages). If `docker compose build web` fails repeatedly with `ERR_PNPM_TARBALL_FETCH_TARBALL`, fall back to running it locally instead of fighting the network:
+The containerized `web` service used to fail intermittently in sandboxed dev environments on large tarballs like `next`/`@next/swc-*` (`ERR_PNPM_TARBALL_FETCH_TARBALL`, plain registry-fetch flakiness — `docker compose build api` was never affected, since the api image doesn't pull those packages). Fixed 2026-09-10 by giving pnpm a real retry budget in `apps/web/Dockerfile` (`fetch-retries`/`fetch-retry-mintimeout`/`fetch-retry-maxtimeout`, plus a lower `network-concurrency`) before the install step — confirmed with a real `docker compose build web` run completing cleanly. If it ever still fails repeatedly, fall back to running it locally instead of fighting the network:
 
 ```bash
 pnpm --filter @openbots/web build

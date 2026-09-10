@@ -1051,7 +1051,7 @@ async function main() {
     await api(`/graphs/${hybridGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: leadEngineerId }) });
   });
 
-  await test("hybrid node: naming one specialist routes normally, no fan-out", async () => {
+  await testWithRetries("hybrid node: naming one specialist routes normally, no fan-out", async () => {
     const created = await api("/runs", {
       method: "POST",
       body: JSON.stringify({ graphId: hybridGraphId, input: "What is the status of Project Alpha?" }),

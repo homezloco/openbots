@@ -669,6 +669,52 @@ page above. This was a real, if minor, first-impression risk for a
 public launch — "clone the repo, `docker compose up`, it just works" is
 the highest-leverage moment there is.
 
+## CI flakiness investigation (2026-09-10)
+
+After the pre-launch hardening work above, CI (`.github/workflows/e2e.yml`)
+failed on 3 consecutive pushes — root cause was simply the repo secret's
+Anthropic account being out of credits (every one of 18 failures on that
+run had the identical error, `"Your credit balance is too low..."`), not
+a code problem. After credits were added, ran the suite 4 more times to
+check for a real regression: no billing errors, but 3 of the 4 runs each
+had exactly one test fail, in three *different* tests each time
+(`hybrid node: naming one specialist routes normally, no fan-out` twice,
+`mid-run rerouting: a reroute fired while the first hop is executing
+changes the next hop` twice, never the same pair together) — the fourth
+run was fully green.
+
+Traced both flaky tests' code paths directly rather than assuming: neither
+this session's changes (business_metrics genericization, `engine.ts`'s new
+`appendMetricsSourcesContext`) nor the pre-existing timeout/step-count bump
+above touch either test's hot path — the mid-run-reroute test's three
+nodes have no tools at all (so `appendMetricsSourcesContext`'s
+`wantsMetrics` branch never runs, `stepCountIs`/timeout are irrelevant with
+no tool-calling), and the hybrid-node test doesn't touch `business_metrics`
+either. A different single test failing each run, with no code-level
+connection found, points to pre-existing LLM-response non-determinism and
+CI-runner timing variance rather than a regression — a git-filter-repo
+history rewrite (this session's other major activity) doesn't touch
+runtime code at all.
+
+One real, fixable gap found along the way: `hybrid node: naming one
+specialist routes normally, no fan-out` used bare `test()` (zero retry
+margin) for a real LLM call whose output depends on the model correctly
+disambiguating a deliberately terse question — every *other* LLM-dependent
+test in this suite already uses `testWithRetries` for exactly this reason.
+Fixed to `testWithRetries`, matching the established pattern. The
+mid-run-reroute test was already using `testWithRetries` and still lost
+the race outright twice (all 3 attempts) — its own code comment already
+documents it as "inherently timing-sensitive"; left as-is rather than
+guessing at further timing tweaks with no stronger evidence of an actual
+regression.
+
+**Honest bottom line**: this suite can show a red CI run on an otherwise
+fully-working `main` due to known LLM/timing non-determinism in one or two
+specific tests — not unique to this session, just newly visible because
+CI hadn't run enough times back-to-back before to surface the base rate.
+Don't read a single red run as a regression without checking which test
+failed and whether it's one of these two.
+
 ## Known gaps (honest list)
 
 1. ~~The containerized `web` Docker image has never successfully built in this environment~~ — fixed 2026-09-10, see "Pre-launch hardening" below. Local `pnpm --filter @openbots/web build && start` against the dockerized API remains a valid fallback if a build ever hits the same network flakiness again.

@@ -75,6 +75,21 @@ function matchAutoEdge(
   const text = typeof lastOutput === "string" ? lastOutput : JSON.stringify(lastOutput ?? "");
   if (startsWithSentinel(text, "unknown")) return null;
 
+  // Symmetric to UNKNOWN, for the opposite accidental-overlap direction:
+  // a router that already gave a complete final answer (e.g. relaying a
+  // tool's success or error) can still name a specialist inside that
+  // answer — "this looks like something the Backend Specialist should
+  // investigate" — which then wins the keyword-overlap contest below on
+  // an exact name match and silently auto-routes there, discarding the
+  // router's own good answer in favor of that specialist's unrelated,
+  // often incomplete response. DONE lets a router explicitly opt out of
+  // further routing on a hop that happens to mention a target by name
+  // without intending to hand off. Found as a real bug: a business-
+  // metrics-capable lead's own error-reporting text named the specialist
+  // it suggested the user loop in, which auto-routed there instead of
+  // surfacing the lead's actual answer.
+  if (startsWithSentinel(text, "done")) return null;
+
   if (candidates.length <= 1) return candidates[0] ?? null;
 
   const outputTokens = tokenize(text);

@@ -104,6 +104,7 @@ export interface CreateNodeInput {
   fallbackChain?: AgentNode["fallbackChain"];
   consensusGroup?: AgentNode["consensusGroup"];
   dispatchTargets?: string[];
+  sshTarget?: AgentNode["sshTarget"];
   position: { x: number; y: number };
 }
 

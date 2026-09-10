@@ -10,6 +10,7 @@ const FILE_TOOLS = ["read_file", "list_directory"];
 const WRITE_TOOLS = ["write_file", "edit_file"];
 const DISPATCH_TOOL = "dispatch_to_graph";
 const MANAGE_TOOL = "manage_target_graphs";
+const REMOTE_TOOL = "run_remote_command";
 
 /**
  * Editing an existing agent's config — reuses the same field set as the
@@ -46,6 +47,10 @@ export function AgentSettingsForm({
   const [manageEnabled, setManageEnabled] = useState(node.tools.includes(MANAGE_TOOL));
   const [dispatchTargets, setDispatchTargets] = useState<string[]>(node.dispatchTargets ?? []);
   const [availableGraphs, setAvailableGraphs] = useState<GraphSummary[] | null>(null);
+  const [remoteCommandEnabled, setRemoteCommandEnabled] = useState(node.tools.includes(REMOTE_TOOL));
+  const [sshHost, setSshHost] = useState(node.sshTarget?.host ?? "");
+  const [sshUsername, setSshUsername] = useState(node.sshTarget?.username ?? "");
+  const [allowedCommands, setAllowedCommands] = useState(node.sshTarget?.allowedCommands ?? []);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,22 +65,31 @@ export function AgentSettingsForm({
     setDispatchTargets((prev) => (prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]));
   }
 
+  function addCommandRow() {
+    setAllowedCommands((prev) => [...prev, { label: "", command: "" }]);
+  }
+
   async function save() {
     if ((dispatchEnabled || manageEnabled) && dispatchTargets.length === 0) {
       setError("Pick at least one target graph, or turn off dispatch/graph-editing.");
+      return;
+    }
+    if (remoteCommandEnabled && (!sshHost.trim() || !sshUsername.trim() || allowedCommands.length === 0)) {
+      setError("Fill in a host, username, and at least one command, or turn off remote commands.");
       return;
     }
     setSaving(true);
     setError(null);
     try {
       const nonFileTools = node.tools.filter(
-        (t) => !FILE_TOOLS.includes(t) && !WRITE_TOOLS.includes(t) && t !== DISPATCH_TOOL && t !== MANAGE_TOOL,
+        (t) => !FILE_TOOLS.includes(t) && !WRITE_TOOLS.includes(t) && t !== DISPATCH_TOOL && t !== MANAGE_TOOL && t !== REMOTE_TOOL,
       );
       const tools = [
         ...nonFileTools,
         ...(form.fileAccessRoot ? [...FILE_TOOLS, ...(form.allowWrites ? WRITE_TOOLS : [])] : []),
         ...(dispatchEnabled ? [DISPATCH_TOOL] : []),
         ...(manageEnabled ? [MANAGE_TOOL] : []),
+        ...(remoteCommandEnabled ? [REMOTE_TOOL] : []),
       ];
       const updated = await updateNode(graphId, node.id, {
         name: form.name,
@@ -92,6 +106,10 @@ export function AgentSettingsForm({
         // leaves the PATCH route's previous value untouched — see the PATCH
         // handler's `effectiveDispatchTargets` merge in routes/graphs.ts.
         dispatchTargets: dispatchEnabled || manageEnabled ? dispatchTargets : [],
+        // Sent as null (not omitted) when disabled, same reasoning.
+        sshTarget: remoteCommandEnabled
+          ? { host: sshHost.trim(), username: sshUsername.trim(), allowedCommands }
+          : null,
       });
       onSaved(updated);
     } catch (err) {
@@ -235,6 +253,70 @@ export function AgentSettingsForm({
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="checkbox"
+          checked={remoteCommandEnabled}
+          onChange={(e) => setRemoteCommandEnabled(e.target.checked)}
+        />
+        <span>
+          Allow remote commands{" "}
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            (run_remote_command — can only run one of the exact commands you list below, over SSH, on the host you
+            configure; host must be in the operator's ALLOWED_SSH_HOSTS allowlist)
+          </span>
+        </span>
+      </label>
+
+      {remoteCommandEnabled && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginLeft: 24 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+              Host
+              <input placeholder="100.66.221.81" value={sshHost} onChange={(e) => setSshHost(e.target.value)} />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+              Username
+              <input placeholder="ubuntu" value={sshUsername} onChange={(e) => setSshUsername(e.target.value)} />
+            </label>
+          </div>
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            Optional SSH key credential comes from /me/credentials, provider "ssh_target_&lt;host&gt;" — leave unset if
+            this host authenticates without one (e.g. Tailscale SSH).
+          </span>
+          {allowedCommands.map((c, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                placeholder="label (e.g. trading_report)"
+                value={c.label}
+                onChange={(e) => {
+                  const next = [...allowedCommands];
+                  next[i] = { ...next[i], label: e.target.value };
+                  setAllowedCommands(next);
+                }}
+                style={{ flex: 1 }}
+              />
+              <input
+                placeholder="exact command"
+                value={c.command}
+                onChange={(e) => {
+                  const next = [...allowedCommands];
+                  next[i] = { ...next[i], command: e.target.value };
+                  setAllowedCommands(next);
+                }}
+                style={{ flex: 2 }}
+              />
+              <button type="button" onClick={() => setAllowedCommands(allowedCommands.filter((_, j) => j !== i))}>
+                Remove
+              </button>
+            </div>
+          ))}
+          <button type="button" onClick={addCommandRow} style={{ alignSelf: "flex-start" }}>
+            + Add command
+          </button>
         </div>
       )}
 

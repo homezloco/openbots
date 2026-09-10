@@ -26,9 +26,14 @@ import {
  *
  * Deliberately NOT settable by any tool here: dispatchTargets (the actual
  * reachability boundary — keeping it human/PATCH-only means "which graphs
- * are in scope" can never be silently expanded from inside a dispatch) and
+ * are in scope" can never be silently expanded from inside a dispatch),
  * consensusGroup (needs edge-id resolution by name to be usable from a
- * tool call at all; real complexity for no clear v1 use case).
+ * tool call at all; real complexity for no clear v1 use case), and
+ * sshTarget (the actual grant boundary for run_remote_command, same
+ * reasoning as dispatchTargets — `tools` here CAN already include
+ * "run_remote_command", but that alone is inert without a human/PATCH-set
+ * sshTarget on the same node, the same dual-gate that already lets `tools`
+ * safely include "dispatch_to_graph" without dispatchTargets).
  */
 
 async function resolveTargetGraph(

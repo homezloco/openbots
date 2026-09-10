@@ -1,12 +1,13 @@
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { AgentRole, ConsensusGroup, FallbackTarget, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition } from "@openbots/graph-schema";
+import { AgentRole, ConsensusGroup, FallbackTarget, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
 import { agentGraphs, agentNodes, routingEdges } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
 import { nodeRowToAgentNode } from "./engine.js";
 import { checkFileAccessRootAllowed, checkWriteRootAllowed, fileAccessRootSchema } from "../validation/fileAccessRoot.js";
 import { checkDispatchTargetsOwned } from "../validation/dispatchTargets.js";
+import { checkSshTargetAllowed } from "../validation/sshTarget.js";
 
 /**
  * The node/edge mutation core, shared by the HTTP routes (routes/graphs.ts)
@@ -38,6 +39,10 @@ export const createNodeBody = z.object({
   // behave identically.
   consensusGroup: ConsensusGroup.nullable().optional(),
   dispatchTargets: z.array(z.string().uuid()).optional(),
+  // .nullable() for the same reason as consensusGroup: PATCH needs a way
+  // to explicitly clear a previously-set sshTarget, not just leave it
+  // unchanged or replace it with a new one.
+  sshTarget: SshTarget.nullable().optional(),
   position: z.object({ x: z.number(), y: z.number() }),
 });
 
@@ -75,6 +80,7 @@ export async function insertAgentNode(graphId: string, body: CreateNodeBody) {
       fallbackChain: body.fallbackChain ?? [],
       consensusGroup: body.consensusGroup ?? null,
       dispatchTargets: body.dispatchTargets ?? null,
+      sshTarget: body.sshTarget ?? null,
       positionX: body.position.x,
       positionY: body.position.y,
     })
@@ -104,6 +110,8 @@ export async function insertAgentNodeValidated(
   if (writeError) return { ok: false, status: 400, error: writeError };
   const dispatchError = await checkDispatchTargetsOwned(body.tools, body.dispatchTargets, userId);
   if (dispatchError) return { ok: false, status: 400, error: dispatchError };
+  const sshError = checkSshTargetAllowed(body.sshTarget);
+  if (sshError) return { ok: false, status: 400, error: sshError };
   return { ok: true, value: await insertAgentNode(graphId, body) };
 }
 
@@ -136,6 +144,11 @@ export async function updateAgentNode(
     body.dispatchTargets !== undefined ? body.dispatchTargets : (before.dispatchTargets as string[] | null | undefined);
   const dispatchError = await checkDispatchTargetsOwned(effectiveTools, effectiveDispatchTargets, userId);
   if (dispatchError) return { ok: false, status: 400, error: dispatchError };
+
+  const effectiveSshTarget =
+    body.sshTarget !== undefined ? body.sshTarget : (before.sshTarget as SshTarget | null | undefined);
+  const sshError = checkSshTargetAllowed(effectiveSshTarget);
+  if (sshError) return { ok: false, status: 400, error: sshError };
 
   const { position, ...rest } = body;
   const [after] = await db

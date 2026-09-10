@@ -68,6 +68,33 @@ export const ConsensusGroup = z.object({
 });
 export type ConsensusGroup = z.infer<typeof ConsensusGroup>;
 
+/**
+ * A pre-approved command a node may invoke by label via "run_remote_command"
+ * — see SshTarget below. The model only ever supplies `label`; the actual
+ * `command` string is never model-visible or model-constructible.
+ */
+export const AllowedRemoteCommand = z.object({
+  label: z.string().min(1),
+  command: z.string().min(1),
+});
+export type AllowedRemoteCommand = z.infer<typeof AllowedRemoteCommand>;
+
+/**
+ * Grants a node the "run_remote_command" tool against exactly one SSH host,
+ * restricted to an exact, pre-configured command per label — the same
+ * dual-gate pattern as fileAccessRoot/dispatchTargets: the tool name in
+ * `tools` alone grants nothing without this also being set, and vice versa.
+ * `host` is re-verified against the operator's ALLOWED_SSH_HOSTS allowlist
+ * at call time, never trusted from what was last saved — see
+ * orchestrator/remoteCommandTool.ts.
+ */
+export const SshTarget = z.object({
+  host: z.string().min(1),
+  username: z.string().min(1),
+  allowedCommands: z.array(AllowedRemoteCommand).default([]),
+});
+export type SshTarget = z.infer<typeof SshTarget>;
+
 export const AgentNode = z.object({
   id: z.string().uuid(),
   graphId: z.string().uuid(),
@@ -105,6 +132,12 @@ export const AgentNode = z.object({
    * convenience, never the actual security boundary.
    */
   dispatchTargets: z.array(z.string().uuid()).optional(),
+  /**
+   * Grants "run_remote_command" against exactly one SSH host and its
+   * pre-approved commands — see SshTarget. Unset means no remote-command
+   * access regardless of what's in `tools`.
+   */
+  sshTarget: SshTarget.nullable().optional(),
   position: CanvasPosition,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

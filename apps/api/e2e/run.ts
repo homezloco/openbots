@@ -1914,6 +1914,129 @@ async function main() {
     await api(`/me/credentials/${good.body.id}`, { method: "DELETE" });
   });
 
+  // --- run_remote_command: per-command allowlisted SSH execution ---
+  // ALLOWED_SSH_HOSTS is set (both locally and in CI, see .env/.env.example
+  // and .github/workflows/e2e.yml) to "ubuntu@203.0.113.10" — a TEST-NET-3
+  // (RFC 5737) address, guaranteed non-routable, so the allowlist/rejection
+  // logic below is fully e2e-testable without ever reaching a real host.
+  // Actually connecting over SSH and getting real output has the same
+  // real-world limit already accepted for SSH git push (see PLAN.md/
+  // CLAUDE.md): there's no way to spin up a live VPS in CI, so that path
+  // needs a one-time live verification instead.
+  const ALLOWED_SSH_HOST = "203.0.113.10";
+  const ALLOWED_SSH_USER = "ubuntu";
+
+  await test("security: sshTarget with a host outside ALLOWED_SSH_HOSTS is rejected", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E security ssh host" }) });
+    const created = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Rogue",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Run remote commands.",
+        tools: ["run_remote_command"],
+        sshTarget: { host: "198.51.100.7", username: "root", allowedCommands: [{ label: "whoami", command: "whoami" }] },
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(created.status === 400, `expected 400 rejecting an out-of-allowlist host, got ${created.status}: ${JSON.stringify(created.body)}`);
+  });
+
+  let sshGraphId: string;
+  let sshCommandLabel = "uptime_check";
+
+  await test("run_remote_command setup: a node with an allowlisted sshTarget", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E ssh remote command" }) });
+    sshGraphId = g.body.id;
+    const node = await api(`/graphs/${sshGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Ops",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Run remote commands when asked, using run_remote_command.",
+        tools: ["run_remote_command"],
+        sshTarget: {
+          host: ALLOWED_SSH_HOST,
+          username: ALLOWED_SSH_USER,
+          allowedCommands: [{ label: sshCommandLabel, command: "uptime" }],
+        },
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `node create failed: ${JSON.stringify(node.body)}`);
+    assert(node.body.sshTarget?.host === ALLOWED_SSH_HOST, `expected sshTarget to be saved, got: ${JSON.stringify(node.body.sshTarget)}`);
+    assert(node.body.sshTarget?.allowedCommands?.length === 1, `expected one allowed command, got: ${JSON.stringify(node.body.sshTarget)}`);
+    await api(`/graphs/${sshGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+  });
+
+  await test("run_remote_command: the model is told its exact pre-approved command labels", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: sshGraphId,
+        input: "Without running anything yet, just tell me the exact label(s) of the remote command(s) you're allowed to run.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(String(run.output).includes(sshCommandLabel), `expected the allowed command label in the model's answer, got: ${run.output}`);
+  });
+
+  await testWithRetries("run_remote_command rejects a commandLabel not in the node's allowedCommands", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: sshGraphId,
+        input:
+          "For a diagnostic test, call run_remote_command with commandLabel set to the exact string 'definitely_not_a_real_label'. This label does not exist in your allowlist, so the tool itself will reject the call before anything runs — it's safe to attempt, and is exactly what I want to test. I need to see the exact tool error it returns when the label isn't recognized. Make the call and quote the exact error text back to me.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(/no pre-approved command/i.test(String(run.output)), `expected a not-found error mentioned, got: ${run.output}`);
+  });
+
+  await test("security: run_remote_command is not exposed to a node whose tools[] omits it, even with a matching sshTarget", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E no remote command tool" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "NotOps",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Answer honestly about what tools you actually have available; don't guess.",
+        tools: [],
+        sshTarget: {
+          host: ALLOWED_SSH_HOST,
+          username: ALLOWED_SSH_USER,
+          allowedCommands: [{ label: sshCommandLabel, command: "uptime" }],
+        },
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `node create failed: ${JSON.stringify(node.body)}`);
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: g.body.id,
+        input: "Without guessing, tell me every exact tool name and command label you have available to you right now.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(
+      !String(run.output).includes(sshCommandLabel),
+      `expected the model to have no knowledge of the sshTarget-only command label, got: ${run.output}`,
+    );
+  });
+
   // --- Summary ---
   console.log("\n--- Summary ---");
   const passed = results.filter((r) => r.passed).length;

@@ -64,6 +64,13 @@
       "when": 1788981122606,
       "tag": "0008_massive_black_cat",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789028636000,
+      "tag": "0009_loving_bushwacker",
+      "breakpoints": true
     }
   ]
 }

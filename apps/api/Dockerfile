@@ -27,9 +27,13 @@ ENV NODE_ENV=production
 # git is a runtime dependency of the worker process, not a build-time one
 # — the write_file/edit_file tools isolate every agent write inside a git
 # worktree (see packages/providers/src/gitWorktree.ts) rather than ever
-# touching the user's real checkout directly.
+# touching the user's real checkout directly. openssh-client provides the
+# actual `ssh` binary git shells out to for a git@/ssh:// push AND the one
+# run_remote_command (orchestrator/remoteCommandTool.ts) invokes directly
+# — --no-install-recommends means apt would otherwise skip it entirely
+# even though git "recommends" it, silently leaving both SSH paths broken.
 RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt/lists \
-    apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+    apt-get update && apt-get install -y --no-install-recommends git openssh-client && rm -rf /var/lib/apt/lists/*
 COPY --from=build /repo /repo
 WORKDIR /repo/apps/api
 EXPOSE 4000

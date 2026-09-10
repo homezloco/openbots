@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { sshCommandFor, withEphemeralSshKey } from "./sshExec.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -88,30 +88,6 @@ function isGithubSshRemote(remote: string): boolean {
     }
   }
   return false;
-}
-
-/**
- * Runs `fn` with a GIT_SSH_COMMAND pointed at a freshly-written, mode-0600
- * private key and a pinned known_hosts (see GITHUB_KNOWN_HOSTS) — both
- * live only inside a fresh 0700 temp dir for the duration of this one
- * push, deleted immediately after regardless of outcome. The key is never
- * written into any repo, worktree, or persistent config. BatchMode=yes
- * means a passphrase-protected key or a host-key mismatch fails fast and
- * clearly instead of hanging the worker waiting on a prompt nothing can
- * ever answer.
- */
-async function withEphemeralSshKey<T>(privateKey: string, fn: (sshCommand: string) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), "openbots-ssh-"));
-  try {
-    const keyPath = join(dir, "key");
-    const knownHostsPath = join(dir, "known_hosts");
-    await writeFile(keyPath, privateKey.endsWith("\n") ? privateKey : `${privateKey}\n`, { mode: 0o600 });
-    await writeFile(knownHostsPath, GITHUB_KNOWN_HOSTS, { mode: 0o600 });
-    const sshCommand = `ssh -i ${keyPath} -o UserKnownHostsFile=${knownHostsPath} -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes`;
-    return await fn(sshCommand);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 }
 
 function slugify(name: string): string {
@@ -270,8 +246,11 @@ export async function pushBranch(worktree: Worktree, credentials?: PushCredentia
     if (!credentials?.sshKey) {
       throw new Error("SSH origin requires a GitHub SSH private key — save one via POST /me/credentials (provider: github_ssh_key)");
     }
-    await withEphemeralSshKey(credentials.sshKey, (sshCommand) =>
-      git(["push", "origin", worktree.branch], worktree.path, { ...process.env, GIT_SSH_COMMAND: sshCommand }),
+    await withEphemeralSshKey(credentials.sshKey, GITHUB_KNOWN_HOSTS, ({ keyPath, knownHostsPath }) =>
+      git(["push", "origin", worktree.branch], worktree.path, {
+        ...process.env,
+        GIT_SSH_COMMAND: sshCommandFor(keyPath, knownHostsPath),
+      }),
     );
   } else {
     // Plain (file:// or local path) — used by e2e against a local bare repo,

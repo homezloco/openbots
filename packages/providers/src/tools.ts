@@ -345,6 +345,11 @@ export function listAvailableTools(): { name: string; description: string; requi
       description: "Delete a routing edge between two nodes in one of your target graphs.",
       requiresFileAccessRoot: false,
     },
+    {
+      name: "run_remote_command",
+      description: "Run one of your pre-approved commands on a configured SSH host, by label only.",
+      requiresFileAccessRoot: false,
+    },
   ];
   return [...staticTools, ...fileTools, ...writeTools, ...crossServiceTools];
 }

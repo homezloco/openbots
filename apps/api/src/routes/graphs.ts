@@ -171,11 +171,12 @@ export async function graphRoutes(app: FastifyInstance) {
     // trusting that the source row is still valid under today's allowlist.
     // consensusGroup is deliberately dropped: it references edge ids
     // scoped to the source graph and would be dangling in this one.
-    // dispatchTargets is deliberately dropped too — even though the
-    // referenced graph ids stay technically valid across the copy, "may
-    // fire runs into these other graphs" is significant enough capability
-    // that copying a node into a new context should require re-granting
-    // it explicitly, not carrying it over silently.
+    // dispatchTargets and sshTarget are deliberately dropped too — even
+    // though the referenced graph ids/host stay technically valid across
+    // the copy, "may fire runs into these other graphs" or "may run
+    // commands on this host" is significant enough capability that copying
+    // a node into a new context should require re-granting it explicitly,
+    // not carrying it over silently.
     const copied = createNodeBody.parse({
       name: source.name,
       role: source.role,

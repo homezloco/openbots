@@ -17,6 +17,8 @@ function isValidMetricsLogin(value: string): boolean {
   }
 }
 
+const PEM_KEY_PATTERN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+
 const createCredentialBody = z
   .object({
     provider: z.string().min(1),
@@ -24,7 +26,14 @@ const createCredentialBody = z
     label: z.string().optional(),
   })
   .refine(
-    (body) => body.provider !== "github_ssh_key" || /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(body.apiKey),
+    (body) => body.provider !== "github_ssh_key" || PEM_KEY_PATTERN.test(body.apiKey),
+    { message: "Expected a PEM-encoded private key (starting with -----BEGIN ... PRIVATE KEY-----)", path: ["apiKey"] },
+  )
+  .refine(
+    // sshCredentialProvider() (orchestrator/remoteCommandTool.ts) names
+    // these "ssh_target_<host-slug>" — one provider per host, same PEM
+    // shape github_ssh_key already validates.
+    (body) => !body.provider.startsWith("ssh_target_") || PEM_KEY_PATTERN.test(body.apiKey),
     { message: "Expected a PEM-encoded private key (starting with -----BEGIN ... PRIVATE KEY-----)", path: ["apiKey"] },
   )
   .refine((body) => !METRICS_PROVIDERS.includes(body.provider) || isValidMetricsLogin(body.apiKey), {

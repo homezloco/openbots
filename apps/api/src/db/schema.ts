@@ -52,6 +52,7 @@ export const agentNodes = pgTable("agent_nodes", {
   fallbackChain: jsonb("fallback_chain").notNull().default([]), // FallbackTarget[]
   consensusGroup: jsonb("consensus_group"), // ConsensusGroup | null
   dispatchTargets: jsonb("dispatch_targets"), // string[] (graph ids) | null — see orchestrator/dispatchTool.ts
+  sshTarget: jsonb("ssh_target"), // {host, username, allowedCommands: {label, command}[]} | null — see orchestrator/remoteCommandTool.ts
   positionX: real("position_x").notNull().default(0),
   positionY: real("position_y").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -202,6 +203,24 @@ export const agentCommits = pgTable("agent_commits", {
   commitSha: text("commit_sha").notNull(),
   pushedAt: timestamp("pushed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const remoteCommandRuns = pgTable("remote_command_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  runId: uuid("run_id")
+    .notNull()
+    .references(() => runs.id, { onDelete: "cascade" }),
+  nodeId: uuid("node_id").notNull(),
+  graphId: uuid("graph_id")
+    .notNull()
+    .references(() => agentGraphs.id, { onDelete: "cascade" }),
+  host: text("host").notNull(),
+  commandLabel: text("command_label").notNull(),
+  command: text("command").notNull(),
+  exitCode: integer("exit_code"),
+  output: text("output").notNull().default(""),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
 });
 
 export const userCredentials = pgTable(

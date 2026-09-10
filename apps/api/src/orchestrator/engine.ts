@@ -37,6 +37,7 @@ import {
   createUpdateTargetNodeTool,
 } from "./graphManagementTools.js";
 import { createBusinessMetricsTool } from "./businessMetricsTool.js";
+import { createRunRemoteCommandTool } from "./remoteCommandTool.js";
 import { computeWarnings } from "./warnings.js";
 import { enqueueHop } from "../queue/runQueue.js";
 import { publishRunEvent } from "../ws/publish.js";
@@ -335,7 +336,7 @@ function appendAutoRoutingContext(
   const fanOutLine = canFanOut
     ? " If the request applies to multiple or all of these specialists at once, start your reply with the single word ALL instead of naming one."
     : "";
-  return `${systemPrompt}\n\nYou can delegate to one of these specialists — mention the target's name clearly in your response so it can be routed correctly:\n${list}\n\nIf none of these fit, or you need the user to clarify before you can route, start your reply with the single word UNKNOWN — do not guess a specialist.${fanOutLine}`;
+  return `${systemPrompt}\n\nYou can delegate to one of these specialists — mention the target's name clearly in your response so it can be routed correctly:\n${list}\n\nIf none of these fit, or you need the user to clarify before you can route, start your reply with the single word UNKNOWN — do not guess a specialist.${fanOutLine} If you already have a complete, final answer for the user (including reporting a tool's error clearly) and do NOT want to hand off to a specialist — even if your answer happens to mention one of them by name, e.g. suggesting who could look into something further — start your reply with the single word DONE so it isn't auto-routed there by mistake.`;
 }
 
 /**
@@ -383,6 +384,20 @@ function appendReachableGraphsContext(
     );
   }
   return `${systemPrompt}\n\nYou can ${capabilities.join(", or ")} for these graphs:\n${list}`;
+}
+
+/**
+ * Same family as appendReachableGraphsContext/appendWriteContext: a model
+ * granted run_remote_command has zero built-in knowledge of what commands
+ * it's actually allowed to ask for. Lists only each command's LABEL, not
+ * its raw command string — no need to leak exact shell syntax into the
+ * prompt — and explicitly teaches it that it cannot invent a new one,
+ * mirroring how dispatch_to_graph only ever accepts a pre-authorized name.
+ */
+function appendRemoteCommandContext(systemPrompt: string, allowedCommands: { label: string }[]): string {
+  if (allowedCommands.length === 0) return systemPrompt;
+  const list = allowedCommands.map((c) => `- ${c.label}`).join("\n");
+  return `${systemPrompt}\n\nYou can run exactly these pre-approved remote commands via run_remote_command, by label only:\n${list}\nYou cannot invent a new command or modify one of these — only select one of the labels above.`;
 }
 
 /**
@@ -453,6 +468,12 @@ async function callAgent(
   // letting "can fire a run into X" and "can restructure X" be granted
   // independently. See PLAN.md's "Cross-graph supervisor control".
   const wantsGraphManagement = node.tools.includes("manage_target_graphs");
+  // Defense in depth: both the tool name AND a configured sshTarget are
+  // required, neither alone grants access — same "config is a save-time
+  // convenience, not the security boundary" pattern fileAccessRoot and
+  // dispatchTargets already follow (re-checked fresh inside the tool
+  // itself against ALLOWED_SSH_HOSTS on every call, not just here).
+  const wantsRemoteCommand = node.tools.includes("run_remote_command") && Boolean(node.sshTarget);
   // Computed whenever EITHER capability wants it — not just wantsDispatch
   // alone, which used to leave a manage_target_graphs-only node with no
   // idea what any of its target graphs were even named. See PLAN.md.
@@ -461,14 +482,17 @@ async function callAgent(
   const canRead = Boolean(node.fileAccessRoot) && node.tools.includes("read_file");
 
   const systemPrompt = appendProjectContext(
-    appendReachableGraphsContext(
-      appendWriteContext(
-        appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
-        canWrite,
+    appendRemoteCommandContext(
+      appendReachableGraphsContext(
+        appendWriteContext(
+          appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
+          canWrite,
+        ),
+        reachableGraphs,
+        wantsDispatch,
+        wantsGraphManagement,
       ),
-      reachableGraphs,
-      wantsDispatch,
-      wantsGraphManagement,
+      wantsRemoteCommand ? node.sshTarget!.allowedCommands : [],
     ),
     effectiveFileRoot,
     canRead,
@@ -522,6 +546,12 @@ async function callAgent(
           delete_target_node: createDeleteTargetNodeTool(ownerId, managementTargets),
           create_target_edge: createCreateTargetEdgeTool(ownerId, managementTargets),
           delete_target_edge: createDeleteTargetEdgeTool(ownerId, managementTargets),
+        };
+      }
+      if (wantsRemoteCommand) {
+        tools = {
+          ...(tools ?? {}),
+          run_remote_command: createRunRemoteCommandTool(ownerId, node.sshTarget, node.id, node.graphId, runId),
         };
       }
       const result = await withRetry(() =>
@@ -635,6 +665,7 @@ export function nodeRowToAgentNode(n: typeof agentNodes.$inferSelect): AgentNode
     fallbackChain: n.fallbackChain as AgentNode["fallbackChain"],
     consensusGroup: (n.consensusGroup as AgentNode["consensusGroup"]) ?? undefined,
     dispatchTargets: (n.dispatchTargets as string[] | null) ?? undefined,
+    sshTarget: (n.sshTarget as AgentNode["sshTarget"]) ?? undefined,
     position: { x: n.positionX, y: n.positionY },
     createdAt: n.createdAt.toISOString(),
     updatedAt: n.updatedAt.toISOString(),

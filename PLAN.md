@@ -709,11 +709,16 @@ the prioritization survives past this session.
   server, the same shape as `pc_telemetry`'s WebSocket or
   `dispatch_to_graph`'s cross-graph call, not code loading into the API
   process. Single biggest ecosystem-compatibility gap found.
-- **`useBotChat.ts::buildNextInput` has no memory bound.** It concatenates
-  the entire prior transcript plus the new message, every turn, forever —
-  no summarization or pruning. Both a competitive gap (vs. CrewAI's
-  short/long-term/entity memory) and a live latent bug: a long-running
-  bot's context window and per-turn cost both grow unboundedly.
+- ~~`useBotChat.ts::buildNextInput` has no memory bound~~ — fixed
+  2026-09-10, pulled to the top of the list ahead of the rest of this
+  roadmap since it was a live bug, not just a gap: a long-running bot's
+  context window and per-turn cost both grew unboundedly with no cap.
+  `truncateTranscript` now caps the carried-forward transcript at 24,000
+  characters, trimming from the oldest end at a clean "User: " turn
+  boundary (never mid-turn) and prefixing `[earlier conversation
+  truncated]`. This is a bound, not real memory — still no summarization
+  or structured recall, so the CrewAI-style short/long-term/entity memory
+  gap itself is still open; this just stops the unbounded-growth bug.
 - **OpenTelemetry trace export for `run_events`.** Rather than competing
   with the observability category (Langfuse — MIT core, acquired by
   ClickHouse Jan 2026; LangSmith; Arize/Phoenix), export the existing

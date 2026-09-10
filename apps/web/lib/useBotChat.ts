@@ -11,6 +11,35 @@ export function extractLatestUserMessage(transcript: string): string {
 }
 
 /**
+ * Hard cap on the transcript buildNextInput carries forward, in characters
+ * (~4 chars/token as a rough estimate). Without one, a long-running bot's
+ * context-window usage and per-turn cost both grow unboundedly — every
+ * turn re-sends the ENTIRE prior conversation as one ever-growing string,
+ * since that's the only "memory" this hook has (see buildNextInput). A
+ * real, previously-shipped bug: nothing bounded this before. 24,000 chars
+ * is generous enough for real multi-turn use (dozens of typical exchanges)
+ * while staying well inside even a modest local-model context window —
+ * "any OpenAI-compatible endpoint including local models via Ollama" means
+ * this can't assume a large frontier-model window.
+ */
+const MAX_TRANSCRIPT_CHARS = 24_000;
+
+/**
+ * Trims from the OLDEST end — recency matters most for continuity — at
+ * the next "User: " turn boundary at/after the cutoff, so a trim never
+ * starts mid-turn. The newest content (including whatever's about to be
+ * appended after this runs) is never at risk of being cut, since only
+ * the front of the string is ever removed.
+ */
+function truncateTranscript(transcript: string): string {
+  if (transcript.length <= MAX_TRANSCRIPT_CHARS) return transcript;
+  const cutoff = transcript.length - MAX_TRANSCRIPT_CHARS;
+  const boundary = transcript.indexOf("\nUser: ", cutoff);
+  const trimmed = boundary === -1 ? transcript.slice(cutoff) : transcript.slice(boundary + 1);
+  return `[earlier conversation truncated]\n${trimmed}`;
+}
+
+/**
  * Chains each completed run's own transcript forward — no backend/schema
  * change needed. Reads `originalInput` (falling back to `input`), NOT
  * `input` directly: for any multi-hop run (including every ALL fan-out),
@@ -22,7 +51,7 @@ export function extractLatestUserMessage(transcript: string): string {
 export function buildNextInput(lastCompletedRun: Run | null, newMessage: string): string {
   const priorTranscript = lastCompletedRun?.originalInput ?? lastCompletedRun?.input;
   if (typeof priorTranscript !== "string") return `User: ${newMessage}`;
-  return `${priorTranscript}\nAssistant: ${lastCompletedRun!.output}\nUser: ${newMessage}`;
+  return truncateTranscript(`${priorTranscript}\nAssistant: ${lastCompletedRun!.output}\nUser: ${newMessage}`);
 }
 
 /**

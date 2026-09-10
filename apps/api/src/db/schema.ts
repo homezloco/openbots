@@ -147,7 +147,7 @@ export const fanoutBatches = pgTable("fanout_batches", {
   aggregatorNodeId: uuid("aggregator_node_id").notNull(),
   totalBranches: integer("total_branches").notNull(),
   completedBranches: integer("completed_branches").notNull().default(0),
-  status: text("status").notNull().default("pending"), // "pending" | "completed" | "error"
+  status: text("status").notNull().default("pending"), // "pending" | "completed" | "partial" | "error"
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

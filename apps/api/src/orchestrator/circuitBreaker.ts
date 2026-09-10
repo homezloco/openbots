@@ -12,7 +12,14 @@ export class NodeTimeoutError extends Error {
   }
 }
 
-const DEFAULT_NODE_TIMEOUT_MS = 60_000;
+// 180s, not 90s: raising the tool-call step cap (engine.ts's
+// stepCountIs, 8 -> 20) only helps a real multi-file investigate-then-edit
+// task if there's also enough wall-clock time to spend those steps —
+// found by direct measurement after that change, where every branch of a
+// real consensus fan-out ran the full 90s and still got cut off before
+// finishing, worse than before (a total wipeout instead of a partial
+// success). The two caps have to move together.
+const DEFAULT_NODE_TIMEOUT_MS = 180_000;
 
 export async function withNodeTimeout<T>(
   nodeId: string,

@@ -23,11 +23,14 @@ import {
   createNodeFromExisting,
   createRun,
   createTemplate,
+  deleteEdge,
+  deleteNode,
   listAllAgents,
   listGraphs,
   quickAddAgent,
   rerouteEdge,
   updateGraph,
+  updateNode,
 } from "../lib/api";
 import { useRunEventsSocket } from "../lib/useRunEventsSocket";
 import { AgentConversationPanel } from "./AgentConversationPanel";
@@ -59,7 +62,7 @@ function toFlowEdges(graph: AgentGraph): Edge[] {
     id: e.id,
     source: e.sourceNodeId,
     target: e.targetNodeId,
-    label: e.label,
+    label: e.kind === "auto" ? (e.label || "auto") : e.label,
     style: edgeStyle(e.kind),
     type: "signal",
   })) as Edge[];
@@ -148,6 +151,7 @@ export function HierarchyCanvas({
   const [quickDescription, setQuickDescription] = useState("");
   const [quickBusy, setQuickBusy] = useState(false);
   const [connectFrom, setConnectFrom] = useState("");
+  const [newEdgeKind, setNewEdgeKind] = useState<"explicit" | "auto">("explicit");
   const [existingAgents, setExistingAgents] = useState<(AgentNode & { graphName: string })[] | null>(null);
   const [existingAgentId, setExistingAgentId] = useState("");
   const [existingBusy, setExistingBusy] = useState(false);
@@ -222,9 +226,14 @@ export function HierarchyCanvas({
       const gatewayNodes: Node[] = targets.map((t, i) => ({
         id: `${GATEWAY_NODE_PREFIX}${t.id}`,
         position: { x: i * 220, y: maxExistingY + 140 },
-        data: { label: `🔗 ${t.name}`, isGateway: true, targetGraphId: t.id },
+        data: {
+          label: `🔗 ${t.name}\n${t.nodeCount} agent${t.nodeCount === 1 ? "" : "s"} · click to open`,
+          isGateway: true,
+          targetGraphId: t.id,
+        },
         style: { border: "2px dashed var(--text-faint)", opacity: 0.85 },
         connectable: false,
+        deletable: false,
       }));
 
       const gatewayEdges: Edge[] = [];
@@ -260,13 +269,9 @@ export function HierarchyCanvas({
   }, [graph.nodes, graph.id]);
 
   /**
-   * Node positions aren't persisted anywhere today (dragging is purely
-   * local view state), so a rearrangement that gets confusing — nodes
-   * dragged far apart, long/crossed edges — has no way back except
-   * reloading the page. This snaps nodes/edges back to their real (DB)
-   * positions plus a freshly recomputed gateway row, and remounts
-   * <ReactFlow> (via resetCounter as its key) so the one-shot `fitView`
-   * prop re-fits the viewport too.
+   * Snaps nodes/edges back to last-saved DB positions, recomputes the
+   * gateway row, and remounts <ReactFlow> (via resetCounter as its key)
+   * so the one-shot `fitView` prop re-fits the viewport too.
    */
   const [resetCounter, setResetCounter] = useState(0);
   const resetLayout = useCallback(() => {
@@ -339,8 +344,7 @@ export function HierarchyCanvas({
       // the edges prop ReactFlow actually sees (edgesWithPulses below)
       // overwrites .data with { pulses } on every render, so a data-based
       // check here would never see isConsensusGather/isGatewayEdge.
-      if ((oldEdge.data as { isConsensusGather?: boolean } | undefined)?.isConsensusGather) return;
-      if (oldEdge.id.startsWith(GATEWAY_EDGE_PREFIX)) return;
+      if (oldEdge.id.startsWith("consensus-gather-") || oldEdge.id.startsWith(GATEWAY_EDGE_PREFIX)) return;
       setEdges((eds) => reconnectEdge(oldEdge, newConnection, eds));
       if (newConnection.target) {
         rerouteEdge(graph.id, oldEdge.id, newConnection.target).catch((err) => {
@@ -354,16 +358,30 @@ export function HierarchyCanvas({
   const onConnect = useCallback(
     (connection: Connection) => {
       if (!connection.source || !connection.target) return;
-      createEdge(graph.id, { sourceNodeId: connection.source, targetNodeId: connection.target, kind: "explicit" })
+      if (connection.source.startsWith(GATEWAY_NODE_PREFIX) || connection.target.startsWith(GATEWAY_NODE_PREFIX)) return;
+      createEdge(graph.id, { sourceNodeId: connection.source, targetNodeId: connection.target, kind: newEdgeKind })
         .then((edge) => {
-          setEdges((eds) => addEdge({ ...connection, id: edge.id, style: edgeStyle(edge.kind) }, eds));
+          setGraph((g) => ({ ...g, edges: [...g.edges, edge] }));
+          setEdges((eds) =>
+            addEdge(
+              {
+                ...connection,
+                id: edge.id,
+                label: edge.kind === "auto" ? "auto" : edge.label,
+                style: edgeStyle(edge.kind),
+                type: "signal",
+              },
+              eds,
+            ),
+          );
         })
         .catch((err) => console.error("Failed to create edge:", err));
     },
-    [graph.id, setEdges],
+    [graph.id, newEdgeKind, setEdges],
   );
 
   function appendNode(node: AgentNode) {
+    setGraph((g) => ({ ...g, nodes: [...g.nodes, node] }));
     setNodes((nds) => [
       ...nds,
       { id: node.id, position: node.position, data: { label: `${ROLE_ICON[node.role] ?? ""}${node.name}\n${node.provider}:${node.model}` } },
@@ -378,11 +396,22 @@ export function HierarchyCanvas({
     return { x: source.position.x + siblingCount * 220, y: source.position.y + 180 };
   }
 
-  /** If a "connects from" source is selected, wires the new node underneath it with an explicit edge. */
+  /** If a "connects from" source is selected, wires the new node underneath it using the toolbar edge kind. */
   async function connectIfRequested(newNode: AgentNode) {
     if (!connectFrom) return;
-    const edge = await createEdge(graph.id, { sourceNodeId: connectFrom, targetNodeId: newNode.id, kind: "explicit" });
-    setEdges((eds) => [...eds, { id: edge.id, source: edge.sourceNodeId, target: edge.targetNodeId, style: edgeStyle(edge.kind) }]);
+    const edge = await createEdge(graph.id, { sourceNodeId: connectFrom, targetNodeId: newNode.id, kind: newEdgeKind });
+    setGraph((g) => ({ ...g, edges: [...g.edges, edge] }));
+    setEdges((eds) => [
+      ...eds,
+      {
+        id: edge.id,
+        source: edge.sourceNodeId,
+        target: edge.targetNodeId,
+        label: edge.kind === "auto" ? "auto" : edge.label,
+        style: edgeStyle(edge.kind),
+        type: "signal",
+      },
+    ]);
   }
 
   async function addAgent() {
@@ -463,6 +492,57 @@ export function HierarchyCanvas({
 
   const [lastRunId, setLastRunId] = useState<string | null>(null);
   const [openAgentPanel, setOpenAgentPanel] = useState<string | null>(null);
+
+  function persistPosition(nodeId: string, position: { x: number; y: number }) {
+    if (nodeId.startsWith(GATEWAY_NODE_PREFIX)) return;
+    const current = graph.nodes.find((n) => n.id === nodeId);
+    if (!current || (current.position.x === position.x && current.position.y === position.y)) return;
+    updateNode(graph.id, nodeId, { position })
+      .then((updated) => {
+        setGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === updated.id ? updated : n)) }));
+      })
+      .catch((err) => console.error("Failed to persist position:", err));
+  }
+
+  async function persistNodeDeletes(deleted: Node[]) {
+    for (const n of deleted) {
+      if (n.id.startsWith(GATEWAY_NODE_PREFIX)) continue;
+      try {
+        await deleteNode(graph.id, n.id);
+        setGraph((g) => ({
+          ...g,
+          nodes: g.nodes.filter((x) => x.id !== n.id),
+          edges: g.edges.filter((e) => e.sourceNodeId !== n.id && e.targetNodeId !== n.id),
+          entryNodeId: g.entryNodeId === n.id ? null : g.entryNodeId,
+        }));
+        setOpenAgentPanel((current) => (current === n.id ? null : current));
+      } catch (err) {
+        console.error("Failed to delete node:", err);
+        setNodes((nds) => (nds.some((x) => x.id === n.id) ? nds : [...nds, n]));
+      }
+    }
+  }
+
+  async function persistEdgeDeletes(deleted: Edge[]) {
+    for (const e of deleted) {
+      if (e.id.startsWith(GATEWAY_EDGE_PREFIX) || e.id.startsWith("consensus-gather-")) continue;
+      try {
+        await deleteEdge(graph.id, e.id);
+        setGraph((g) => ({ ...g, edges: g.edges.filter((x) => x.id !== e.id) }));
+      } catch (err) {
+        // Node delete already cascaded this row — React Flow still fires
+        // onEdgesDelete for the local edges it removed alongside the node.
+        const message = err instanceof Error ? err.message : "";
+        if (/not found/i.test(message)) {
+          setGraph((g) => ({ ...g, edges: g.edges.filter((x) => x.id !== e.id) }));
+          continue;
+        }
+        console.error("Failed to delete edge:", err);
+        setEdges((eds) => (eds.some((x) => x.id === e.id) ? eds : [...eds, e]));
+      }
+    }
+  }
+
   const [showSchedules, setShowSchedules] = useState(false);
   const [showGitHub, setShowGitHub] = useState(false);
   const [runInputOpen, setRunInputOpen] = useState(false);
@@ -483,7 +563,9 @@ export function HierarchyCanvas({
 
   /** Keeps both graph state (source of truth for settings) and the canvas label in sync after an edit. */
   function handleNodeUpdated(updated: AgentNode) {
-    setGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === updated.id ? updated : n)) }));
+    const next = { ...graph, nodes: graph.nodes.map((n) => (n.id === updated.id ? updated : n)) };
+    setGraph(next);
+    setEdges((eds) => [...toFlowEdges(next), ...eds.filter((e) => e.id.startsWith(GATEWAY_EDGE_PREFIX))]);
     setNodes((nds) =>
       nds.map((n) =>
         n.id === updated.id
@@ -521,6 +603,13 @@ export function HierarchyCanvas({
 
       <div style={{ display: "flex", gap: 8, padding: 8, borderBottom: "1px solid var(--border)", alignItems: "center" }}>
         <button onClick={() => setShowAddAgent((s) => !s)}>+ Add agent</button>
+        <label style={{ fontSize: 13, color: "var(--text-muted)" }} title="Kind used when you drag a new connection between nodes, or when Add agent uses Connects from">
+          New edges:
+          <select value={newEdgeKind} onChange={(e) => setNewEdgeKind(e.target.value as "explicit" | "auto")} style={{ marginLeft: 4 }}>
+            <option value="explicit">explicit (always this path)</option>
+            <option value="auto">auto (match description)</option>
+          </select>
+        </label>
         <label>
           Entry:
           <select value={graph.entryNodeId ?? ""} onChange={(e) => setEntry(e.target.value)} style={{ marginLeft: 4 }}>
@@ -611,7 +700,7 @@ export function HierarchyCanvas({
         >
           🐙 GitHub
         </button>
-        <button type="button" onClick={resetLayout} title="Snap nodes back to their saved positions and re-fit the view">
+        <button type="button" onClick={resetLayout} title="Re-fit the view and restore the gateway row from saved positions">
           ↺ Reset layout
         </button>
         <a href={`/runs?graphId=${graph.id}`}>View runs</a>
@@ -782,6 +871,19 @@ export function HierarchyCanvas({
           nodeExtent={nodeExtent}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
+          onNodeDragStop={(_, node) => persistPosition(node.id, node.position)}
+          onBeforeDelete={async ({ nodes: delNodes }) => {
+            const real = delNodes.filter((n) => !n.id.startsWith(GATEWAY_NODE_PREFIX));
+            if (real.length === 0) return true;
+            const names = real.map((n) => graph.nodes.find((g) => g.id === n.id)?.name ?? n.id).join(", ");
+            return window.confirm(`Delete ${names}? Connected edges will be removed.`);
+          }}
+          onNodesDelete={(deleted) => {
+            void persistNodeDeletes(deleted);
+          }}
+          onEdgesDelete={(deleted) => {
+            void persistEdgeDeletes(deleted);
+          }}
           onReconnect={onReconnect}
           // The default 10px activation zone around an edge's endpoint is
           // too fiddly to hit reliably — the drag-mid-run demo literally
@@ -816,9 +918,21 @@ export function HierarchyCanvas({
         {openAgentNode && (
           <AgentConversationPanel
             graphId={graph.id}
+            graph={graph}
             node={openAgentNode}
             onClose={() => setOpenAgentPanel(null)}
             onNodeUpdated={handleNodeUpdated}
+            onNodeDeleted={(nodeId) => {
+              setGraph((g) => ({
+                ...g,
+                nodes: g.nodes.filter((n) => n.id !== nodeId),
+                edges: g.edges.filter((e) => e.sourceNodeId !== nodeId && e.targetNodeId !== nodeId),
+                entryNodeId: g.entryNodeId === nodeId ? null : g.entryNodeId,
+              }));
+              setNodes((nds) => nds.filter((n) => n.id !== nodeId));
+              setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
+              setOpenAgentPanel(null);
+            }}
           />
         )}
         {showSchedules && <SchedulesPanel graphId={graph.id} onClose={() => setShowSchedules(false)} />}

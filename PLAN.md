@@ -756,6 +756,41 @@ than another cloud provider would be.
 7. `manage_target_graphs`'s *reach* is now visible on the canvas (gateway nodes, above), but the six tools themselves still have no visual affordance for what an agent actually *did* — no "see what changed in graph X" diff view yet, beyond the existing `GET /graphs/:id/routing-changes` audit trail, which still has no page consuming it.
 8. No breadcrumb/"back to parent" link on a gateway-target graph's own canvas — the browser Back button works (gateway navigation pushes a real history entry), but there's no on-canvas affordance, deliberately: a graph can be a dispatch target of more than one parent, so there's no single "the" parent to hard-code a link to.
 
+## Depth demo (not the live-reroute GIF — 2026-09-11)
+
+The 11-second live-reroute GIF is the differentiator (one edge, three
+nodes). A second artifact should show that graphs nest, without stuffing
+an org onto one canvas — that's the lesson from splitting the flat
+11-node Engineering Team into 9 graphs. A "1 master + 2 leads of 6"
+hairball on a single graph is the wrong demo: unreadable, and it
+unteaches the architecture.
+
+**Do, when recording / building the second starter:**
+
+- A fictional **agency starter**, separate from the live-reroute demo:
+  one Portfolio graph (Lead + two gateway nodes) and two team graphs
+  (Lead + 3 specialists each — Backend / Frontend / Reviewer is enough;
+  six per lead is dogfood, not a first look). Clicking a gateway
+  navigates into that team's own canvas. No real business names.
+- A short **GIF of that click-through** (Portfolio → dashed gateway →
+  the team's own canvas) for the README / Product Hunt gallery.
+  Landscape if possible; the reroute GIF is portrait because it was a
+  half-width recording.
+- A **size cue on gateway nodes** (how many agents live in the target
+  graph) so the dashed node doesn't look like a dead end.
+  `listGraphs` already returns `nodeCount` — this is a label, not a new
+  API. (Shipped with the canvas-affordance work the same day: gateway
+  labels now include the target's agent count.)
+
+Record the GIF after a stranger can create `auto` edges on the canvas
+(otherwise they cannot rebuild what they're watching). The agency
+starter itself is still unbuilt — Dashboard still only has the
+three-node live-reroute demo.
+
+Enterprise buyers will still ask SSO/RBAC, MCP, and exportable audit
+after they understand the org chart — those stay in the gaps/roadmap
+below, not in this demo.
+
 ## Competitive notes (xAI Grok Bot / Grok Build, researched 2026-09)
 
 - Grok Bot: conversational bot creation (name, color/shape, one-line job

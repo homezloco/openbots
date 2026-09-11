@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { AgentNode, ProviderId } from "@openbots/graph-schema";
-import { listGraphs, updateNode, type GraphSummary } from "../lib/api";
+import type { AgentGraph, AgentNode, ProviderId } from "@openbots/graph-schema";
+import { deleteNode, listGraphs, updateNode, type GraphSummary } from "../lib/api";
 import { PROVIDERS, ROLES } from "./HierarchyCanvas";
 
 const TIERS: AgentNode["tier"][] = [undefined, "economy", "standard", "flagship"];
@@ -21,14 +21,18 @@ const REMOTE_TOOL = "run_remote_command";
  */
 export function AgentSettingsForm({
   graphId,
+  graph,
   node,
   onSaved,
   onCancel,
+  onDeleted,
 }: {
   graphId: string;
+  graph: AgentGraph;
   node: AgentNode;
   onSaved: (updated: AgentNode) => void;
   onCancel: () => void;
+  onDeleted?: () => void;
 }) {
   const [form, setForm] = useState({
     name: node.name,
@@ -53,7 +57,14 @@ export function AgentSettingsForm({
   const [allowedCommands, setAllowedCommands] = useState(node.sshTarget?.allowedCommands ?? []);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const outgoing = graph.edges.filter((e) => e.sourceNodeId === node.id);
+  const [fanoutEnabled, setFanoutEnabled] = useState(Boolean(node.consensusGroup));
+  const [aggregatorId, setAggregatorId] = useState(node.consensusGroup?.aggregatorNodeId ?? "");
+  const [fanoutEdgeIds, setFanoutEdgeIds] = useState<string[]>(
+    node.consensusGroup?.edgeIds ?? outgoing.filter((e) => e.kind === "auto").map((e) => e.id),
+  );
 
   useEffect(() => {
     listGraphs()
@@ -76,6 +87,10 @@ export function AgentSettingsForm({
     }
     if (remoteCommandEnabled && (!sshHost.trim() || !sshUsername.trim() || allowedCommands.length === 0)) {
       setError("Fill in a host, username, and at least one command, or turn off remote commands.");
+      return;
+    }
+    if (fanoutEnabled && (!aggregatorId || fanoutEdgeIds.length === 0)) {
+      setError("ALL fan-out needs an aggregator node and at least one outgoing edge.");
       return;
     }
     setSaving(true);
@@ -110,6 +125,7 @@ export function AgentSettingsForm({
         sshTarget: remoteCommandEnabled
           ? { host: sshHost.trim(), username: sshUsername.trim(), allowedCommands }
           : null,
+        consensusGroup: fanoutEnabled ? { aggregatorNodeId: aggregatorId, edgeIds: fanoutEdgeIds } : null,
       });
       onSaved(updated);
     } catch (err) {
@@ -320,6 +336,74 @@ export function AgentSettingsForm({
         </div>
       )}
 
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          type="checkbox"
+          checked={fanoutEnabled}
+          onChange={(e) => {
+            const on = e.target.checked;
+            setFanoutEnabled(on);
+            if (on && fanoutEdgeIds.length === 0) {
+              setFanoutEdgeIds(outgoing.filter((edge) => edge.kind === "auto").map((edge) => edge.id));
+            }
+          }}
+        />
+        <span>
+          Fan out with ALL{" "}
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            (hybrid: normal auto routing unless the model starts its reply with ALL, then every selected edge runs and
+            the aggregator joins)
+          </span>
+        </span>
+      </label>
+
+      {fanoutEnabled && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginLeft: 24 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Aggregator
+            <select value={aggregatorId} onChange={(e) => setAggregatorId(e.target.value)}>
+              <option value="">Select…</option>
+              {graph.nodes
+                .filter((n) => n.id !== node.id)
+                .map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+          {outgoing.length === 0 ? (
+            <span style={{ color: "var(--text-faint)", fontSize: 13 }}>
+              Draw outgoing edges from this node first (use New edges: auto for specialists).
+            </span>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Edges included in ALL</span>
+              {outgoing.map((edge) => {
+                const target = graph.nodes.find((n) => n.id === edge.targetNodeId);
+                return (
+                  <label key={edge.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                    <input
+                      type="checkbox"
+                      checked={fanoutEdgeIds.includes(edge.id)}
+                      onChange={() =>
+                        setFanoutEdgeIds((ids) =>
+                          ids.includes(edge.id) ? ids.filter((id) => id !== edge.id) : [...ids, edge.id],
+                        )
+                      }
+                    />
+                    <span>
+                      {target?.name ?? edge.targetNodeId}{" "}
+                      <span style={{ color: "var(--text-faint)" }}>({edge.kind})</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       <button type="button" onClick={() => setShowAdvanced((s) => !s)} style={{ alignSelf: "flex-start" }}>
         {showAdvanced ? "Hide" : "Show"} advanced (fallback chain)
       </button>
@@ -367,13 +451,34 @@ export function AgentSettingsForm({
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-        <button onClick={save} disabled={saving}>
+      <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+        <button onClick={save} disabled={saving || deleting}>
           {saving ? "Saving…" : "Save"}
         </button>
-        <button type="button" onClick={onCancel} disabled={saving}>
+        <button type="button" onClick={onCancel} disabled={saving || deleting}>
           Cancel
         </button>
+        {onDeleted && (
+          <button
+            type="button"
+            disabled={saving || deleting}
+            onClick={async () => {
+              if (!window.confirm(`Delete ${node.name}? Connected edges will be removed.`)) return;
+              setDeleting(true);
+              setError(null);
+              try {
+                await deleteNode(graphId, node.id);
+                onDeleted();
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Failed to delete");
+                setDeleting(false);
+              }
+            }}
+            style={{ marginLeft: "auto", color: "var(--danger)", background: "transparent", border: "1px solid var(--border)" }}
+          >
+            {deleting ? "Deleting…" : "Delete agent"}
+          </button>
+        )}
       </div>
     </div>
   );

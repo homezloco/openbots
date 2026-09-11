@@ -106,7 +106,7 @@ export interface CreateNodeInput {
   tools?: string[];
   fileAccessRoot?: string;
   fallbackChain?: AgentNode["fallbackChain"];
-  consensusGroup?: AgentNode["consensusGroup"];
+  consensusGroup?: AgentNode["consensusGroup"] | null;
   dispatchTargets?: string[];
   sshTarget?: AgentNode["sshTarget"];
   position: { x: number; y: number };
@@ -117,6 +117,9 @@ export const createNode = (graphId: string, body: CreateNodeInput) =>
 
 export const updateNode = (graphId: string, nodeId: string, body: Partial<CreateNodeInput>) =>
   request<AgentNode>(`/graphs/${graphId}/nodes/${nodeId}`, { method: "PATCH", body: JSON.stringify(body) });
+
+export const deleteNode = (graphId: string, nodeId: string) =>
+  request<void>(`/graphs/${graphId}/nodes/${nodeId}`, { method: "DELETE" });
 
 export const listAllAgents = () => request<(AgentNode & { graphName: string })[]>("/agents");
 

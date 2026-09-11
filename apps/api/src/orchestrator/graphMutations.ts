@@ -161,7 +161,13 @@ export async function updateAgentNode(
     .where(and(eq(agentNodes.id, nodeId), eq(agentNodes.graphId, graphId)))
     .returning();
 
-  await recordChange(graphId, "node_updated", before, after);
+  // Layout drags are not routing edits — don't spam the audit trail with
+  // a row per onNodeDragStop. Anything that actually changed config still
+  // records as before.
+  const configKeys = Object.keys(rest).filter((k) => (rest as Record<string, unknown>)[k] !== undefined);
+  if (configKeys.length > 0) {
+    await recordChange(graphId, "node_updated", before, after);
+  }
   return { ok: true, value: nodeRowToAgentNode(after) };
 }
 

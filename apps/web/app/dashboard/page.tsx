@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createGraph, createLiveRerouteExample, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
+import { createGraph, createLiveRerouteExample, deleteGraph, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
 import { extractLatestUserMessage, useBotChat } from "../../lib/useBotChat";
 import { useAuth } from "../../components/AuthProvider";
 import { HierarchyChat } from "../../components/HierarchyChat";
@@ -84,6 +84,21 @@ export default function DashboardPage() {
     }
   }
 
+  async function removeGraph(id: string, name: string) {
+    if (!window.confirm(`Delete graph “${name}”? This cannot be undone.`)) return;
+    setError(null);
+    try {
+      await deleteGraph(id);
+      const gs = await refreshGraphs();
+      setSelectedId((current) => {
+        if (current !== id) return current;
+        return gs[0]?.id ?? null;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete graph");
+    }
+  }
+
   async function createDemo() {
     setCreatingDemo(true);
     setError(null);
@@ -142,11 +157,11 @@ export default function DashboardPage() {
 
         <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 4 }}>
           {graphs.map((g) => (
-            <li key={g.id}>
+            <li key={g.id} style={{ display: "flex", gap: 4, alignItems: "center" }}>
               <button
                 onClick={() => setSelectedId(g.id)}
                 style={{
-                  width: "100%",
+                  flex: 1,
                   textAlign: "left",
                   padding: 8,
                   background: g.id === selectedId ? "var(--bg-hover)" : "transparent",
@@ -158,6 +173,16 @@ export default function DashboardPage() {
               >
                 {g.name} <small style={{ color: "var(--text-faint)" }}>({g.nodeCount} agent{g.nodeCount === 1 ? "" : "s"})</small>
               </button>
+              {g.id === selectedId && (
+                <button
+                  type="button"
+                  title="Delete this graph"
+                  onClick={() => removeGraph(g.id, g.name)}
+                  style={{ background: "transparent", color: "var(--text-faint)", border: "1px solid var(--border)", padding: "4px 8px" }}
+                >
+                  ×
+                </button>
+              )}
             </li>
           ))}
         </ul>

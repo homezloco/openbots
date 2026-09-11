@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { AgentNode } from "@openbots/graph-schema";
+import type { AgentGraph, AgentNode } from "@openbots/graph-schema";
 import { fetchAgentConversations, type AgentConversation } from "../lib/api";
 import { AgentSettingsForm } from "./AgentSettingsForm";
 import { RunEventTrail } from "./RunEventTrail";
@@ -16,14 +16,18 @@ import { RunEventTrail } from "./RunEventTrail";
  */
 export function AgentConversationPanel({
   graphId,
+  graph,
   node,
   onClose,
   onNodeUpdated,
+  onNodeDeleted,
 }: {
   graphId: string;
+  graph: AgentGraph;
   node: AgentNode;
   onClose: () => void;
   onNodeUpdated: (updated: AgentNode) => void;
+  onNodeDeleted: (nodeId: string) => void;
 }) {
   const [view, setView] = useState<"history" | "settings">("history");
   const [nodeNames, setNodeNames] = useState<Record<string, string>>({});
@@ -98,12 +102,14 @@ export function AgentConversationPanel({
         <div style={{ flex: 1, overflowY: "auto" }}>
           <AgentSettingsForm
             graphId={graphId}
+            graph={graph}
             node={node}
             onCancel={() => setView("history")}
             onSaved={(updated) => {
               onNodeUpdated(updated);
               setView("history");
             }}
+            onDeleted={() => onNodeDeleted(node.id)}
           />
         </div>
       ) : (

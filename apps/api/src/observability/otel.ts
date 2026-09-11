@@ -116,10 +116,16 @@ export function finishHopSpan(
     if (result.outputChars !== undefined) span.setAttribute("openbots.output_chars", result.outputChars);
     span.setStatus({ code: SpanStatusCode.OK });
   } else {
-    span.setAttribute("openbots.error", result.error.slice(0, 200));
-    span.setStatus({ code: SpanStatusCode.ERROR, message: result.error.slice(0, 200) });
+    const error = redact(result.error).slice(0, 200);
+    span.setAttribute("openbots.error", error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: error });
   }
   span.end();
+}
+
+/** Same pattern as orchestrator/mcpTool.ts's redact: spans can leave the process via OTLP, so a raw provider/tool error must not carry a bearer token or Authorization header. */
+function redact(message: string): string {
+  return message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/(Authorization:\s*)\S+/gi, "$1[redacted]");
 }
 
 export function recordRunFinished(args: {

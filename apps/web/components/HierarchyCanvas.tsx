@@ -467,6 +467,14 @@ export function HierarchyCanvas({
   const [showGitHub, setShowGitHub] = useState(false);
   const [runInputOpen, setRunInputOpen] = useState(false);
   const [runInput, setRunInput] = useState("");
+  // Defaults on: this canvas is the interactive "watch it happen" view, and
+  // dragging an edge to reroute is invisible unless the run re-resolves
+  // against the live graph on each hop (dispatchHop only does that for
+  // mode: "live" — "pinned", the API default, snapshots the graph once at
+  // creation and ignores edits afterward). Previously createRun() here
+  // never passed a mode at all, so mid-run reroutes from the main canvas
+  // silently did nothing.
+  const [liveMode, setLiveMode] = useState(true);
   const [templateInputOpen, setTemplateInputOpen] = useState(false);
   const [templateName, setTemplateName] = useState("");
   const [quickAddError, setQuickAddError] = useState<string | null>(null);
@@ -488,7 +496,7 @@ export function HierarchyCanvas({
   /** Stays on the canvas to watch the live pulse instead of navigating away — the whole point of the animation is seeing it happen here. */
   async function startRun() {
     if (!runInput.trim() || !graph.entryNodeId) return;
-    const run = await createRun(graph.id, runInput.trim());
+    const run = await createRun(graph.id, runInput.trim(), liveMode ? "live" : "pinned");
     setLastRunId(run.id);
     setRunInput("");
     setRunInputOpen(false);
@@ -539,6 +547,10 @@ export function HierarchyCanvas({
               <button onClick={startRun} disabled={!runInput.trim() || !graph.entryNodeId}>
                 Run
               </button>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, color: "var(--text-faint)" }} title="Re-resolves routing against the live graph on every hop, so dragging an edge mid-run actually reroutes it. Turn off to snapshot the graph once at start instead.">
+                <input type="checkbox" checked={liveMode} onChange={(e) => setLiveMode(e.target.checked)} />
+                Live
+              </label>
               <button
                 type="button"
                 onClick={() => {

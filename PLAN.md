@@ -715,6 +715,36 @@ CI hadn't run enough times back-to-back before to surface the base rate.
 Don't read a single red run as a regression without checking which test
 failed and whether it's one of these two.
 
+## Live-mode gap on the canvas + non-Anthropic positioning check (2026-09-10)
+
+Two pre-launch checklist items from the go-to-market memo closed this
+session; the first surfaced a real product bug, not just a demo gap.
+
+**Canvas runs silently couldn't be rerouted.** Found while preparing the
+mid-run-reroute demo recording: `HierarchyCanvas`'s "▶ Start run" button
+called `createRun(graph.id, input)` with no mode argument, and
+`createRun` defaults to `"pinned"` — the mode that snapshots the graph
+once at creation and ignores every later edit. The only place `live` was
+selectable anywhere in the web UI was `SchedulesPanel`. So the flagship
+feature — drag an edge mid-run and watch the next hop go to the new
+target — was unreachable from the main canvas screen a user would
+naturally demo it from. Fixed: the run control now shows a "Live"
+checkbox (defaulted on, since this canvas is the interactive
+watch-it-happen view and pinned remains available for a stable snapshot),
+passing `liveMode ? "live" : "pinned"` to `createRun`. e2e note: the
+mid-run-reroute e2e case was never affected — it passes `mode: "live"`
+explicitly via the API, which is why this UI-only gap never failed a
+test.
+
+**"Model-agnostic" is now a demonstrated claim, not just a built one.**
+Ran a real end-to-end graph on the `openai-compatible` provider pointed
+at a locally-running Ollama instance (`gemma4:e4b`,
+`OPENAI_COMPATIBLE_BASE_URL=http://localhost:11434/v1`, dummy
+`OPENAI_COMPATIBLE_API_KEY` — Ollama doesn't check it): graph run
+completed through the worker container with zero cloud API key and zero
+vendor involvement. A local-model demo is a stronger BYOK proof point
+than another cloud provider would be.
+
 ## Known gaps (honest list)
 
 1. ~~The containerized `web` Docker image has never successfully built in this environment~~ — fixed 2026-09-10, see "Pre-launch hardening" below. Local `pnpm --filter @openbots/web build && start` against the dockerized API remains a valid fallback if a build ever hits the same network flakiness again.

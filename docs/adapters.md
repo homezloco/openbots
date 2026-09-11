@@ -79,3 +79,20 @@ shape as `pc_telemetry` / `business_metrics`.
 
 stdio MCP, OpenBots-as-MCP-server, resources/prompts/sampling, and OAuth
 browser flows are all out of scope.
+
+## Built-in tools
+
+The registry is a small allowlist, not dynamic npm plugins. File tools
+need both the tool name on the node *and* a configured root inside the
+matching operator allowlist.
+
+| Tool | Where it lives | Notes |
+|---|---|---|
+| `calculator`, `current_time` | `packages/providers` | Always safe. |
+| `read_file`, `list_directory` | `packages/providers` | `ALLOWED_FILE_ACCESS_ROOTS`; empty-deny. |
+| `write_file`, `edit_file` | `packages/providers` | Separate `ALLOWED_FILE_WRITE_ROOTS`; isolated git worktree. |
+| `pc_telemetry` | `packages/providers` | Read-only WebSocket to a local monitor. |
+| `business_metrics` | `apps/api` | Account `metrics_<slug>` credentials at `/settings`. |
+| `dispatch_to_graph`, `check_dispatch_status`, `manage_target_graphs` | `apps/api` | Cross-graph; ownership re-checked at call time. |
+| `run_remote_command` | `apps/api` | `ALLOWED_SSH_HOSTS` + per-node command labels. |
+| `mcp` + `mcpServers[]` | `apps/api` | Remote MCP client; `ALLOWED_MCP_SERVERS`; namespaced `mcp_<slug>_<tool>`. |

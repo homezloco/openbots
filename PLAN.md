@@ -5,31 +5,20 @@ differentiator: a live, editable canvas of the agent hierarchy and routing —
 no product in the "AI bot" space currently ships one (see Competitive
 notes below).
 
-**Status as of 2026-09-09: all three original phases are built and
-e2e-tested (65/65 passing, `apps/api/e2e/run.ts`), four security review
-passes found and fixed real vulnerabilities, dark mode shipped, and the product
-grew past the original scope into a working multi-agent "engineering
-team" built from the user's own real projects — now with live run
-visualization, per-agent conversation history, a unified Dashboard
-experience, agents that can actually write code and (on explicit
-`/push`/`/pr` confirmation, over HTTPS+PAT or SSH) push it and open a PR,
-graphs that can run themselves on a recurring cron schedule, one graph
-that can fire work into another it owns, a canvas UI for configuring that
-cross-graph reach, a GitHub tab (commits/push/PR status/diffs) replacing
-the old Commits panel, real supervisor control letting one graph fully
-edit and query the outcome of graphs it dispatches into, and agents that
-can read real conversion/revenue/traffic numbers instead of only
-chat-supplied ones (see "Live visualization, agent reuse, and dashboard
-unification", "Agent file-write and confirmed push", "Scheduled runs",
-"Cross-graph dispatch and business metrics", and "GitHub tab and
-cross-graph supervisor control" below). OpenBots itself now also has a
-graph in its own dashboard (dogfooding — see that section), and every
-file-scoped agent is now automatically told to read its project's
-`CLAUDE.md` when one exists, engine-level rather than per-prompt (see
-"Context consistency across agents"). The Hierarchy canvas now visualizes
-cross-graph dispatch/manage reach too, and CI is fixed after having
-silently failed on every run (see "Cross-graph hierarchy on the canvas"
-and "CI" below). See "Known gaps" at the bottom for what's still actually
+**Status as of 2026-09-11: all three original phases are built and
+e2e-tested (`apps/api/e2e/run.ts`, real Anthropic calls, no mocks), four
+security review passes found and fixed real vulnerabilities, dark mode
+shipped, and the product grew past the original scope into a working
+multi-agent "engineering team" — live run visualization, per-agent
+conversation history, a unified Dashboard, agents that write code and
+(on explicit `/push`/`/pr`) push it, scheduled runs, cross-graph
+dispatch/manage with gateway nodes on the canvas, a GitHub tab, and
+`business_metrics` from per-account `metrics_<slug>` logins at
+`/settings`. An MCP **client** (Streamable HTTP / SSE, operator
+`ALLOWED_MCP_SERVERS` empty-deny) shipped as PRs 1–2; the settings UI
+for it (PR 3) is still unbuilt. Live-mode reroute now re-reads the graph
+*after* the in-flight model call, which is what the README GIF is
+showing. See "Known gaps" at the bottom for what's still actually
 missing.**
 
 ## Phase 1 — MVP

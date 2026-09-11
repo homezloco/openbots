@@ -26,11 +26,15 @@ while run.status == "active":
 - **`pinned`** (default): the graph is snapshotted into `runs.graphSnapshot`
   when the run starts. Deterministic and replayable — a routing edit made
   after the run started has no effect on it.
-- **`live`**: `resolveNextHop` reads the current graph from Postgres on
-  every hop, so canvas edits affect the run immediately (on its next hop).
+- **`live`**: after each in-flight model call returns, `dispatchHop`
+  re-reads the current graph from Postgres and *then* calls
+  `resolveNextHop`, so a canvas edit made while a hop was generating is
+  picked up for the next hop. (Loading the graph only at hop *start*
+  ignored mid-call reroutes — a real e2e failure.) `pinned` still uses
+  the snapshot.
 
-Ship and default to `pinned` first; treat `live` as an opt-in per-run flag
-once the lazy-resolution loop above is proven in practice.
+Default new runs to `pinned` unless you actually want live reroutes;
+the live-reroute demo on the Dashboard starts in `live`.
 
 ## `explicit` vs `auto` edges
 

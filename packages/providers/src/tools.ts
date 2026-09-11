@@ -301,6 +301,11 @@ export function listAvailableTools(): { name: string; description: string; requi
   // for any future tool-picker UI, never constructed by resolveTools().
   const crossServiceTools = [
     {
+      name: "mcp",
+      description: "Call tools on operator-allowlisted remote MCP servers configured on this node.",
+      requiresFileAccessRoot: false,
+    },
+    {
       name: "dispatch_to_graph",
       description: "Fire-and-forget: start a run in another graph you own, without waiting for its result.",
       requiresFileAccessRoot: false,

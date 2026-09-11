@@ -95,6 +95,23 @@ export const SshTarget = z.object({
 });
 export type SshTarget = z.infer<typeof SshTarget>;
 
+/**
+ * One remote MCP server this node may call tools on. Dual-gate with
+ * `"mcp"` in `tools[]`: this list alone grants nothing, and `"mcp"`
+ * without servers is a no-op. URLs are re-checked against the operator
+ * ALLOWED_MCP_SERVERS prefix allowlist at save AND at hop time (SSRF).
+ * `allowedTools` is an exact-name allowlist of that server's MCP tools
+ * — empty means zero tools, not all of them. Tokens live in
+ * user_credentials (credentialProvider), never in this object.
+ */
+export const McpServer = z.object({
+  slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/, "slug must be 1-32 lowercase letters, digits, or hyphens"),
+  url: z.string().url(),
+  allowedTools: z.array(z.string().min(1)).default([]),
+  credentialProvider: z.string().min(1).optional(),
+});
+export type McpServer = z.infer<typeof McpServer>;
+
 export const AgentNode = z.object({
   id: z.string().uuid(),
   graphId: z.string().uuid(),
@@ -138,6 +155,11 @@ export const AgentNode = z.object({
    * access regardless of what's in `tools`.
    */
   sshTarget: SshTarget.nullable().optional(),
+  /**
+   * Remote MCP servers this node may call, dual-gated with `"mcp"` in
+   * tools[] — see McpServer. Unset/empty means no MCP access.
+   */
+  mcpServers: z.array(McpServer).optional(),
   position: CanvasPosition,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

@@ -822,6 +822,9 @@ the prioritization survives past this session.
   server, the same shape as `pc_telemetry`'s WebSocket or
   `dispatch_to_graph`'s cross-graph call, not code loading into the API
   process. Single biggest ecosystem-compatibility gap found.
+  **PR 1 (schema + `ALLOWED_MCP_SERVERS` empty-deny allowlist + drop on
+  copy) shipped 2026-09-11.** Runtime client + echo fixture (PR 2) and
+  settings UI (PR 3) still unbuilt. stdio remains forbidden.
 - ~~`useBotChat.ts::buildNextInput` has no memory bound~~ — fixed
   2026-09-10, pulled to the top of the list ahead of the rest of this
   roadmap since it was a live bug, not just a gap: a long-running bot's

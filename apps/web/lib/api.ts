@@ -112,6 +112,7 @@ export interface CreateNodeInput {
   consensusGroup?: AgentNode["consensusGroup"] | null;
   dispatchTargets?: string[];
   sshTarget?: AgentNode["sshTarget"];
+  mcpServers?: AgentNode["mcpServers"] | null;
   position: { x: number; y: number };
 }
 

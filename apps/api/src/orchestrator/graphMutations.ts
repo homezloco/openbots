@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { AgentRole, ConsensusGroup, FallbackTarget, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
+import { AgentRole, ConsensusGroup, FallbackTarget, McpServer, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
 import { agentGraphs, agentNodes, routingEdges } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
@@ -8,6 +8,7 @@ import { nodeRowToAgentNode } from "./engine.js";
 import { checkFileAccessRootAllowed, checkWriteRootAllowed, fileAccessRootSchema } from "../validation/fileAccessRoot.js";
 import { checkDispatchTargetsOwned } from "../validation/dispatchTargets.js";
 import { checkSshTargetAllowed } from "../validation/sshTarget.js";
+import { checkMcpServersAllowed } from "../validation/mcpServer.js";
 
 /**
  * The node/edge mutation core, shared by the HTTP routes (routes/graphs.ts)
@@ -43,6 +44,8 @@ export const createNodeBody = z.object({
   // to explicitly clear a previously-set sshTarget, not just leave it
   // unchanged or replace it with a new one.
   sshTarget: SshTarget.nullable().optional(),
+  // .nullable() so PATCH can clear MCP config the same way as sshTarget.
+  mcpServers: z.array(McpServer).nullable().optional(),
   position: z.object({ x: z.number(), y: z.number() }),
 });
 
@@ -81,6 +84,7 @@ export async function insertAgentNode(graphId: string, body: CreateNodeBody) {
       consensusGroup: body.consensusGroup ?? null,
       dispatchTargets: body.dispatchTargets ?? null,
       sshTarget: body.sshTarget ?? null,
+      mcpServers: body.mcpServers ?? null,
       positionX: body.position.x,
       positionY: body.position.y,
     })
@@ -112,6 +116,8 @@ export async function insertAgentNodeValidated(
   if (dispatchError) return { ok: false, status: 400, error: dispatchError };
   const sshError = checkSshTargetAllowed(body.sshTarget);
   if (sshError) return { ok: false, status: 400, error: sshError };
+  const mcpError = checkMcpServersAllowed(body.mcpServers);
+  if (mcpError) return { ok: false, status: 400, error: mcpError };
   return { ok: true, value: await insertAgentNode(graphId, body) };
 }
 
@@ -149,6 +155,11 @@ export async function updateAgentNode(
     body.sshTarget !== undefined ? body.sshTarget : (before.sshTarget as SshTarget | null | undefined);
   const sshError = checkSshTargetAllowed(effectiveSshTarget);
   if (sshError) return { ok: false, status: 400, error: sshError };
+
+  const effectiveMcpServers =
+    body.mcpServers !== undefined ? body.mcpServers : (before.mcpServers as McpServer[] | null | undefined);
+  const mcpError = checkMcpServersAllowed(effectiveMcpServers);
+  if (mcpError) return { ok: false, status: 400, error: mcpError };
 
   const { position, ...rest } = body;
   const [after] = await db

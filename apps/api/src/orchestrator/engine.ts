@@ -736,6 +736,7 @@ export function nodeRowToAgentNode(n: typeof agentNodes.$inferSelect): AgentNode
     consensusGroup: (n.consensusGroup as AgentNode["consensusGroup"]) ?? undefined,
     dispatchTargets: (n.dispatchTargets as string[] | null) ?? undefined,
     sshTarget: (n.sshTarget as AgentNode["sshTarget"]) ?? undefined,
+    mcpServers: (n.mcpServers as AgentNode["mcpServers"]) ?? undefined,
     position: { x: n.positionX, y: n.positionY },
     createdAt: n.createdAt.toISOString(),
     updatedAt: n.updatedAt.toISOString(),

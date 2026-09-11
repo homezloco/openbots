@@ -838,6 +838,102 @@ async function main() {
     assert(created.status === 400, `expected 400 rejecting an out-of-allowlist root, got ${created.status}: ${JSON.stringify(created.body)}`);
   });
 
+  await test("security: mcpServers url outside ALLOWED_MCP_SERVERS is rejected", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E security mcp url" }) });
+    const graphId = g.body.id;
+    const created = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Ssrf",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Call MCP tools.",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "meta", url: "http://169.254.169.254/latest/meta-data", allowedTools: ["echo"] }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(created.status === 400, `expected 400 rejecting an out-of-allowlist MCP url, got ${created.status}: ${JSON.stringify(created.body)}`);
+  });
+
+  await test("security: mcpServers with credentials in the url is rejected", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E security mcp userinfo" }) });
+    const created = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Leak",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "echo", url: "http://user:pass@127.0.0.1:3930/mcp", allowedTools: ["echo"] }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(created.status === 400, `expected 400 rejecting embedded credentials, got ${created.status}: ${JSON.stringify(created.body)}`);
+  });
+
+  await test("mcpServers with a duplicate slug is rejected; an allowlisted url without tools:mcp still saves", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp save gates" }) });
+    const graphId = g.body.id;
+    const dup = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Dup",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tools: ["mcp"],
+        mcpServers: [
+          { slug: "echo", url: "http://127.0.0.1:3930/mcp", allowedTools: ["echo"] },
+          { slug: "echo", url: "http://mcp-echo:3930/mcp", allowedTools: ["echo"] },
+        ],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(dup.status === 400, `expected 400 on duplicate slug, got ${dup.status}: ${JSON.stringify(dup.body)}`);
+
+    const inert = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "InertMcp",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tools: [],
+        mcpServers: [{ slug: "echo", url: "http://127.0.0.1:3930/mcp", allowedTools: ["echo"] }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(inert.status === 201, `servers without tools:mcp should still save, got ${inert.status}: ${JSON.stringify(inert.body)}`);
+    assert(inert.body.mcpServers?.[0]?.slug === "echo", "mcpServers should round-trip on the created node");
+  });
+
+  await test("add existing agent drops mcpServers", async () => {
+    const sourceGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp source" }) });
+    const sourceNode = await api(`/graphs/${sourceGraph.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "WithMcp",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "echo", url: "http://127.0.0.1:3930/mcp", allowedTools: ["echo"] }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(sourceNode.status === 201, `source node failed: ${JSON.stringify(sourceNode.body)}`);
+    const targetGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp copy target" }) });
+    const copied = await api(`/graphs/${targetGraph.body.id}/nodes/from-existing`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: sourceNode.body.id, position: { x: 10, y: 10 } }),
+    });
+    assert(copied.status === 201, `copy failed: ${JSON.stringify(copied.body)}`);
+    assert(!copied.body.mcpServers || copied.body.mcpServers.length === 0, `mcpServers leaked across copy: ${JSON.stringify(copied.body.mcpServers)}`);
+  });
+
   // --- Security regression: IDOR on node/edge/credential mutation routes ---
   await test("security: cannot mutate another user's node via your own graphId (IDOR)", async () => {
     const attackerCookie = sessionCookie;

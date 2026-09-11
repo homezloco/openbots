@@ -67,14 +67,12 @@ export async function templateRoutes(app: FastifyInstance) {
     const nodeIdMap = new Map<string, string>();
     const insertedNodes: { old: AgentGraph["nodes"][number]; newId: string }[] = [];
     for (const node of graph.nodes) {
-      // fileAccessRoot and dispatchTargets are deliberately NOT copied here
-      // (both absent from this values object) — a template's source paths/
-      // graph ids are meaningless in a new context. tools is copied
-      // verbatim, so an instantiated write- or dispatch-capable node needs
-      // one follow-up PATCH (fileAccessRoot, dispatchTargets respectively)
-      // before it's actually usable — the same "tool granted, resource not
-      // yet configured" gap tools.ts's runtime checks already handle
-      // gracefully for write_file/edit_file.
+      // fileAccessRoot, dispatchTargets, sshTarget, and mcpServers are
+      // deliberately NOT copied here (all absent from this values object)
+      // — a template's source paths/graph ids/MCP URLs are meaningless or
+      // too powerful in a new context. tools is copied verbatim, so an
+      // instantiated write-, dispatch-, or mcp-capable node needs a
+      // follow-up PATCH before it's actually usable.
       const [inserted] = await db
         .insert(agentNodes)
         .values({

@@ -33,7 +33,9 @@ import {
  * reasoning as dispatchTargets — `tools` here CAN already include
  * "run_remote_command", but that alone is inert without a human/PATCH-set
  * sshTarget on the same node, the same dual-gate that already lets `tools`
- * safely include "dispatch_to_graph" without dispatchTargets).
+ * safely include "dispatch_to_graph" without dispatchTargets), and
+ * mcpServers (remote token blast radius — human/PATCH-only, same as
+ * dispatchTargets).
  */
 
 async function resolveTargetGraph(

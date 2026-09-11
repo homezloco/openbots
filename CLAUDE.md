@@ -11,7 +11,7 @@ OpenBots: an open-source, self-hosted, model-agnostic multi-agent orchestration 
 ```bash
 corepack enable && pnpm install        # first-time setup
 
-pnpm dev                               # web + api dev servers via turbo
+pnpm dev                               # web + api + worker via turbo (without the worker, runs stay pending)
 pnpm build / pnpm typecheck / pnpm lint  # across all packages
 pnpm --filter @openbots/api typecheck    # single package
 pnpm --filter @openbots/web typecheck
@@ -19,7 +19,7 @@ pnpm --filter @openbots/web typecheck
 pnpm --filter @openbots/api db:generate  # after editing apps/api/src/db/schema.ts
 pnpm --filter @openbots/api db:migrate   # apply pending migrations
 
-docker compose up postgres redis -d      # local Postgres + Redis
+docker compose up postgres redis -d      # local Postgres + Redis (Redis published on localhost:6380)
 docker compose up api worker -d --force-recreate  # after backend changes, rebuild first:
 docker compose build api                 # api and worker share one image (see docker-compose.yml)
 

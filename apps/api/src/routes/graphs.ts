@@ -17,6 +17,7 @@ import {
   updateAgentNode,
   updateNodeBody,
 } from "../orchestrator/graphMutations.js";
+import { createLiveRerouteExample } from "../orchestrator/exampleGraphs.js";
 
 const createGraphBody = z.object({
   name: z.string().min(1),
@@ -69,6 +70,16 @@ export async function graphRoutes(app: FastifyInstance) {
     // creation (see nodeRowToAgentNode). A brand-new graph has none of
     // either yet, so this is two cheap empty-result queries.
     return reply.code(201).send(await loadLiveGraph(graph.id));
+  });
+
+  /**
+   * The README GIF as a real graph: Router → Support, with Billing as the
+   * drop target. Static path (not /graphs/:id/...) so Fastify doesn't try
+   * to parse "examples" as a uuid.
+   */
+  app.post("/graphs/examples/live-reroute", { preHandler: requireAuth }, async (req, reply) => {
+    const graph = await createLiveRerouteExample(req.userId!);
+    return reply.code(201).send(graph);
   });
 
   /**

@@ -127,6 +127,27 @@ async function main() {
     assert(me.status === 200 && me.body.email === email, `auth/me failed: ${JSON.stringify(me.body)}`);
   });
 
+  await test("example live-reroute graph: Router → Support, Billing as drop target, entry is Router", async () => {
+    const ownerCookie = sessionCookie;
+    sessionCookie = "";
+    const unauth = await api("/graphs/examples/live-reroute", { method: "POST" });
+    assert(unauth.status === 401, `expected 401 with no session, got ${unauth.status}: ${JSON.stringify(unauth.body)}`);
+    sessionCookie = ownerCookie;
+
+    const created = await api("/graphs/examples/live-reroute", { method: "POST" });
+    assert(created.status === 201, `example create failed: ${created.status} ${JSON.stringify(created.body)}`);
+    const nodes = created.body.nodes as { id: string; name: string }[];
+    const edges = created.body.edges as { sourceNodeId: string; targetNodeId: string; kind: string }[];
+    const byName = Object.fromEntries(nodes.map((n) => [n.name, n]));
+    assert(byName.Router && byName["Support Specialist"] && byName["Billing Specialist"], `expected Router/Support/Billing, got ${nodes.map((n) => n.name)}`);
+    assert(nodes.length === 3, `expected 3 nodes, got ${nodes.length}`);
+    assert(edges.length === 1, `expected exactly one edge (the one you drag), got ${edges.length}`);
+    assert(edges[0].kind === "explicit", `expected explicit edge, got ${edges[0].kind}`);
+    assert(edges[0].sourceNodeId === byName.Router.id, "edge should start at Router");
+    assert(edges[0].targetNodeId === byName["Support Specialist"].id, "edge should start pointing at Support");
+    assert(created.body.entryNodeId === byName.Router.id, "entry should be Router");
+  });
+
   // --- Basic explicit pipeline + regression check for the position-shape bug ---
   let basicGraphId = "";
   let nodeA = "";

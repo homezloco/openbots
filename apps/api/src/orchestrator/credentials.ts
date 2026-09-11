@@ -36,6 +36,47 @@ export async function getCredentials(
   return getCredentialsFromEnv(providerId);
 }
 
+const DEFAULT_MODELS: Record<ProviderId, string> = {
+  anthropic: "claude-sonnet-5",
+  openai: "gpt-4o",
+  xai: "grok-3",
+  openrouter: "anthropic/claude-sonnet-4",
+  "openai-compatible": "llama3.2",
+};
+
+export function defaultModelFor(providerId: ProviderId): string {
+  return DEFAULT_MODELS[providerId];
+}
+
+function envConfigured(providerId: ProviderId): boolean {
+  switch (providerId) {
+    case "anthropic":
+      return Boolean(process.env.ANTHROPIC_API_KEY);
+    case "openai":
+      return Boolean(process.env.OPENAI_API_KEY);
+    case "xai":
+      return Boolean(process.env.XAI_API_KEY);
+    case "openrouter":
+      return Boolean(process.env.OPENROUTER_API_KEY);
+    case "openai-compatible":
+      return Boolean(process.env.OPENAI_COMPATIBLE_BASE_URL);
+  }
+}
+
+/**
+ * First provider with a usable env key, preferring Anthropic so existing
+ * setups keep their current quick-add model. Used by quick-add (the
+ * extraction LLM) and the live-reroute example graph so an OpenAI- or
+ * Ollama-only box isn't stuck on a hardcoded Anthropic path.
+ */
+export function pickEnvProvider(): { provider: ProviderId; model: string } | null {
+  const order: ProviderId[] = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"];
+  for (const provider of order) {
+    if (envConfigured(provider)) return { provider, model: DEFAULT_MODELS[provider] };
+  }
+  return null;
+}
+
 /** Exported for the standalone chat playground, which has no graph/node to scope a stored credential to. */
 export function getCredentialsFromEnv(providerId: ProviderId): ProviderCredentials {
   switch (providerId) {

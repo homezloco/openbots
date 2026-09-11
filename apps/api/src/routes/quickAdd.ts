@@ -3,7 +3,7 @@ import { generateObject } from "ai";
 import { z } from "zod";
 import { AgentRole, ProviderId } from "@openbots/graph-schema";
 import { getModel } from "@openbots/providers";
-import { getCredentialsFromEnv } from "../orchestrator/credentials.js";
+import { defaultModelFor, getCredentialsFromEnv, pickEnvProvider } from "../orchestrator/credentials.js";
 import { requireAuth } from "../auth/middleware.js";
 import { requireGraphOwner } from "./graphs.js";
 import { insertAgentNode } from "../orchestrator/graphMutations.js";
@@ -41,15 +41,17 @@ const extractionSchema = z.object({
     .describe("One sentence describing this agent's job — also used to match it for auto-routing"),
 });
 
-const META_PROVIDER: ProviderId = "anthropic";
-const META_MODEL = "claude-sonnet-5";
-
 /**
  * The "master agent" flow: describe a new agent in plain English, an LLM
  * turns that into a structured node config, and it's created through the
  * exact same insertAgentNode() path as the manual "+ Add agent" form —
  * this is a UX layer on top of the existing API, not a separate creation
  * mechanism. See PLAN.md.
+ *
+ * The extraction LLM is whichever provider has an env key (Anthropic
+ * first, then OpenAI / xAI / OpenRouter / openai-compatible). Hardcoding
+ * Anthropic made "+ New bot" a red error string on an OpenAI- or
+ * Ollama-only box.
  */
 export async function quickAddRoutes(app: FastifyInstance) {
   app.post("/graphs/:id/agents/quick-add", { preHandler: requireAuth }, async (req, reply) => {
@@ -61,22 +63,37 @@ export async function quickAddRoutes(app: FastifyInstance) {
     const dispatchError = await checkDispatchTargetsOwned(body.tools, body.dispatchTargets, req.userId);
     if (dispatchError) return reply.code(400).send({ error: dispatchError });
 
-    const credentials = getCredentialsFromEnv(META_PROVIDER);
-    const model = getModel(META_PROVIDER, META_MODEL, credentials);
+    const extraction = pickEnvProvider();
+    if (!extraction) {
+      return reply.code(400).send({
+        error:
+          "No model API key configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, or OPENAI_COMPATIBLE_BASE_URL in .env, then restart the API.",
+      });
+    }
 
-    const { object: extracted } = await generateObject({
-      model,
-      schema: extractionSchema,
-      system:
-        "You turn a plain-English request for a new AI agent into a structured configuration for that agent. Be specific and concrete in the system prompt — describe exactly what this one agent should do, not generic filler like 'you are a helpful assistant'.",
-      prompt: body.description,
-    });
+    let extracted: z.infer<typeof extractionSchema>;
+    try {
+      const credentials = getCredentialsFromEnv(extraction.provider);
+      const model = getModel(extraction.provider, extraction.model, credentials);
+      const result = await generateObject({
+        model,
+        schema: extractionSchema,
+        system:
+          "You turn a plain-English request for a new AI agent into a structured configuration for that agent. Be specific and concrete in the system prompt — describe exactly what this one agent should do, not generic filler like 'you are a helpful assistant'.",
+        prompt: body.description,
+      });
+      extracted = result.object;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Quick-add failed";
+      return reply.code(400).send({ error: message });
+    }
 
+    const nodeProvider = body.provider ?? extraction.provider;
     const node = await insertAgentNode(graphId, {
       name: extracted.name,
       role: extracted.role,
-      provider: body.provider ?? META_PROVIDER,
-      model: body.model ?? META_MODEL,
+      provider: nodeProvider,
+      model: body.model ?? (body.provider ? defaultModelFor(body.provider) : extraction.model),
       systemPrompt: extracted.systemPrompt,
       description: extracted.description,
       tools: body.tools,

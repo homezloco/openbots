@@ -46,6 +46,10 @@ export const getMe = () => request<PublicUser>("/auth/me");
 export const createGraph = (name: string, description?: string) =>
   request<AgentGraph>("/graphs", { method: "POST", body: JSON.stringify({ name, description }) });
 
+/** The README GIF as a real graph (Router → Support, Billing as the drop target). */
+export const createLiveRerouteExample = () =>
+  request<AgentGraph>("/graphs/examples/live-reroute", { method: "POST" });
+
 export const deleteGraph = (graphId: string) => request<void>(`/graphs/${graphId}`, { method: "DELETE" });
 
 export const fetchGraph = (graphId: string) =>

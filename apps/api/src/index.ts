@@ -17,6 +17,9 @@ import { templateRoutes } from "./routes/templates.js";
 import { routingChangeRoutes } from "./routes/routingChanges.js";
 import { chatRoutes } from "./routes/chat.js";
 import { wsRoutes } from "./ws/hub.js";
+import { applyMigrations } from "./db/migrate.js";
+
+await applyMigrations();
 
 const app = Fastify({ logger: true });
 

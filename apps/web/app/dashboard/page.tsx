@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createGraph, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
+import { createGraph, createLiveRerouteExample, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
 import { extractLatestUserMessage, useBotChat } from "../../lib/useBotChat";
 import { useAuth } from "../../components/AuthProvider";
 import { HierarchyChat } from "../../components/HierarchyChat";
@@ -23,6 +23,7 @@ export default function DashboardPage() {
   const [graphs, setGraphs] = useState<GraphSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [creatingDemo, setCreatingDemo] = useState(false);
   const [description, setDescription] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -83,6 +84,18 @@ export default function DashboardPage() {
     }
   }
 
+  async function createDemo() {
+    setCreatingDemo(true);
+    setError(null);
+    try {
+      const graph = await createLiveRerouteExample();
+      window.location.href = `/hierarchy?graphId=${graph.id}`;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create demo");
+      setCreatingDemo(false);
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ padding: 24, color: "var(--text-faint)" }}>
@@ -113,8 +126,15 @@ export default function DashboardPage() {
             rows={3}
             style={{ width: "100%" }}
           />
-          <button onClick={createBot} disabled={creating} style={{ width: "100%", marginTop: 4 }}>
+          <button onClick={createBot} disabled={creating || creatingDemo} style={{ width: "100%", marginTop: 4 }}>
             {creating ? "Creating…" : "+ New bot"}
+          </button>
+          <button
+            onClick={createDemo}
+            disabled={creating || creatingDemo}
+            style={{ width: "100%", marginTop: 4, background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}
+          >
+            {creatingDemo ? "Creating…" : "Try the live-reroute demo"}
           </button>
         </div>
 
@@ -140,13 +160,15 @@ export default function DashboardPage() {
               </button>
             </li>
           ))}
-          {graphs.length === 0 && (
+        </ul>
+        {graphs.length === 0 && (
           <div style={{ padding: "12px 0", color: "var(--text-faint)" }}>
             <p style={{ margin: "0 0 8px" }}>No bots yet.</p>
-            <p style={{ margin: 0, fontSize: 13 }}>Describe a job above — like <em>“Summarizes support tickets”</em> — to create your first one.</p>
+            <p style={{ margin: 0, fontSize: 13 }}>
+              Describe a job above, or start from the live-reroute demo (the graph in the README GIF): leave Live checked, start a run, drag the Router&apos;s edge onto Billing.
+            </p>
           </div>
         )}
-        </ul>
       </aside>
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>

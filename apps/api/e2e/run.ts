@@ -1039,6 +1039,32 @@ async function main() {
     assert(created.status === 400, `expected 400 rejecting an out-of-allowlist root, got ${created.status}: ${JSON.stringify(created.body)}`);
   });
 
+  await test("PATCH fileAccessRoot: null revokes a previously-granted root", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E fileAccessRoot revoke" }) });
+    const created = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Reader",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Read files.",
+        tools: ["read_file"],
+        fileAccessRoot: "/tmp/testrepo",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(created.status === 201, `node create failed: ${JSON.stringify(created.body)}`);
+    assert(created.body.fileAccessRoot === "/tmp/testrepo", `expected fileAccessRoot to be set, got: ${JSON.stringify(created.body)}`);
+
+    const cleared = await api(`/graphs/${g.body.id}/nodes/${created.body.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ fileAccessRoot: null }),
+    });
+    assert(cleared.status === 200, `expected 200 clearing fileAccessRoot, got ${cleared.status}: ${JSON.stringify(cleared.body)}`);
+    assert(!cleared.body.fileAccessRoot, `expected fileAccessRoot to be revoked, got: ${JSON.stringify(cleared.body.fileAccessRoot)}`);
+  });
+
   await test("security: mcpServers url outside ALLOWED_MCP_SERVERS is rejected", async () => {
     const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E security mcp url" }) });
     const graphId = g.body.id;
@@ -1332,6 +1358,89 @@ async function main() {
     assert(stillOriginal.systemPrompt === "original prompt", `victim node was mutated by the attacker: ${JSON.stringify(stillOriginal)}`);
 
     sessionCookie = attackerCookie;
+  });
+
+  await test("security: cannot wire an edge onto another user's nodes, or inject into their consensusGroup (IDOR)", async () => {
+    const attackerCookie = sessionCookie;
+    // A throw anywhere below must never leave sessionCookie pointed at the
+    // victim's throwaway session for every test that runs after this one.
+    try {
+      // Victim: their own graph with a hybrid (auto + consensusGroup) node,
+      // so the attack can also probe the "inject a foreign edge id into
+      // someone else's fan-out list" angle, not just plain edge creation.
+      // ConsensusGroup.edgeIds requires >= 2, so two specialists/edges.
+      sessionCookie = "";
+      const victimEmail = `e2e-victim-edge-${Date.now()}@openbots.dev`;
+      await api("/auth/signup", { method: "POST", body: JSON.stringify({ email: victimEmail, password }) });
+      const victimGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "Victim edge graph" }) });
+      const mkVictimNode = (name: string) =>
+        api(`/graphs/${victimGraph.body.id}/nodes`, {
+          method: "POST",
+          body: JSON.stringify({ name, role: "worker", provider: "anthropic", model: "claude-sonnet-5", position: { x: 0, y: 0 } }),
+        });
+      const victimHybrid = await mkVictimNode("VictimHybrid");
+      const victimSpecialistA = await mkVictimNode("VictimSpecialistA");
+      const victimSpecialistB = await mkVictimNode("VictimSpecialistB");
+      const victimAggregator = await mkVictimNode("VictimAggregator");
+      const victimEdgeA = await api(`/graphs/${victimGraph.body.id}/edges`, {
+        method: "POST",
+        body: JSON.stringify({ sourceNodeId: victimHybrid.body.id, targetNodeId: victimSpecialistA.body.id, kind: "auto" }),
+      });
+      const victimEdgeB = await api(`/graphs/${victimGraph.body.id}/edges`, {
+        method: "POST",
+        body: JSON.stringify({ sourceNodeId: victimHybrid.body.id, targetNodeId: victimSpecialistB.body.id, kind: "auto" }),
+      });
+      const victimPatch = await api(`/graphs/${victimGraph.body.id}/nodes/${victimHybrid.body.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          consensusGroup: { edgeIds: [victimEdgeA.body.id, victimEdgeB.body.id], aggregatorNodeId: victimAggregator.body.id },
+        }),
+      });
+      assert(victimPatch.status === 200, `failed to set up victim consensusGroup: ${JSON.stringify(victimPatch.body)}`);
+
+      // Attacker: their own graph + node, then try to wire an edge FROM the
+      // victim's hybrid node INTO the attacker's own node, using the
+      // attacker's own graphId in the URL.
+      sessionCookie = attackerCookie;
+      const attackerGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "Attacker edge graph" }) });
+      const attackerNode = await api(`/graphs/${attackerGraph.body.id}/nodes`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: "AttackerNode",
+          role: "worker",
+          provider: "anthropic",
+          model: "claude-sonnet-5",
+          position: { x: 0, y: 0 },
+        }),
+      });
+      const attack = await api(`/graphs/${attackerGraph.body.id}/edges`, {
+        method: "POST",
+        body: JSON.stringify({ sourceNodeId: victimHybrid.body.id, targetNodeId: attackerNode.body.id, kind: "auto" }),
+      });
+      assert(attack.status === 404, `expected 404 (cross-graph edge blocked), got ${attack.status}: ${JSON.stringify(attack.body)}`);
+
+      // Attacker's own node as source, victim's as target — same guard, other direction.
+      const attackReverse = await api(`/graphs/${attackerGraph.body.id}/edges`, {
+        method: "POST",
+        body: JSON.stringify({ sourceNodeId: attackerNode.body.id, targetNodeId: victimHybrid.body.id, kind: "explicit" }),
+      });
+      assert(attackReverse.status === 404, `expected 404 (reverse-direction cross-graph edge blocked), got ${attackReverse.status}`);
+
+      // Confirm the victim's consensusGroup was never touched by the attempt.
+      sessionCookie = "";
+      await api("/auth/login", { method: "POST", body: JSON.stringify({ email: victimEmail, password }) });
+      const victimGraphAfter = await api(`/graphs/${victimGraph.body.id}`);
+      const hybridAfter = victimGraphAfter.body.nodes.find((n: any) => n.id === victimHybrid.body.id);
+      assert(
+        hybridAfter.consensusGroup.edgeIds.length === 2 &&
+          hybridAfter.consensusGroup.edgeIds.includes(victimEdgeA.body.id) &&
+          hybridAfter.consensusGroup.edgeIds.includes(victimEdgeB.body.id),
+        `victim's consensusGroup was corrupted by the attack: ${JSON.stringify(hybridAfter.consensusGroup)}`,
+      );
+      assert(victimGraphAfter.body.edges.length === 2, `attacker's edge leaked into the victim's graph: ${JSON.stringify(victimGraphAfter.body.edges)}`);
+    } finally {
+      sessionCookie = attackerCookie;
+    }
   });
 
   // --- Security regression: GET /runs/:id requires auth + ownership ---

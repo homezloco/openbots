@@ -235,13 +235,21 @@ function chunkContent(content: string): string[] {
   return chunks;
 }
 
+/**
+ * A dedicated opt-in key, not the ambient OPENAI_API_KEY — that var may be
+ * set only so some unrelated node can use GPT as a fallback model
+ * provider, with zero connection to "is it OK to send this root's file
+ * excerpts to OpenAI's embeddings endpoint." Every other tool that talks
+ * to a third party (mcp, run_remote_command, dispatch_to_graph) requires
+ * its own explicit config; this is that config for search_knowledge.
+ */
 async function embedRerank(query: string, hits: KnowledgeHit[]): Promise<KnowledgeHit[]> {
-  const key = process.env.OPENAI_API_KEY;
+  const key = process.env.SEARCH_KNOWLEDGE_EMBEDDING_API_KEY;
   if (!key || hits.length === 0) return hits;
   try {
     const { embed, embedMany } = await import("ai");
-    const { openai } = await import("@ai-sdk/openai");
-    const model = openai.embedding("text-embedding-3-small");
+    const { createOpenAI } = await import("@ai-sdk/openai");
+    const model = createOpenAI({ apiKey: key }).embedding("text-embedding-3-small");
     const q = await embed({ model, value: query });
     const docs = await embedMany({ model, values: hits.map((h) => h.excerpt) });
     const qv = q.embedding;
@@ -308,7 +316,11 @@ function createFileTools(root: string): Record<(typeof FILE_TOOL_NAMES)[number],
       },
     }),
     search_knowledge: tool({
-      description: `Search text files under ${root} for a query and return the top matching excerpts with paths. Read-only. Cannot see outside this root. Prefer this over reading every file when you need to find something in the folder.`,
+      description: `Search text files under ${root} for a query and return the top matching excerpts with paths. Read-only. Cannot see outside this root. Prefer this over reading every file when you need to find something in the folder.${
+        process.env.SEARCH_KNOWLEDGE_EMBEDDING_API_KEY
+          ? " The operator has enabled OpenAI embedding rerank: matched excerpts (not full files) are sent to OpenAI's embeddings API to improve ranking."
+          : ""
+      }`,
       inputSchema: z.object({
         query: z.string().min(1),
         path: z.string().default(".").describe("Subdirectory relative to the root, default the whole root"),

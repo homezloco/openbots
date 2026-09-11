@@ -31,7 +31,13 @@ export const createNodeBody = z.object({
   systemPrompt: z.string().optional(),
   description: z.string().optional(),
   tools: z.array(z.string()).optional(),
-  fileAccessRoot: fileAccessRootSchema.optional(),
+  // .nullable() for the same reason as consensusGroup/sshTarget/mcpServers
+  // below: PATCH needs a way to explicitly REVOKE a previously-granted
+  // fileAccessRoot, not just leave it unchanged or replace it with a
+  // different one. checkFileAccessRootAllowed already treats null as
+  // "clear it, valid" — this schema was just never updated to let a PATCH
+  // body reach that code with null instead of being rejected first.
+  fileAccessRoot: fileAccessRootSchema.nullable().optional(),
   fallbackChain: z.array(FallbackTarget).optional(),
   // .nullable() in addition to .optional(): PATCH needs a way to explicitly
   // CLEAR an existing consensusGroup (e.g. converting a hybrid node back to
@@ -201,7 +207,20 @@ export async function deleteAgentNode(graphId: string, nodeId: string): Promise<
   return { ok: true, value: null };
 }
 
-export async function insertRoutingEdge(graphId: string, body: CreateEdgeBody) {
+export async function insertRoutingEdge(graphId: string, body: CreateEdgeBody): Promise<MutationResult<typeof routingEdges.$inferSelect>> {
+  // graphId-scoped lookups, not just an ownership check the caller may have
+  // already done — same IDOR class as updateAgentNode's node lookup above:
+  // without this, a caller's own graphId paired with another graph's node
+  // id would still pass, wiring an edge (and, if the source node has a
+  // consensusGroup, a foreign edge id into that group's fan-out list) onto
+  // a graph the caller doesn't own.
+  const [source, target] = await Promise.all([
+    db.query.agentNodes.findFirst({ where: and(eq(agentNodes.id, body.sourceNodeId), eq(agentNodes.graphId, graphId)) }),
+    db.query.agentNodes.findFirst({ where: and(eq(agentNodes.id, body.targetNodeId), eq(agentNodes.graphId, graphId)) }),
+  ]);
+  if (!source) return { ok: false, status: 404, error: "sourceNodeId not found in this graph" };
+  if (!target) return { ok: false, status: 404, error: "targetNodeId not found in this graph" };
+
   const [edge] = await db
     .insert(routingEdges)
     .values({
@@ -222,17 +241,19 @@ export async function insertRoutingEdge(graphId: string, body: CreateEdgeBody) {
   // remembered to PATCH consensusGroup by hand. Auto-sync on create; still
   // overridable by PATCHing a specific edge back out afterward.
   if (edge.kind === "auto") {
-    const sourceNode = await db.query.agentNodes.findFirst({ where: eq(agentNodes.id, edge.sourceNodeId) });
-    if (sourceNode?.consensusGroup) {
-      const group = sourceNode.consensusGroup as { edgeIds: string[]; aggregatorNodeId: string };
+    // Reuse the already graphId-scoped `source` fetched above rather than
+    // re-querying by bare id — the point of the fix above is that the id
+    // alone is never trusted again once it's this node's own edge.
+    if (source.consensusGroup) {
+      const group = source.consensusGroup as { edgeIds: string[]; aggregatorNodeId: string };
       await db
         .update(agentNodes)
         .set({ consensusGroup: { ...group, edgeIds: [...group.edgeIds, edge.id] }, updatedAt: new Date() })
-        .where(eq(agentNodes.id, sourceNode.id));
+        .where(eq(agentNodes.id, source.id));
     }
   }
 
-  return edge;
+  return { ok: true, value: edge };
 }
 
 export async function deleteRoutingEdge(graphId: string, edgeId: string): Promise<MutationResult<null>> {

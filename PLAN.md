@@ -848,6 +848,70 @@ the prioritization survives past this session.
 - **Template/graph sharing marketplace** — extends the existing
   `agent_templates` export/instantiate mechanism, blocked on real
   multi-user/team sharing (known gap #2) landing first.
+- **External CLI coding agent as a node kind** (discussed 2026-09-11,
+  not started). Let a write-capable node delegate to a trusted CLI
+  coding agent (Claude Code, Aider, Codex CLI, etc.) — spawn it in the
+  node's own worktree, wait for exit, commit whatever it changed —
+  instead of the model making individual read_file/write_file tool
+  calls that OpenBots intercepts one at a time. Real upside: a mature
+  agentic loop (multi-file context, self-correction, running its own
+  tests) produces higher-quality changes per hop than a single
+  `generateText` call plus a handful of custom tools — throughput and
+  quality, not just risk staying flat, assuming the CLI agent's own
+  model is one you'd trust running directly anyway. The catch isn't
+  security so much as granularity: this doesn't fit the existing
+  provider abstraction (a CLI subprocess isn't "a model"), one hop
+  would produce one large commit instead of the current fine-grained
+  per-tool-call trail, and live rerouting can only steer *between*
+  hops — it can't interrupt a long CLI run mid-flight. Same "fire, wait,
+  take the result" trust shape as `dispatch_to_graph`, not the
+  tightly-wrapped per-tool-call pattern the rest of the engine uses —
+  should be built as its own narrow node/tool kind, not bolted onto
+  the provider abstraction.
+
+## Whole-codebase audit and four real findings fixed (2026-09-11)
+
+A full audit (security/auth wiring, orchestration engine correctness,
+tools/integrations, frontend-backend wiring, data-model consistency —
+five parallel passes) beyond the usual "since last session" review
+found and fixed:
+
+1. **Cross-tenant write via `POST /graphs/:id/edges`** — the route
+   checked ownership of the URL's `:id` but never verified
+   `sourceNodeId`/`targetNodeId` in the body actually belonged to that
+   graph. Worse: if the referenced node had a `consensusGroup`, the code
+   appended the new edge id into it with no ownership check at all — a
+   genuine cross-tenant mutation, not just a read leak. Fixed in
+   `insertRoutingEdge` (`graphMutations.ts`) with the same
+   `and(eq(id), eq(graphId))` scoping every other mutation in that file
+   already uses; e2e-covered ("cannot wire an edge onto another user's
+   nodes, or inject into their consensusGroup").
+2. **`search_knowledge`'s embedding rerank silently sent file content to
+   OpenAI based on ambient `OPENAI_API_KEY`** — a worker-wide env var
+   with zero connection to the calling node's own config, so setting it
+   for an unrelated fallback provider silently opted every
+   `search_knowledge`-capable node into sending file excerpts off-box.
+   Decoupled into its own `SEARCH_KNOWLEDGE_EMBEDDING_API_KEY`, and the
+   tool's own description now tells the model when rerank is active.
+3. **`fileAccessRoot` couldn't be cleared via PATCH** — missing
+   `.nullable()`, the exact bug class already fixed for
+   `consensusGroup`/`sshTarget`/`mcpServers`, just missed here. Fixed;
+   e2e-covered ("PATCH fileAccessRoot: null revokes a previously-granted
+   root").
+4. **`POST /chat` (the Phase 2 single-agent playground) was fully built
+   and wired in `lib/api.ts` but had zero UI callers anywhere in
+   `apps/web`, and zero test coverage** — dead code, superseded by
+   Dashboard's BotChat (persisted, graph-backed, multi-turn) which does
+   everything this endpoint did and more. Removed: `routes/chat.ts`, its
+   registration in `index.ts`, and `sendChatMessage` in `lib/api.ts`.
+
+Also fixed as part of the prior "since last session" pass: OTel hop-error
+spans now redact Bearer/Authorization text before export (same pattern
+`orchestrator/mcpTool.ts` already used), and `apps/web`'s `pnpm lint` now
+actually runs (no ESLint config existed at all; `next lint` was hanging
+on an interactive prompt), surfacing and fixing one real
+`react-hooks/rules-of-hooks` false-positive and three unescaped-JSX-entity
+errors.
 
 ## License
 

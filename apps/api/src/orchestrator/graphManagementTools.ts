@@ -195,12 +195,13 @@ export function createCreateTargetEdgeTool(ownerId: string | null, dispatchTarge
       if (!source) return { error: `No node named "${sourceNodeName}" in "${resolved.target.name}".` };
       if (!target) return { error: `No node named "${targetNodeName}" in "${resolved.target.name}".` };
 
-      const edge = await insertRoutingEdge(resolved.target.id, {
+      const result = await insertRoutingEdge(resolved.target.id, {
         sourceNodeId: source.id,
         targetNodeId: target.id,
         kind: kind ?? "explicit",
       });
-      return { created: `${sourceNodeName} -> ${targetNodeName}`, kind: edge.kind, graph: resolved.target.name };
+      if (!result.ok) return { error: result.error };
+      return { created: `${sourceNodeName} -> ${targetNodeName}`, kind: result.value.kind, graph: resolved.target.name };
     },
   });
 }

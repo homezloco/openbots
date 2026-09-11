@@ -245,8 +245,9 @@ export async function graphRoutes(app: FastifyInstance) {
     const { id: graphId } = req.params as { id: string };
     if (!(await requireGraphOwner(req, reply, graphId))) return;
     const body = createEdgeBody.parse(req.body);
-    const edge = await insertRoutingEdge(graphId, body);
-    return reply.code(201).send(edge);
+    const result = await insertRoutingEdge(graphId, body);
+    if (!result.ok) return reply.code(result.status).send({ error: result.error });
+    return reply.code(201).send(result.value);
   });
 
   /**

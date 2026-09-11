@@ -366,11 +366,6 @@ export const createTemplate = (graphId: string, name: string, description?: stri
 export const instantiateTemplate = (templateId: string) =>
   request<AgentGraph>(`/templates/${templateId}/instantiate`, { method: "POST" });
 
-// --- Chat playground ---
-
-export const sendChatMessage = (provider: ProviderId, model: string, message: string, systemPrompt?: string) =>
-  request<{ text: string }>("/chat", { method: "POST", body: JSON.stringify({ provider, model, message, systemPrompt }) });
-
 export interface RunEventMessage {
   runId: string;
   graphId: string;

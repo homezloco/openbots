@@ -92,6 +92,11 @@ async function fetchLoginStyleSummary(baseUrl: string, creds: StoredLogin) {
 }
 
 async function fetchMetrics(creds: StoredLogin, days?: number): Promise<unknown> {
+  if (!creds.baseUrl || !creds.style) {
+    throw new Error(
+      "This metrics credential is missing baseUrl and/or style — re-save it at /settings as JSON {username, password, baseUrl, style} (style is \"dashboard\" or \"login\").",
+    );
+  }
   switch (creds.style) {
     case "dashboard":
       return fetchDashboardStyle(creds.baseUrl, creds, days);

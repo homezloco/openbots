@@ -39,10 +39,14 @@ interface StoredLogin {
 }
 
 async function loginJwt(baseUrl: string, path: string, creds: StoredLogin, tokenField: string): Promise<string> {
+  // Loudest-style /api/auth/login wants {email, password}; dashboard-style
+  // /auth/token wants {username, password}. Send both from the stored
+  // username field so either shape works. Never send baseUrl/style to the
+  // remote — those are OpenBots config, not login fields.
   const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(creds),
+    body: JSON.stringify({ username: creds.username, email: creds.username, password: creds.password }),
   });
   if (!res.ok) {
     throw new Error(`Login to ${baseUrl} failed with status ${res.status}`);

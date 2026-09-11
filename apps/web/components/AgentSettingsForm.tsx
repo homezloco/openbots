@@ -380,7 +380,7 @@ export function AgentSettingsForm({
           Allow remote commands{" "}
           <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
             (run_remote_command — can only run one of the exact commands you list below, over SSH, on the host you
-            configure; host must be in the operator's ALLOWED_SSH_HOSTS allowlist)
+            configure; host must be in the operator&apos;s ALLOWED_SSH_HOSTS allowlist)
           </span>
         </span>
       </label>
@@ -398,7 +398,7 @@ export function AgentSettingsForm({
             </label>
           </div>
           <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
-            Optional SSH key credential comes from /me/credentials, provider "ssh_target_&lt;host&gt;" — leave unset if
+            Optional SSH key credential comes from /me/credentials, provider &quot;ssh_target_&lt;host&gt;&quot; — leave unset if
             this host authenticates without one (e.g. Tailscale SSH).
           </span>
           {allowedCommands.map((c, i) => (

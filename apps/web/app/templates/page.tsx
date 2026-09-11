@@ -38,7 +38,7 @@ export default function TemplatesPage() {
     }
   }
 
-  async function useTemplate(templateId: string) {
+  async function handleUseTemplate(templateId: string) {
     setBusy(true);
     setError(null);
     try {
@@ -103,7 +103,7 @@ export default function TemplatesPage() {
               <p style={{ margin: "4px 0", color: "var(--text-muted)" }}>{t.description || "No description"}</p>
               <small>{t.nodeCount} agents</small>
             </div>
-            <button onClick={() => useTemplate(t.id)} disabled={busy || !user}>
+            <button onClick={() => handleUseTemplate(t.id)} disabled={busy || !user}>
               Use this template
             </button>
           </li>

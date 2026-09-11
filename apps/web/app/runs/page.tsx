@@ -60,7 +60,7 @@ function RunsPageContent() {
     return (
       <div style={{ padding: 24 }}>
         <p>
-          <a href="/login">Log in</a> to see this graph's runs.
+          <a href="/login">Log in</a> to see this graph&apos;s runs.
         </p>
       </div>
     );

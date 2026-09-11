@@ -50,6 +50,9 @@ export const createGraph = (name: string, description?: string) =>
 export const createLiveRerouteExample = () =>
   request<AgentGraph>("/graphs/examples/live-reroute", { method: "POST" });
 
+/** Nested org: Acme Portfolio + Payments + Platform. Returns the portfolio graph. */
+export const createAgencyExample = () => request<AgentGraph>("/graphs/examples/agency", { method: "POST" });
+
 export const deleteGraph = (graphId: string) => request<void>(`/graphs/${graphId}`, { method: "DELETE" });
 
 export const fetchGraph = (graphId: string) =>

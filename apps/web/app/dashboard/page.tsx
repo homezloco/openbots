@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createGraph, createLiveRerouteExample, deleteGraph, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
+import { createAgencyExample, createGraph, createLiveRerouteExample, deleteGraph, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
 import { extractLatestUserMessage, useBotChat } from "../../lib/useBotChat";
 import { useAuth } from "../../components/AuthProvider";
 import { HierarchyChat } from "../../components/HierarchyChat";
@@ -23,7 +23,7 @@ export default function DashboardPage() {
   const [graphs, setGraphs] = useState<GraphSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [creatingDemo, setCreatingDemo] = useState(false);
+  const [creatingExample, setCreatingExample] = useState<"reroute" | "agency" | null>(null);
   const [description, setDescription] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -100,14 +100,26 @@ export default function DashboardPage() {
   }
 
   async function createDemo() {
-    setCreatingDemo(true);
+    setCreatingExample("reroute");
     setError(null);
     try {
       const graph = await createLiveRerouteExample();
       window.location.href = `/hierarchy?graphId=${graph.id}`;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create demo");
-      setCreatingDemo(false);
+      setCreatingExample(null);
+    }
+  }
+
+  async function createAgency() {
+    setCreatingExample("agency");
+    setError(null);
+    try {
+      const graph = await createAgencyExample();
+      window.location.href = `/hierarchy?graphId=${graph.id}`;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create agency demo");
+      setCreatingExample(null);
     }
   }
 
@@ -141,15 +153,22 @@ export default function DashboardPage() {
             rows={3}
             style={{ width: "100%" }}
           />
-          <button onClick={createBot} disabled={creating || creatingDemo} style={{ width: "100%", marginTop: 4 }}>
+          <button onClick={createBot} disabled={creating || creatingExample !== null} style={{ width: "100%", marginTop: 4 }}>
             {creating ? "Creating…" : "+ New bot"}
           </button>
           <button
             onClick={createDemo}
-            disabled={creating || creatingDemo}
+            disabled={creating || creatingExample !== null}
             style={{ width: "100%", marginTop: 4, background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}
           >
-            {creatingDemo ? "Creating…" : "Try the live-reroute demo"}
+            {creatingExample === "reroute" ? "Creating…" : "Try the live-reroute demo"}
+          </button>
+          <button
+            onClick={createAgency}
+            disabled={creating || creatingExample !== null}
+            style={{ width: "100%", marginTop: 4, background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}
+          >
+            {creatingExample === "agency" ? "Creating…" : "Try the agency demo"}
           </button>
         </div>
 
@@ -190,7 +209,7 @@ export default function DashboardPage() {
           <div style={{ padding: "12px 0", color: "var(--text-faint)" }}>
             <p style={{ margin: "0 0 8px" }}>No bots yet.</p>
             <p style={{ margin: 0, fontSize: 13 }}>
-              Describe a job above, or start from the live-reroute demo (the graph in the README GIF): leave Live checked, start a run, drag the Router&apos;s edge onto Billing.
+              Describe a job above, start from the live-reroute demo (the README GIF), or try the agency demo (Portfolio → click a dashed gateway into a team).
             </p>
           </div>
         )}

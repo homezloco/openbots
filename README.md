@@ -85,7 +85,7 @@ The API process only *enqueues* hops; the worker *runs* them. `pnpm dev` starts 
 
 Or run the backend containerized: `docker compose up postgres redis api worker -d`. The API container migrates on start and the worker waits until `/health` is up. The `web` service can also be built with `docker compose up --build web`; if a sandboxed environment's registry connection is flaky on large packages (`next`, `@next/swc-*`), `pnpm --filter @openbots/web build && pnpm --filter @openbots/web start` runs it locally against the dockerized API just as well.
 
-Sign up at `/login`. On the Dashboard, click **Try the live-reroute demo** — that is the graph in the GIF above. Leave **Live** checked, start a run, drag the Router's outgoing edge onto Billing while Router is still generating. Or describe a bot with "+ New bot" (uses whichever model key you set, not just Anthropic).
+Sign up at `/login`. On the Dashboard, click **Try the live-reroute demo** — that is the graph in the GIF above. Leave **Live** checked, start a run, drag the Router's outgoing edge onto Billing while Router is still generating. **Try the agency demo** creates a fictional Acme Portfolio whose dashed gateway nodes open Payments and Platform team graphs (Lead + Backend / Frontend / Reviewer). Or describe a bot with "+ New bot" (uses whichever model key you set, not just Anthropic).
 
 See `CLAUDE.md` for the full command reference and `pnpm --filter @openbots/api test:e2e` for the real end-to-end test suite (real model calls, no mocks). `pnpm --filter @openbots/api db:migrate` is still there if you want to apply migrations without starting the API; `db:generate` is only for after you edit `apps/api/src/db/schema.ts`.
 

@@ -17,7 +17,7 @@ import {
   updateAgentNode,
   updateNodeBody,
 } from "../orchestrator/graphMutations.js";
-import { createLiveRerouteExample } from "../orchestrator/exampleGraphs.js";
+import { createAgencyExample, createLiveRerouteExample } from "../orchestrator/exampleGraphs.js";
 
 const createGraphBody = z.object({
   name: z.string().min(1),
@@ -79,6 +79,16 @@ export async function graphRoutes(app: FastifyInstance) {
    */
   app.post("/graphs/examples/live-reroute", { preHandler: requireAuth }, async (req, reply) => {
     const graph = await createLiveRerouteExample(req.userId!);
+    return reply.code(201).send(graph);
+  });
+
+  /**
+   * Nested org demo: Acme Portfolio (one Lead that dispatches) plus two
+   * team graphs. Returns the portfolio graph so the client can open it;
+   * gateways on that canvas are derived from dispatchTargets.
+   */
+  app.post("/graphs/examples/agency", { preHandler: requireAuth }, async (req, reply) => {
+    const graph = await createAgencyExample(req.userId!);
     return reply.code(201).send(graph);
   });
 

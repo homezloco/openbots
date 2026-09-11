@@ -784,8 +784,10 @@ unteaches the architecture.
 
 Record the GIF after a stranger can create `auto` edges on the canvas
 (otherwise they cannot rebuild what they're watching). The agency
-starter itself is still unbuilt — Dashboard still only has the
-three-node live-reroute demo.
+starter itself shipped 2026-09-11: Dashboard **Try the agency demo**
+creates Acme Portfolio + Acme Payments + Acme Platform
+(`POST /graphs/examples/agency`). The click-through GIF is still
+unrecorded.
 
 Enterprise buyers will still ask SSO/RBAC, MCP, and exportable audit
 after they understand the org chart — those stay in the gaps/roadmap

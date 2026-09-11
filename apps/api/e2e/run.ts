@@ -148,6 +148,45 @@ async function main() {
     assert(created.body.entryNodeId === byName.Router.id, "entry should be Router");
   });
 
+  await test("example agency graphs: Portfolio Lead dispatches into Payments and Platform teams", async () => {
+    const ownerCookie = sessionCookie;
+    sessionCookie = "";
+    const unauth = await api("/graphs/examples/agency", { method: "POST" });
+    assert(unauth.status === 401, `expected 401 with no session, got ${unauth.status}: ${JSON.stringify(unauth.body)}`);
+    sessionCookie = ownerCookie;
+
+    const created = await api("/graphs/examples/agency", { method: "POST" });
+    assert(created.status === 201, `agency create failed: ${created.status} ${JSON.stringify(created.body)}`);
+    assert(created.body.name === "Acme Portfolio", `expected Acme Portfolio, got ${created.body.name}`);
+    const nodes = created.body.nodes as { id: string; name: string; tools: string[]; dispatchTargets?: string[] }[];
+    assert(nodes.length === 1, `portfolio should be one Lead plus gateways (UI-only), got ${nodes.length} nodes`);
+    const lead = nodes[0];
+    assert(lead.name === "Portfolio Lead", `expected Portfolio Lead, got ${lead.name}`);
+    assert(lead.tools.includes("dispatch_to_graph"), "Portfolio Lead needs dispatch_to_graph so gateways render");
+    assert(lead.dispatchTargets?.length === 2, `expected 2 dispatch targets, got ${JSON.stringify(lead.dispatchTargets)}`);
+    assert(created.body.entryNodeId === lead.id, "entry should be Portfolio Lead");
+
+    const teams = [];
+    for (const targetId of lead.dispatchTargets!) {
+      const team = await api(`/graphs/${targetId}`);
+      assert(team.status === 200, `target graph ${targetId} missing: ${team.status}`);
+      teams.push(team.body);
+    }
+    const names = teams.map((t) => t.name).sort();
+    assert(
+      names[0] === "Acme Payments" && names[1] === "Acme Platform",
+      `expected Acme Payments + Acme Platform, got ${names}`,
+    );
+    for (const team of teams) {
+      const teamNodes = team.nodes as { name: string }[];
+      const teamEdges = team.edges as { kind: string }[];
+      const teamNames = teamNodes.map((n) => n.name).sort();
+      assert(teamNodes.length === 4, `${team.name} should have Lead + 3 specialists, got ${teamNames}`);
+      assert(teamNames.includes("Backend Specialist") && teamNames.includes("Frontend Specialist") && teamNames.includes("Reviewer"), `${team.name} specialists: ${teamNames}`);
+      assert(teamEdges.length === 3 && teamEdges.every((e) => e.kind === "auto"), `${team.name} should have 3 auto edges, got ${JSON.stringify(teamEdges)}`);
+    }
+  });
+
   // --- Basic explicit pipeline + regression check for the position-shape bug ---
   let basicGraphId = "";
   let nodeA = "";

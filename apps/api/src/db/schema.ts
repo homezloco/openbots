@@ -1,4 +1,5 @@
 import {
+  type AnyPgColumn,
   boolean,
   integer,
   jsonb,
@@ -116,6 +117,10 @@ export const runs = pgTable("runs", {
   // its own tool-call output. set null on the source graph's deletion, same
   // "survive the thing that created it" shape as scheduledTriggerId above.
   dispatchSourceGraphId: uuid("dispatch_source_graph_id").references(() => agentGraphs.id, { onDelete: "set null" }),
+  // Set iff this run was forked from another run at a hop checkpoint
+  // (POST .../runs/:id/fork). The original run is never mutated.
+  forkedFromRunId: uuid("forked_from_run_id").references((): AnyPgColumn => runs.id, { onDelete: "set null" }),
+  forkedFromSequence: integer("forked_from_sequence"),
   input: jsonb("input"),
   output: jsonb("output"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

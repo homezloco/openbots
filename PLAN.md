@@ -837,11 +837,10 @@ the prioritization survives past this session.
   text is never an attribute.
 
 **Later — real value, bigger lift, best done post-traction:**
-- **Time-travel / rewind-and-fork from a past hop**, LangGraph-style
-  checkpoint rewind. Natural extension of the per-hop
-  `dispatchHop`/`run_events` architecture already in place, and pairs
-  narratively with the live-reroute differentiator ("steer forward *and*
-  rewind the past") — but a real engine feature, not a quick add.
+- ~~**Time-travel / rewind-and-fork from a past hop**~~ Shipped 2026-09-11:
+  `POST /graphs/:id/runs/:runId/fork` copies prefix hops as history and
+  re-executes the checkpoint as a new run. Source run is immutable.
+  Canvas: **Fork from here** on the run trail.
 - **Lightweight knowledge-base/RAG tool** (embed + search a folder), to
   stop being a hard "no" on the most commonly expected AI-app-builder
   feature (Dify's strongest area) without trying to become a RAG platform.

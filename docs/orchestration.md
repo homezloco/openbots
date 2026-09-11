@@ -45,6 +45,16 @@ on the **worker** — that's where hops execute. Unset means a no-op; the
 e2e suite does not require a collector. Span attributes are ids, node
 name, provider/model, token counts — not prompt or output text.
 
+## Rewind-and-fork
+
+`POST /graphs/:graphId/runs/:runId/fork` with `{ fromSequence }` starts a
+**new** run that re-executes that hop (same node, same hop input). Hops
+before it are copied as history so the trail still reads as a pipeline;
+the source run is never rewritten. Optional `mode` (`pinned` | `live`)
+defaults to the source run's mode — `live` picks up canvas edits made
+since the original. The run detail page has **Fork from here** on each
+hop.
+
 ## `explicit` vs `auto` edges
 
 - `explicit`: hard-wired. Highest-`priority` explicit edge out of a node

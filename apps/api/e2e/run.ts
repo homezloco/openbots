@@ -256,6 +256,47 @@ async function main() {
     assert(run.usageTotal.inputTokens > 0 && run.usageTotal.outputTokens > 0, "usage tracking recorded zero tokens");
   });
 
+  await test("rewind-and-fork: re-executes a hop as a new run without mutating the original", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: basicGraphId, input: "Fork-source: invoice charged twice." }),
+    });
+    const source = await waitForRun(created.body.id);
+    assert(source.status === "completed" && source.events.length === 2, `source run not ready: ${JSON.stringify(source)}`);
+
+    const forked = await api(`/graphs/${basicGraphId}/runs/${source.id}/fork`, {
+      method: "POST",
+      body: JSON.stringify({ fromSequence: 1 }),
+    });
+    assert(forked.status === 201, `fork failed: ${JSON.stringify(forked.body)}`);
+    assert(forked.body.forkedFromRunId === source.id, "forkedFromRunId should point at the source");
+    assert(forked.body.forkedFromSequence === 1, "forkedFromSequence should be 1");
+    assert(forked.body.id !== source.id, "fork must be a new run");
+
+    const forkRunResult = await waitForRun(forked.body.id);
+    assert(forkRunResult.status === "completed", `forked run did not complete: ${JSON.stringify(forkRunResult)}`);
+    assert(forkRunResult.events.length === 2, `expected copied hop 0 + re-run hop 1, got ${forkRunResult.events.length}`);
+    assert(forkRunResult.events[0].nodeId === nodeA && forkRunResult.events[1].nodeId === nodeB, "fork hop targets mismatch");
+    assert(forkRunResult.events[1].id !== source.events[1].id, "re-executed hop should be a new event row");
+
+    const original = await api(`/runs/${source.id}`);
+    assert(original.body.status === "completed" && original.body.events.length === 2, "source run must be unchanged");
+    assert(original.body.events[1].id === source.events[1].id, "source hop rows must not be rewritten");
+  });
+
+  await test("rewind-and-fork: missing sequence is 404", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: basicGraphId, input: "Need a run to 404-fork." }),
+    });
+    const source = await waitForRun(created.body.id);
+    const res = await api(`/graphs/${basicGraphId}/runs/${source.id}/fork`, {
+      method: "POST",
+      body: JSON.stringify({ fromSequence: 99 }),
+    });
+    assert(res.status === 404, `expected 404, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
   // --- Regression: GET /graphs/:id/runs must recover the TRUE original input on a multi-hop run ---
   await test("GET /graphs/:id/runs returns the original input, not the mutated final hop's input", async () => {
     // Reuses the 2-hop run from the test above: by completion, runs.input
@@ -1252,6 +1293,23 @@ async function main() {
     sessionCookie = ownerCookie;
     const owner = await api(`/runs/${runId}`);
     assert(owner.status === 200, `expected the actual owner to be able to read their own run, got ${owner.status}`);
+  });
+
+  await test("security: cannot fork another user's run", async () => {
+    const source = await waitForRun(
+      (await api("/runs", { method: "POST", body: JSON.stringify({ graphId: basicGraphId, input: "fork-idor" }) })).body.id,
+    );
+    const ownerCookie = sessionCookie;
+    sessionCookie = "";
+    const otherEmail = `e2e-fork-idor-${Date.now()}@openbots.dev`;
+    await api("/auth/signup", { method: "POST", body: JSON.stringify({ email: otherEmail, password }) });
+    const otherGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "Other fork graph" }) });
+    const attack = await api(`/graphs/${otherGraph.body.id}/runs/${source.id}/fork`, {
+      method: "POST",
+      body: JSON.stringify({ fromSequence: 0 }),
+    });
+    assert(attack.status === 404, `expected 404 forking a run on the wrong graph, got ${attack.status}: ${JSON.stringify(attack.body)}`);
+    sessionCookie = ownerCookie;
   });
 
   await test("security: GET /graphs/:id/routing-changes requires authentication and ownership", async () => {

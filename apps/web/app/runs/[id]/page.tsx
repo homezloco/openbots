@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useParams } from "next/navigation";
-import { fetchGraph, fetchRun, type Run, type RunEventRow, type UsageTotal } from "../../../lib/api";
+import { useParams, useRouter } from "next/navigation";
+import { fetchGraph, fetchRun, forkRun, type Run, type RunEventRow, type UsageTotal } from "../../../lib/api";
 import { useRunEventsSocket } from "../../../lib/useRunEventsSocket";
 import { useAuth } from "../../../components/AuthProvider";
 import { RunEventTrail } from "../../../components/RunEventTrail";
@@ -19,10 +19,12 @@ type RunDetail = Run & { events: RunEventRow[]; usageTotal: UsageTotal };
  */
 export default function RunDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const { user, loading } = useAuth();
   const [run, setRun] = useState<RunDetail | null>(null);
   const [nodeNames, setNodeNames] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const [forkingSequence, setForkingSequence] = useState<number | null>(null);
 
   useEffect(() => {
     if (user && id) {
@@ -70,6 +72,12 @@ export default function RunDetailPage() {
       <p>
         Status: <strong>{run.status}</strong> · Mode: {run.mode} · Started {new Date(run.createdAt).toLocaleString()}
       </p>
+      {run.forkedFromRunId && (
+        <p>
+          Forked from hop #{run.forkedFromSequence} of{" "}
+          <a href={`/runs/${run.forkedFromRunId}`}>run {run.forkedFromRunId.slice(0, 8)}</a>
+        </p>
+      )}
       <p>
         Usage: {run.usageTotal.inputTokens} in / {run.usageTotal.outputTokens} out tokens · est. $
         {run.usageTotal.estimatedCostUsd.toFixed(4)}
@@ -85,7 +93,22 @@ export default function RunDetailPage() {
       )}
 
       <h2>Event trail</h2>
-      <RunEventTrail events={run.events} nodeNames={nodeNames} />
+      <RunEventTrail
+        events={run.events}
+        nodeNames={nodeNames}
+        forkingSequence={forkingSequence}
+        onFork={async (sequence) => {
+          setForkingSequence(sequence);
+          setError(null);
+          try {
+            const fork = await forkRun(run.graphId, run.id, sequence);
+            router.push(`/runs/${fork.id}`);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "Fork failed");
+            setForkingSequence(null);
+          }
+        }}
+      />
     </div>
   );
 }

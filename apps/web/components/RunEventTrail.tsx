@@ -13,10 +13,14 @@ export function RunEventTrail({
   events,
   nodeNames,
   focusNodeId,
+  onFork,
+  forkingSequence,
 }: {
   events: RunEventRow[];
   nodeNames?: Record<string, string>;
   focusNodeId?: string;
+  onFork?: (sequence: number) => void;
+  forkingSequence?: number | null;
 }) {
   return (
     <ol style={{ listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 12 }}>
@@ -45,6 +49,17 @@ export function RunEventTrail({
               {event.status}
             </span>
             {event.fanoutBatchId && <span title="Part of a consensus fan-out">🔀 consensus branch</span>}
+            {onFork && (
+              <button
+                type="button"
+                onClick={() => onFork(event.sequence)}
+                disabled={forkingSequence != null}
+                style={{ marginLeft: "auto", fontSize: 12 }}
+                title="Start a new run from this hop (original run is unchanged)"
+              >
+                {forkingSequence === event.sequence ? "Forking…" : "Fork from here"}
+              </button>
+            )}
           </div>
           {event.output != null && (
             <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0" }}>

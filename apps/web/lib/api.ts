@@ -285,6 +285,8 @@ export interface Run {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  forkedFromRunId?: string | null;
+  forkedFromSequence?: number | null;
   /**
    * Only present on listRuns() results. `input` is a scratch field the
    * engine overwrites on every hop transition, so for a multi-hop run it
@@ -322,6 +324,12 @@ export const createRun = (graphId: string, input: unknown, mode: "pinned" | "liv
 
 export const fetchRun = (runId: string) =>
   request<Run & { events: RunEventRow[]; usageTotal: UsageTotal }>(`/runs/${runId}`, { cache: "no-store" });
+
+export const forkRun = (graphId: string, runId: string, fromSequence: number, mode?: "pinned" | "live") =>
+  request<Run>(`/graphs/${graphId}/runs/${runId}/fork`, {
+    method: "POST",
+    body: JSON.stringify({ fromSequence, ...(mode ? { mode } : {}) }),
+  });
 
 export interface AgentConversation {
   runId: string;

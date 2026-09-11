@@ -6,7 +6,7 @@ import { getRemoteUrl, parseGithubRepo, pushBranch, type Worktree } from "@openb
 import { db } from "../db/client.js";
 import { agentCommits, agentGraphs, agentNodes, runEvents, runs, usageEvents, userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
-import { createRun } from "../orchestrator/createRun.js";
+import { createRun, forkRun } from "../orchestrator/createRun.js";
 import { requireAuth } from "../auth/middleware.js";
 import { requireGraphOwner } from "./graphs.js";
 import { githubApiRequest } from "../github.js";
@@ -227,6 +227,32 @@ export async function runRoutes(app: FastifyInstance) {
 
     const run = await createRun(graphRow, body.input, body.mode);
     return reply.code(201).send(run);
+  });
+
+  /**
+   * Rewind-and-fork: re-execute one hop of an existing run as a new run.
+   * Prefix hops are copied as history; the source run is not mutated.
+   */
+  app.post("/graphs/:graphId/runs/:runId/fork", { preHandler: requireAuth }, async (req, reply) => {
+    const { graphId, runId } = req.params as { graphId: string; runId: string };
+    if (!(await requireGraphOwner(req, reply, graphId))) return;
+    const body = z
+      .object({
+        fromSequence: z.number().int().nonnegative(),
+        mode: RunMode.optional(),
+      })
+      .parse(req.body);
+    const source = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
+    if (!source || source.graphId !== graphId) {
+      return reply.code(404).send({ error: "Run not found" });
+    }
+    try {
+      const fork = await forkRun(source, body.fromSequence, body.mode ?? (source.mode as "pinned" | "live"));
+      return reply.code(201).send(fork);
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode ?? 400;
+      return reply.code(status).send({ error: err instanceof Error ? err.message : "Fork failed" });
+    }
   });
 
   /**

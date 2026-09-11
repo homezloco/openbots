@@ -276,6 +276,9 @@ export const Run = z.object({
   graphSnapshot: AgentGraph.nullable(),
   status: RunStatus,
   currentNodeId: z.string().uuid().nullable(),
+  /** Present when this run was forked from another run's hop checkpoint. */
+  forkedFromRunId: z.string().uuid().nullable().optional(),
+  forkedFromSequence: z.number().int().nonnegative().nullable().optional(),
   input: z.unknown(),
   output: z.unknown().nullable(),
   createdAt: z.string().datetime(),

@@ -783,6 +783,11 @@ export function HierarchyCanvas({
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onReconnect={onReconnect}
+          // The default 10px activation zone around an edge's endpoint is
+          // too fiddly to hit reliably — the drag-mid-run demo literally
+          // failed on this once. 30px makes the reconnect anchor (drag from
+          // the edge's end onto another node) easy to grab.
+          reconnectRadius={30}
           onConnect={onConnect}
           onNodeClick={(_, node) => {
             const gatewayTargetId = (node.data as { isGateway?: boolean; targetGraphId?: string } | undefined)

@@ -934,6 +934,129 @@ async function main() {
     assert(!copied.body.mcpServers || copied.body.mcpServers.length === 0, `mcpServers leaked across copy: ${JSON.stringify(copied.body.mcpServers)}`);
   });
 
+  // Runtime MCP client — worker reaches the compose `mcp-echo` service, not
+  // localhost. Save-time tests above use 127.0.0.1 because they never connect.
+  // Worker-side URL: CI worker is on the compose bridge (mcp-echo DNS).
+  // Local docker-compose.override.yml typically puts the worker on host
+  // networking (pc_telemetry), so 127.0.0.1:3930 is the published fixture.
+  const MCP_ECHO_URL =
+    process.env.E2E_MCP_ECHO_URL ?? (process.env.CI ? "http://mcp-echo:3930/mcp" : "http://127.0.0.1:3930/mcp");
+  let mcpGraphId = "";
+
+  await test("mcp runtime setup: allowlisted echo server, echo granted, secret_ping not", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp runtime" }) });
+    mcpGraphId = g.body.id;
+    const node = await api(`/graphs/${mcpGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "McpCaller",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "You can call MCP tools that were listed in your instructions. Use them when asked. Quote tool results exactly.",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"] }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `mcp node create failed: ${JSON.stringify(node.body)}`);
+    await api(`/graphs/${mcpGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+  });
+
+  await testWithRetries("mcp: echo tool is invoked and returns the echoed text", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: mcpGraphId,
+        input:
+          "Call mcp_echo_echo with the exact text Widgetizer-MCP and quote the exact tool result back to me, including the word Widgetizer-MCP.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(/widgetizer-mcp/i.test(String(run.output)), `expected echoed Widgetizer-MCP in output, got: ${run.output}`);
+  });
+
+  await testWithRetries("mcp: secret_ping is not available even though the server advertises it", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: mcpGraphId,
+        input:
+          "List the exact MCP tool names you can call. Then try to call mcp_echo_secret_ping (or secret_ping). Quote any tool error, and never invent a successful ping result.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    const output = String(run.output);
+    assert(/mcp_echo_echo/.test(output), `expected the granted mcp_echo_echo name in output, got: ${output}`);
+    assert(!/PONG_SECRET/.test(output), `secret_ping must not succeed; output contained PONG_SECRET: ${output}`);
+  });
+
+  await test("mcp: node without tools:mcp cannot call mcp tools even with mcpServers set", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp dual-gate" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "InertMcpRuntime",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Answer honestly about what tools you actually have available; don't guess.",
+        tools: [],
+        mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"] }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `inert mcp node failed: ${JSON.stringify(node.body)}`);
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: g.body.id,
+        input: "Without guessing, tell me every exact tool name you have available right now, especially any MCP tool.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(
+      !/mcp_echo_echo/.test(String(run.output)),
+      `expected no mcp_echo_echo knowledge without tools:mcp, got: ${run.output}`,
+    );
+  });
+
+  await testWithRetries("mcp: missing credentialProvider skips the server and the hop still completes", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp missing cred" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "NeedsCred",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "test",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"], credentialProvider: "mcp_echo" }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `node create failed: ${JSON.stringify(node.body)}`);
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: g.body.id,
+        input: "Without calling any tool, quote the exact MCP setup notes you were given, including any missing credential.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run should complete even if MCP was skipped, got: ${JSON.stringify(run.events)}`);
+    assert(
+      /mcp_echo|not configured|credential/i.test(String(run.output)),
+      `expected the missing-credential skip in output, got: ${run.output}`,
+    );
+  });
+
   // --- Security regression: IDOR on node/edge/credential mutation routes ---
   await test("security: cannot mutate another user's node via your own graphId (IDOR)", async () => {
     const attackerCookie = sessionCookie;

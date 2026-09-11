@@ -57,10 +57,10 @@ jobs:
         run: pnpm --filter @openbots/api db:migrate
 
       - name: Build api image
-        run: docker compose build api
+        run: docker compose build api mcp-echo
 
       - name: Start api + worker
-        run: docker compose up api worker -d
+        run: docker compose up api worker mcp-echo -d
 
       - name: Wait for api to be healthy
         run: |
@@ -76,6 +76,8 @@ jobs:
           exit 1
 
       - name: Run e2e suite
+        env:
+          E2E_MCP_ECHO_URL: http://mcp-echo:3930/mcp
         run: pnpm --filter @openbots/api test:e2e
 
       - name: Dump logs on failure

@@ -59,6 +59,26 @@ services:
       retries: 20
       start_period: 20s
 
+  # Streamable-HTTP echo MCP used by the e2e suite (echo + secret_ping).
+  # Worker DNS is http://mcp-echo:3930/mcp — keep that prefix in
+  # ALLOWED_MCP_SERVERS alongside http://127.0.0.1:3930 for local pnpm dev.
+  mcp-echo:
+    build:
+      context: ./apps/api/e2e/fixtures/mcp-echo
+    ports:
+      - "3930:3930"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3930/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
   worker:
     image: openbots-api
     command: ["node", "dist/worker.js"]
@@ -77,6 +97,8 @@ services:
       redis:
         condition: service_healthy
       api:
+        condition: service_healthy
+      mcp-echo:
         condition: service_healthy
 
   web:

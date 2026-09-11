@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { generateText, stepCountIs } from "ai";
+import { generateText, stepCountIs, type Tool } from "ai";
 import { eq, desc } from "drizzle-orm";
 import {
   commitWorktreeChanges,
@@ -39,6 +39,7 @@ import {
 } from "./graphManagementTools.js";
 import { createBusinessMetricsTool, getMetricsSources, type MetricsSource } from "./businessMetricsTool.js";
 import { createRunRemoteCommandTool } from "./remoteCommandTool.js";
+import { appendMcpContext, resolveMcpTools, type McpResolution } from "./mcpTool.js";
 import { computeWarnings } from "./warnings.js";
 import { enqueueHop } from "../queue/runQueue.js";
 import { publishRunEvent } from "../ws/publish.js";
@@ -521,6 +522,9 @@ async function callAgent(
   // dispatchTargets already follow (re-checked fresh inside the tool
   // itself against ALLOWED_SSH_HOSTS on every call, not just here).
   const wantsRemoteCommand = node.tools.includes("run_remote_command") && Boolean(node.sshTarget);
+  // Dual-gate: the "mcp" tool name AND a non-empty mcpServers list.
+  // URL allowlist is re-checked inside resolveMcpTools on every hop.
+  const wantsMcp = node.tools.includes("mcp") && Boolean(node.mcpServers?.length);
   // Computed whenever EITHER capability wants it — not just wantsDispatch
   // alone, which used to leave a manage_target_graphs-only node with no
   // idea what any of its target graphs were even named. See PLAN.md.
@@ -557,6 +561,7 @@ async function callAgent(
     // those writes must not get silently attributed to a later,
     // successful provider's commit.
     const touchedFiles = new Set<string>();
+    let mcp: McpResolution = { tools: {}, granted: [], skipped: [], closeAll: async () => {} };
     try {
       const credentials = await getCredentials(node.graphId, node.id, target.provider);
       const model = getModel(target.provider, target.model, credentials);
@@ -569,7 +574,7 @@ async function callAgent(
       // packages/providers must never depend on apps/api, the same
       // layering rule the write-root allowlist check follows), so
       // resolveTools silently skips them and they're merged in here.
-      let tools = baseTools;
+      let tools: Record<string, Tool> | undefined = baseTools;
       if (wantsDispatch) {
         tools = {
           ...(tools ?? {}),
@@ -605,10 +610,19 @@ async function callAgent(
           run_remote_command: createRunRemoteCommandTool(ownerId, node.sshTarget, node.id, node.graphId, runId),
         };
       }
+      if (wantsMcp) {
+        // Fresh connect per fallback-chain attempt (same as touchedFiles):
+        // a shared MCP session across concurrent hops is a race.
+        mcp = await resolveMcpTools(node, ownerId, new Set(Object.keys(tools ?? {})));
+        if (Object.keys(mcp.tools).length > 0) {
+          tools = { ...(tools ?? {}), ...mcp.tools };
+        }
+      }
+      const hopPrompt = appendMcpContext(systemPrompt, mcp);
       const result = await withRetry(() =>
         generateText({
           model,
-          system: systemPrompt,
+          system: hopPrompt,
           prompt,
           // 20, not 8: a write-capable investigative specialist doing real
           // work (read CLAUDE.md, read a schema file, read the actual
@@ -683,6 +697,8 @@ async function callAgent(
         throw err;
       }
       // else: fall through to the next target in the chain
+    } finally {
+      await mcp.closeAll();
     }
   }
   throw lastError;

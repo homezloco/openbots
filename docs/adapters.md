@@ -44,3 +44,25 @@ use (see `docs/orchestration.md`'s "Confirmed push and PR creation"
 section). Don't conflate the two: a graph-scoped provider credential
 authenticates model calls; an account-scoped user credential
 authenticates git operations against GitHub.
+
+## MCP client
+
+OpenBots is an MCP **client**, not a server and not a plugin host. A node
+with `"mcp"` in `tools[]` and a non-empty `mcpServers[]` can call tools
+on remote Streamable HTTP (SSE fallback) MCP servers. The worker never
+spawns stdio processes and never `import()`s user code — same network
+shape as `pc_telemetry` / `business_metrics`.
+
+- Operator fence: `ALLOWED_MCP_SERVERS` (comma-separated http(s) URL
+  prefixes, empty-deny). Checked at save **and** on every hop. Redirects
+  are refused (`redirect: "error"`).
+- Per-server `allowedTools` is an exact-name allowlist; empty means zero
+  tools, not all of them. Model-facing names are `mcp_<slug>_<toolName>`.
+- Optional `credentialProvider` looks up `user_credentials` and sends
+  `Authorization: Bearer`. Missing credential skips that server; the hop
+  still runs. Tokens never live on the node row or in API responses.
+- Connection lifetime is one hop (`apps/api/src/orchestrator/mcpTool.ts`).
+  One server failing does not fail the hop.
+
+stdio MCP, OpenBots-as-MCP-server, resources/prompts/sampling, and OAuth
+browser flows are all out of scope.

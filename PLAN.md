@@ -823,8 +823,12 @@ the prioritization survives past this session.
   `dispatch_to_graph`'s cross-graph call, not code loading into the API
   process. Single biggest ecosystem-compatibility gap found.
   **PR 1 (schema + `ALLOWED_MCP_SERVERS` empty-deny allowlist + drop on
-  copy) shipped 2026-09-11.** Runtime client + echo fixture (PR 2) and
-  settings UI (PR 3) still unbuilt. stdio remains forbidden.
+  copy) shipped 2026-09-11.** **PR 2 (runtime client + `mcp-echo` fixture)
+  shipped 2026-09-11:** hop-time Streamable HTTP / SSE client in
+  `orchestrator/mcpTool.ts`, dual-gate + runtime allowlist re-check,
+  namespaced `mcp_<slug>_<tool>` tools, missing-credential skip, compose
+  `mcp-echo` service. Settings UI + `POST /mcp/discover` (PR 3) still
+  unbuilt. stdio remains forbidden.
 - ~~`useBotChat.ts::buildNextInput` has no memory bound~~ — fixed
   2026-09-10, pulled to the top of the list ahead of the rest of this
   roadmap since it was a live bug, not just a gap: a long-running bot's

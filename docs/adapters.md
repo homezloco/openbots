@@ -76,6 +76,9 @@ shape as `pc_telemetry` / `business_metrics`.
   still runs. Tokens never live on the node row or in API responses.
 - Connection lifetime is one hop (`apps/api/src/orchestrator/mcpTool.ts`).
   One server failing does not fail the hop.
+- Humans configure this on the node settings form: Discover
+  (`POST /mcp/discover`) lists advertised tools for a checklist. Discover
+  never calls a tool.
 
 stdio MCP, OpenBots-as-MCP-server, resources/prompts/sampling, and OAuth
 browser flows are all out of scope.

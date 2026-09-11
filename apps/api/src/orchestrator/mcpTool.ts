@@ -242,6 +242,44 @@ async function connectMcp(url: URL, token: string | undefined): Promise<{ client
   }
 }
 
+export interface DiscoveredMcpTool {
+  name: string;
+  description: string;
+}
+
+/**
+ * Human-triggered probe for the settings UI. Connect + listTools only —
+ * never callTool. Caller must have already checked the URL allowlist.
+ */
+export async function discoverMcpServer(
+  url: string,
+  ownerId: string,
+  credentialProvider?: string,
+): Promise<{ name: string; tools: DiscoveredMcpTool[] }> {
+  let token: string | undefined;
+  if (credentialProvider) {
+    const cred = await db.query.userCredentials.findFirst({
+      where: and(eq(userCredentials.userId, ownerId), eq(userCredentials.provider, credentialProvider)),
+    });
+    if (!cred) {
+      throw new Error(`credential ${credentialProvider} not configured`);
+    }
+    token = decryptCredential(cred.encryptedKey);
+  }
+
+  const connected = await connectMcp(new URL(url), token);
+  try {
+    const listed = await connected.client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS });
+    const info = connected.client.getServerVersion();
+    return {
+      name: info?.name ?? "mcp",
+      tools: listed.tools.map((t) => ({ name: t.name, description: t.description ?? "" })),
+    };
+  } finally {
+    await connected.close();
+  }
+}
+
 /**
  * Same family as appendRemoteCommandContext: a model granted MCP has zero
  * built-in knowledge of the namespaced tool names. Lists only tools that

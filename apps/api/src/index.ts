@@ -17,6 +17,7 @@ import { templateRoutes } from "./routes/templates.js";
 import { routingChangeRoutes } from "./routes/routingChanges.js";
 import { chatRoutes } from "./routes/chat.js";
 import { wsRoutes } from "./ws/hub.js";
+import { mcpRoutes } from "./routes/mcp.js";
 import { applyMigrations } from "./db/migrate.js";
 
 await applyMigrations();
@@ -64,6 +65,7 @@ await app.register(templateRoutes);
 await app.register(routingChangeRoutes);
 await app.register(chatRoutes);
 await app.register(wsRoutes);
+await app.register(mcpRoutes);
 
 app.get("/health", async () => ({ status: "ok" }));
 

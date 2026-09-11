@@ -15,8 +15,8 @@ conversation history, a unified Dashboard, agents that write code and
 dispatch/manage with gateway nodes on the canvas, a GitHub tab, and
 `business_metrics` from per-account `metrics_<slug>` logins at
 `/settings`. An MCP **client** (Streamable HTTP / SSE, operator
-`ALLOWED_MCP_SERVERS` empty-deny) shipped as PRs 1–2; the settings UI
-for it (PR 3) is still unbuilt. Live-mode reroute now re-reads the graph
+`ALLOWED_MCP_SERVERS` empty-deny) shipped as PRs 1–3 (runtime +
+`POST /mcp/discover` + AgentSettingsForm). Live-mode reroute now re-reads the graph
 *after* the in-flight model call, which is what the README GIF is
 showing. See "Known gaps" at the bottom for what's still actually
 missing.**
@@ -816,8 +816,10 @@ the prioritization survives past this session.
   shipped 2026-09-11:** hop-time Streamable HTTP / SSE client in
   `orchestrator/mcpTool.ts`, dual-gate + runtime allowlist re-check,
   namespaced `mcp_<slug>_<tool>` tools, missing-credential skip, compose
-  `mcp-echo` service. Settings UI + `POST /mcp/discover` (PR 3) still
-  unbuilt. stdio remains forbidden.
+  `mcp-echo` service. **PR 3 (settings UI + `POST /mcp/discover`) shipped
+  2026-09-11:** AgentSettingsForm checkbox/rows/discover checklist;
+  discover is auth + allowlist + listTools only (never callTool). stdio
+  remains forbidden.
 - ~~`useBotChat.ts::buildNextInput` has no memory bound~~ — fixed
   2026-09-10, pulled to the top of the list ahead of the rest of this
   roadmap since it was a live bug, not just a gap: a long-running bot's

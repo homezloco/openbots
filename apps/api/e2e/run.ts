@@ -1157,6 +1157,41 @@ async function main() {
     );
   });
 
+  // Discover runs in the API process (compose DNS), not the worker.
+  const MCP_DISCOVER_URL = process.env.E2E_MCP_DISCOVER_URL ?? "http://mcp-echo:3930/mcp";
+
+  await test("mcp discover: 401 without a session", async () => {
+    const owner = sessionCookie;
+    sessionCookie = "";
+    const res = await api("/mcp/discover", { method: "POST", body: JSON.stringify({ url: MCP_DISCOVER_URL }) });
+    sessionCookie = owner;
+    assert(res.status === 401, `expected 401, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("mcp discover: 400 for a URL outside ALLOWED_MCP_SERVERS", async () => {
+    const res = await api("/mcp/discover", {
+      method: "POST",
+      body: JSON.stringify({ url: "http://169.254.169.254/mcp" }),
+    });
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("mcp discover: missing credentialProvider is 400", async () => {
+    const res = await api("/mcp/discover", {
+      method: "POST",
+      body: JSON.stringify({ url: MCP_DISCOVER_URL, credentialProvider: "mcp_missing" }),
+    });
+    assert(res.status === 400, `expected 400 for a missing cred, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("mcp discover: 200 lists advertised tools and does not call them", async () => {
+    const res = await api("/mcp/discover", { method: "POST", body: JSON.stringify({ url: MCP_DISCOVER_URL }) });
+    assert(res.status === 200, `expected 200, got ${res.status}: ${JSON.stringify(res.body)}`);
+    const names = (res.body.tools ?? []).map((t: { name: string }) => t.name);
+    assert(names.includes("echo"), `expected echo in discover, got: ${JSON.stringify(res.body)}`);
+    assert(names.includes("secret_ping"), `discover lists advertised tools, including ones not yet granted: ${JSON.stringify(names)}`);
+  });
+
   // --- Security regression: IDOR on node/edge/credential mutation routes ---
   await test("security: cannot mutate another user's node via your own graphId (IDOR)", async () => {
     const attackerCookie = sessionCookie;

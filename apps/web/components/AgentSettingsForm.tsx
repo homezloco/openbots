@@ -2,7 +2,16 @@
 
 import { useEffect, useState } from "react";
 import type { AgentGraph, AgentNode, ProviderId } from "@openbots/graph-schema";
-import { deleteNode, listGraphs, updateNode, type GraphSummary } from "../lib/api";
+import {
+  deleteNode,
+  discoverMcp,
+  listGraphs,
+  listUserCredentials,
+  updateNode,
+  type DiscoveredMcpTool,
+  type GraphSummary,
+  type UserCredentialSummary,
+} from "../lib/api";
 import { PROVIDERS, ROLES } from "./HierarchyCanvas";
 
 const TIERS: AgentNode["tier"][] = [undefined, "economy", "standard", "flagship"];
@@ -11,6 +20,29 @@ const WRITE_TOOLS = ["write_file", "edit_file"];
 const DISPATCH_TOOL = "dispatch_to_graph";
 const MANAGE_TOOL = "manage_target_graphs";
 const REMOTE_TOOL = "run_remote_command";
+const MCP_TOOL = "mcp";
+
+interface McpServerDraft {
+  slug: string;
+  url: string;
+  allowedTools: string[];
+  credentialProvider: string;
+  discovered: DiscoveredMcpTool[];
+  discovering: boolean;
+  discoverError: string | null;
+}
+
+function toDraft(server: { slug: string; url: string; allowedTools?: string[]; credentialProvider?: string }): McpServerDraft {
+  return {
+    slug: server.slug,
+    url: server.url,
+    allowedTools: server.allowedTools ?? [],
+    credentialProvider: server.credentialProvider ?? "",
+    discovered: (server.allowedTools ?? []).map((name) => ({ name, description: "" })),
+    discovering: false,
+    discoverError: null,
+  };
+}
 
 /**
  * Editing an existing agent's config — reuses the same field set as the
@@ -55,6 +87,11 @@ export function AgentSettingsForm({
   const [sshHost, setSshHost] = useState(node.sshTarget?.host ?? "");
   const [sshUsername, setSshUsername] = useState(node.sshTarget?.username ?? "");
   const [allowedCommands, setAllowedCommands] = useState(node.sshTarget?.allowedCommands ?? []);
+  const [mcpEnabled, setMcpEnabled] = useState(node.tools.includes(MCP_TOOL));
+  const [mcpServers, setMcpServers] = useState<McpServerDraft[]>(
+    (node.mcpServers ?? []).length > 0 ? (node.mcpServers ?? []).map(toDraft) : [toDraft({ slug: "", url: "", allowedTools: [] })],
+  );
+  const [userCreds, setUserCreds] = useState<UserCredentialSummary[] | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -72,12 +109,49 @@ export function AgentSettingsForm({
       .catch(() => setAvailableGraphs([]));
   }, [graphId]);
 
+  useEffect(() => {
+    listUserCredentials()
+      .then(setUserCreds)
+      .catch(() => setUserCreds([]));
+  }, []);
+
   function toggleDispatchTarget(id: string) {
     setDispatchTargets((prev) => (prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]));
   }
 
   function addCommandRow() {
     setAllowedCommands((prev) => [...prev, { label: "", command: "" }]);
+  }
+
+  function patchMcpServer(index: number, patch: Partial<McpServerDraft>) {
+    setMcpServers((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+  }
+
+  async function discoverRow(index: number) {
+    const row = mcpServers[index];
+    if (!row?.url.trim()) {
+      patchMcpServer(index, { discoverError: "Enter a URL first." });
+      return;
+    }
+    patchMcpServer(index, { discovering: true, discoverError: null });
+    try {
+      const result = await discoverMcp({
+        url: row.url.trim(),
+        ...(row.credentialProvider.trim() ? { credentialProvider: row.credentialProvider.trim() } : {}),
+      });
+      const known = new Set(result.tools.map((t) => t.name));
+      patchMcpServer(index, {
+        discovering: false,
+        discovered: result.tools,
+        allowedTools: row.allowedTools.filter((n) => known.has(n)),
+        discoverError: null,
+      });
+    } catch (err) {
+      patchMcpServer(index, {
+        discovering: false,
+        discoverError: err instanceof Error ? err.message : "Discover failed",
+      });
+    }
   }
 
   async function save() {
@@ -93,11 +167,24 @@ export function AgentSettingsForm({
       setError("ALL fan-out needs an aggregator node and at least one outgoing edge.");
       return;
     }
+    if (mcpEnabled) {
+      const filled = mcpServers.filter((s) => s.slug.trim() && s.url.trim());
+      if (filled.length === 0) {
+        setError("Add at least one MCP server (slug + URL), or turn off MCP servers.");
+        return;
+      }
+    }
     setSaving(true);
     setError(null);
     try {
       const nonFileTools = node.tools.filter(
-        (t) => !FILE_TOOLS.includes(t) && !WRITE_TOOLS.includes(t) && t !== DISPATCH_TOOL && t !== MANAGE_TOOL && t !== REMOTE_TOOL,
+        (t) =>
+          !FILE_TOOLS.includes(t) &&
+          !WRITE_TOOLS.includes(t) &&
+          t !== DISPATCH_TOOL &&
+          t !== MANAGE_TOOL &&
+          t !== REMOTE_TOOL &&
+          t !== MCP_TOOL,
       );
       const tools = [
         ...nonFileTools,
@@ -105,6 +192,7 @@ export function AgentSettingsForm({
         ...(dispatchEnabled ? [DISPATCH_TOOL] : []),
         ...(manageEnabled ? [MANAGE_TOOL] : []),
         ...(remoteCommandEnabled ? [REMOTE_TOOL] : []),
+        ...(mcpEnabled ? [MCP_TOOL] : []),
       ];
       const updated = await updateNode(graphId, node.id, {
         name: form.name,
@@ -125,6 +213,16 @@ export function AgentSettingsForm({
         sshTarget: remoteCommandEnabled
           ? { host: sshHost.trim(), username: sshUsername.trim(), allowedCommands }
           : null,
+        mcpServers: mcpEnabled
+          ? mcpServers
+              .filter((s) => s.slug.trim() && s.url.trim())
+              .map((s) => ({
+                slug: s.slug.trim(),
+                url: s.url.trim(),
+                allowedTools: s.allowedTools,
+                ...(s.credentialProvider.trim() ? { credentialProvider: s.credentialProvider.trim() } : {}),
+              }))
+          : [],
         consensusGroup: fanoutEnabled ? { aggregatorNodeId: aggregatorId, edgeIds: fanoutEdgeIds } : null,
       });
       onSaved(updated);
@@ -332,6 +430,123 @@ export function AgentSettingsForm({
           ))}
           <button type="button" onClick={addCommandRow} style={{ alignSelf: "flex-start" }}>
             + Add command
+          </button>
+        </div>
+      )}
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="checkbox" checked={mcpEnabled} onChange={(e) => setMcpEnabled(e.target.checked)} />
+        <span>
+          MCP servers{" "}
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            (call tools on remote Streamable HTTP MCP servers — URL must be in ALLOWED_MCP_SERVERS; empty allowed-tools
+            means zero tools, not all of them)
+          </span>
+        </span>
+      </label>
+
+      {mcpEnabled && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginLeft: 24 }}>
+          {mcpServers.map((server, i) => (
+            <div
+              key={i}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                padding: 8,
+              }}
+            >
+              <div style={{ display: "flex", gap: 8 }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+                  Slug
+                  <input
+                    placeholder="github"
+                    value={server.slug}
+                    onChange={(e) => patchMcpServer(i, { slug: e.target.value })}
+                  />
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 2 }}>
+                  URL
+                  <input
+                    placeholder="https://mcp.example/mcp"
+                    value={server.url}
+                    onChange={(e) => patchMcpServer(i, { url: e.target.value })}
+                  />
+                </label>
+              </div>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                Credential (optional bearer from /settings)
+                <select
+                  value={server.credentialProvider}
+                  onChange={(e) => patchMcpServer(i, { credentialProvider: e.target.value })}
+                >
+                  <option value="">(none)</option>
+                  {(userCreds ?? []).map((c) => (
+                    <option key={c.id} value={c.provider}>
+                      {c.provider}
+                      {c.label ? ` — ${c.label}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button type="button" onClick={() => void discoverRow(i)} disabled={server.discovering}>
+                  {server.discovering ? "Discovering…" : "Discover tools"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMcpServers((prev) => prev.filter((_, j) => j !== i))}
+                  disabled={mcpServers.length === 1}
+                >
+                  Remove server
+                </button>
+              </div>
+              {server.discoverError && <p style={{ color: "var(--danger)", margin: 0, fontSize: 13 }}>{server.discoverError}</p>}
+              {server.discovered.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ color: "var(--text-faint)", fontSize: 12 }}>Grant only the tools this node may call:</span>
+                  {server.discovered.map((tool) => (
+                    <label key={tool.name} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 13 }}>
+                      <input
+                        type="checkbox"
+                        checked={server.allowedTools.includes(tool.name)}
+                        onChange={() => {
+                          const on = server.allowedTools.includes(tool.name);
+                          patchMcpServer(i, {
+                            allowedTools: on
+                              ? server.allowedTools.filter((n) => n !== tool.name)
+                              : [...server.allowedTools, tool.name],
+                          });
+                        }}
+                      />
+                      <span>
+                        <code>{tool.name}</code>
+                        {tool.description ? (
+                          <span style={{ color: "var(--text-faint)" }}> — {tool.description}</span>
+                        ) : null}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {server.discovered.length === 0 && server.allowedTools.length > 0 && (
+                <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+                  Granted: {server.allowedTools.join(", ")} — Discover to refresh the checklist.
+                </span>
+              )}
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() =>
+              setMcpServers((prev) => [...prev, toDraft({ slug: "", url: "", allowedTools: [] })])
+            }
+            style={{ alignSelf: "flex-start" }}
+          >
+            + Add MCP server
           </button>
         </div>
       )}

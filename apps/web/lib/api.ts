@@ -188,6 +188,17 @@ export const createUserCredential = (body: { provider: string; apiKey: string; l
 
 export const deleteUserCredential = (id: string) => request<void>(`/me/credentials/${id}`, { method: "DELETE" });
 
+export interface DiscoveredMcpTool {
+  name: string;
+  description: string;
+}
+
+export const discoverMcp = (body: { url: string; credentialProvider?: string }) =>
+  request<{ name: string; tools: DiscoveredMcpTool[] }>("/mcp/discover", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
 // --- Scheduled triggers (run a graph on a recurring cron schedule) ---
 
 export interface ScheduledTrigger {

@@ -6,6 +6,12 @@ OpenAI-compatible endpoint (including local models via Ollama) — and
 design agent hierarchies on a live canvas with drag-and-drop routing,
 instead of a black-box "just describe your bot" flow.
 
+<p align="center">
+  <img src="docs/assets/openbots-reroute.gif" width="400" alt="Dragging an edge on the Hierarchy canvas mid-run so the next hop goes to Billing instead of Support">
+</p>
+
+Mid-run reroute: drag an edge while a hop is still generating, and the next hop follows the new target.
+
 A "bot" and a "graph" are the same thing: a single-node graph shows up on
 the Dashboard as a chat bot with persistent conversation memory; add a
 second agent and it becomes a real pipeline you view on the Hierarchy

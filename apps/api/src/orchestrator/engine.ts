@@ -114,6 +114,19 @@ export async function dispatchHop(runId: string): Promise<void> {
   await recordUsage(runId, node.id, result);
   const output = result.text;
 
+  // Live mode: re-read the graph AFTER the model call, not from the
+  // in-memory copy loaded at hop start. resolveNextHop is supposed to
+  // see whatever the canvas looks like *at that moment* (docs/orchestration.md);
+  // loading once at the top of dispatchHop meant a drag-reroute during
+  // generateText was ignored and hop 2 still followed the old edge. The
+  // e2e "mid-run rerouting" case is exactly this window. Pinned mode
+  // still returns the snapshot.
+  const graphNow = await loadGraphForRun(run.graphId, run.mode, run.graphSnapshot);
+  const nodeNow = graphNow.nodes.find((n) => n.id === node.id) ?? node;
+  const autoRoutingTargetsNow = aggregatorNodeIds(graphNow).has(nodeNow.id)
+    ? []
+    : getAutoRoutingTargets(graphNow, nodeNow.id);
+
   // A consensus source node with NO auto edges (the original pattern)
   // bypasses normal routing unconditionally on every hop, exactly as
   // before. A HYBRID node — one with both auto edges and a
@@ -123,8 +136,8 @@ export async function dispatchHop(runId: string): Promise<void> {
   // handle both "check on Bushwacker" (single hop) and "status update
   // for all projects" (fan out to every configured branch) without
   // being two different node types.
-  if (node.consensusGroup) {
-    const hasAutoEdges = autoRoutingTargets.length > 0;
+  if (nodeNow.consensusGroup) {
+    const hasAutoEdges = autoRoutingTargetsNow.length > 0;
     const signaledAll = hasAutoEdges && startsWithSentinel(output, "all");
     if (!hasAutoEdges || signaledAll) {
       await db.insert(runEvents).values({
@@ -137,18 +150,18 @@ export async function dispatchHop(runId: string): Promise<void> {
         startedAt,
         finishedAt: new Date(),
       });
-      publishRunEvent({ runId, graphId: graph.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
+      publishRunEvent({ runId, graphId: graphNow.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
       // Fan-out branches get the original user request, not the lead's
       // "ALL …" routing essay — specialists were treating the essay as
       // the task and pushing back on role confusion.
-      await dispatchConsensus(runId, graph, node, run.input);
+      await dispatchConsensus(runId, graphNow, nodeNow, run.input);
       return;
     }
   }
 
   // Aggregator output is the answer. Its outgoing auto edges (if any)
   // are a cycle back into the specialists it just joined.
-  if (isAggregator) {
+  if (aggregatorNodeIds(graphNow).has(nodeNow.id)) {
     await db.insert(runEvents).values({
       runId,
       nodeId: node.id,
@@ -159,16 +172,16 @@ export async function dispatchHop(runId: string): Promise<void> {
       startedAt,
       finishedAt: new Date(),
     });
-    publishRunEvent({ runId, graphId: graph.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
+    publishRunEvent({ runId, graphId: graphNow.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
     await db
       .update(runs)
       .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
       .where(eq(runs.id, runId));
-    publishRunEvent({ runId, graphId: graph.id, type: "run_completed", payload: { output } });
+    publishRunEvent({ runId, graphId: graphNow.id, type: "run_completed", payload: { output } });
     return;
   }
 
-  const { edge, nextNodeId } = resolveNextHop(graph, node.id, output);
+  const { edge, nextNodeId } = resolveNextHop(graphNow, nodeNow.id, output);
 
   await db.insert(runEvents).values({
     runId,
@@ -183,7 +196,7 @@ export async function dispatchHop(runId: string): Promise<void> {
   });
   publishRunEvent({
     runId,
-    graphId: graph.id,
+    graphId: graphNow.id,
     type: "hop_succeeded",
     nodeId: node.id,
     resolvedEdgeId: edge?.id ?? null,

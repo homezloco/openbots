@@ -897,9 +897,10 @@ async function main() {
     const created = await api("/runs", { method: "POST", body: JSON.stringify({ graphId, input: "go", mode: "live" }) });
     assert(created.status === 201, `run create failed: ${JSON.stringify(created.body)}`);
 
-    // Fired immediately after run creation, before the entry hop's model
-    // call (which takes at least ~1s in practice) has had time to finish
-    // and resolve its next hop. This is inherently timing-sensitive.
+    // Fired immediately after run creation. dispatchHop re-reads the live
+    // graph after the model returns, so this PATCH is picked up even if
+    // the worker already started hop 1 (the old race: graph was loaded
+    // once at hop start and reused for resolveNextHop).
     const reroute = await api(`/graphs/${graphId}/edges/${edge.body.id}`, {
       method: "PATCH",
       body: JSON.stringify({ targetNodeId: rerouteTarget.body.id }),

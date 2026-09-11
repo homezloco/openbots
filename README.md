@@ -50,7 +50,7 @@ work in depth.
 - **Multi-user auth** — signup/login with scrypt-hashed passwords and signed session cookies; every graph is owned and access-controlled (reads included).
 - **Usage/cost tracking, cross-provider fallback chains, encrypted per-agent and per-account credentials, a small built-in tool registry** — see `docs/adapters.md`.
 - **Templates** — save any graph as a reusable, self-contained template (file-access, MCP servers, and dispatch targets are dropped on copy); instantiate it into a fresh graph with new node/edge ids.
-- **Run replay/audit** — every routing edit and every run's full hop-by-hop trail is persisted.
+- **Run replay/audit** — every routing edit and every run's full hop-by-hop trail is persisted. Optionally export those hops as OpenTelemetry traces (`OTEL_EXPORTER_OTLP_ENDPOINT` on the worker) into Jaeger, Grafana Tempo, or Honeycomb.
 
 ## Stack
 

@@ -36,6 +36,15 @@ while run.status == "active":
 Default new runs to `pinned` unless you actually want live reroutes;
 the live-reroute demo on the Dashboard starts in `live`.
 
+## OpenTelemetry
+
+Each hop is exported as an `openbots.hop` span in a trace keyed by the
+run id, plus an `openbots.run` span when the run completes or errors.
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP HTTP, e.g. `http://localhost:4318`)
+on the **worker** — that's where hops execute. Unset means a no-op; the
+e2e suite does not require a collector. Span attributes are ids, node
+name, provider/model, token counts — not prompt or output text.
+
 ## `explicit` vs `auto` edges
 
 - `explicit`: hard-wired. Highest-`priority` explicit edge out of a node

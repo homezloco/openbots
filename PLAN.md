@@ -830,11 +830,11 @@ the prioritization survives past this session.
   truncated]`. This is a bound, not real memory — still no summarization
   or structured recall, so the CrewAI-style short/long-term/entity memory
   gap itself is still open; this just stops the unbounded-growth bug.
-- **OpenTelemetry trace export for `run_events`.** Rather than competing
-  with the observability category (Langfuse — MIT core, acquired by
-  ClickHouse Jan 2026; LangSmith; Arize/Phoenix), export the existing
-  hop-by-hop trail in OTel format so it plugs into tools people already
-  use — integration, not a rebuild.
+- ~~**OpenTelemetry trace export for `run_events`.**~~ Shipped 2026-09-11:
+  optional OTLP HTTP exporter (`OTEL_EXPORTER_OTLP_ENDPOINT`) from the
+  worker; one trace per run, one span per hop. Unset = no-op. Not a
+  Langfuse rebuild — plug into Jaeger/Tempo/Honeycomb. Prompt/output
+  text is never an attribute.
 
 **Later — real value, bigger lift, best done post-traction:**
 - **Time-travel / rewind-and-fork from a past hop**, LangGraph-style

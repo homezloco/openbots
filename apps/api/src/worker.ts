@@ -7,6 +7,9 @@ import { dispatchHop } from "./orchestrator/engine.js";
 import { runScheduledTrigger } from "./orchestrator/scheduledTrigger.js";
 import { db } from "./db/client.js";
 import { scheduledTriggers } from "./db/schema.js";
+import { initOtel } from "./observability/otel.js";
+
+initOtel("openbots-worker");
 
 /**
  * Separate process from the Fastify API by design: the API only enqueues

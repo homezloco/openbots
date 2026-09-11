@@ -43,6 +43,7 @@ import { appendMcpContext, resolveMcpTools, type McpResolution } from "./mcpTool
 import { computeWarnings } from "./warnings.js";
 import { enqueueHop } from "../queue/runQueue.js";
 import { publishRunEvent } from "../ws/publish.js";
+import { finishHopSpan, recordRunFinished, startHopSpan } from "../observability/otel.js";
 
 interface AgentCallResult {
   text: string;
@@ -83,6 +84,14 @@ export async function dispatchHop(runId: string): Promise<void> {
 
   const sequence = await nextSequence(runId);
   const startedAt = new Date();
+  const hopSpan = startHopSpan({
+    runId,
+    graphId: graph.id,
+    nodeId: node.id,
+    nodeName: node.name,
+    sequence,
+    startTime: startedAt,
+  });
   publishRunEvent({ runId, graphId: graph.id, type: "hop_dispatched", nodeId: node.id });
 
   // An aggregator hop is a join, not a router — injecting its outgoing
@@ -108,11 +117,21 @@ export async function dispatchHop(runId: string): Promise<void> {
     });
     await db.update(runs).set({ status: "error", updatedAt: new Date() }).where(eq(runs.id, runId));
     publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: node.id, payload: { error } });
+    finishHopSpan(hopSpan, { ok: false, error });
+    recordRunFinished({ runId, graphId: graph.id, status: "error", createdAt: run.createdAt });
     return;
   }
 
   await recordUsage(runId, node.id, result);
   const output = result.text;
+  finishHopSpan(hopSpan, {
+    ok: true,
+    provider: result.provider,
+    model: result.model,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    outputChars: output.length,
+  });
 
   // Live mode: re-read the graph AFTER the model call, not from the
   // in-memory copy loaded at hop start. resolveNextHop is supposed to
@@ -178,6 +197,7 @@ export async function dispatchHop(runId: string): Promise<void> {
       .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
       .where(eq(runs.id, runId));
     publishRunEvent({ runId, graphId: graphNow.id, type: "run_completed", payload: { output } });
+    recordRunFinished({ runId, graphId: graphNow.id, status: "completed", createdAt: run.createdAt });
     return;
   }
 
@@ -209,6 +229,7 @@ export async function dispatchHop(runId: string): Promise<void> {
       .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
       .where(eq(runs.id, runId));
     publishRunEvent({ runId, graphId: graph.id, type: "run_completed", payload: { output } });
+    recordRunFinished({ runId, graphId: graph.id, status: "completed", createdAt: run.createdAt });
     return;
   }
 
@@ -223,6 +244,7 @@ export async function dispatchHop(runId: string): Promise<void> {
       .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
       .where(eq(runs.id, runId));
     publishRunEvent({ runId, graphId: graph.id, type: "run_completed", payload: { output } });
+    recordRunFinished({ runId, graphId: graph.id, status: "completed", createdAt: run.createdAt });
     return;
   }
 
@@ -287,6 +309,14 @@ async function dispatchConsensus(
     branches.map(async ({ edge, targetNode }, index) => {
       const sequence = baseSequence + index;
       const startedAt = new Date();
+      const hopSpan = startHopSpan({
+        runId,
+        graphId: graph.id,
+        nodeId: targetNode.id,
+        nodeName: targetNode.name,
+        sequence,
+        startTime: startedAt,
+      });
       publishRunEvent({ runId, graphId: graph.id, type: "hop_dispatched", nodeId: targetNode.id });
 
       try {
@@ -294,6 +324,14 @@ async function dispatchConsensus(
           callAgent(targetNode, input, runId, getAutoRoutingTargets(graph, targetNode.id), graph.ownerId),
         );
         await recordUsage(runId, targetNode.id, result);
+        finishHopSpan(hopSpan, {
+          ok: true,
+          provider: result.provider,
+          model: result.model,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          outputChars: result.text.length,
+        });
         await db.insert(runEvents).values({
           runId,
           nodeId: targetNode.id,
@@ -330,6 +368,7 @@ async function dispatchConsensus(
           finishedAt: new Date(),
         });
         publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: targetNode.id, payload: { error } });
+        finishHopSpan(hopSpan, { ok: false, error });
         throw err;
       }
     }),
@@ -351,6 +390,13 @@ async function dispatchConsensus(
       type: "hop_failed",
       nodeId: sourceNode.id,
       payload: { error: `${failedCount}/${branches.length} consensus branches failed` },
+    });
+    const runRow = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
+    recordRunFinished({
+      runId,
+      graphId: graph.id,
+      status: "error",
+      createdAt: runRow?.createdAt ?? new Date(),
     });
     return;
   }

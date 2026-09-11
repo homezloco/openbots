@@ -19,6 +19,9 @@ import { chatRoutes } from "./routes/chat.js";
 import { wsRoutes } from "./ws/hub.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { applyMigrations } from "./db/migrate.js";
+import { initOtel } from "./observability/otel.js";
+
+initOtel("openbots-api");
 
 await applyMigrations();
 

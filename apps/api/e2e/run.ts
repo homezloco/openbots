@@ -1319,6 +1319,46 @@ async function main() {
     assert(names.includes("secret_ping"), `discover lists advertised tools, including ones not yet granted: ${JSON.stringify(names)}`);
   });
 
+  // --- MCP registry picker (Smithery) — SMITHERY_API_KEY is never set in
+  // this environment, so only the deterministic "not configured" and auth
+  // paths are exercised here; a real search/detail round-trip is a
+  // documented manual check (see PLAN.md), not part of this suite. ---
+  await test("mcp registry search: 401 without a session", async () => {
+    const owner = sessionCookie;
+    sessionCookie = "";
+    const res = await api("/mcp/registry/search?q=filesystem");
+    sessionCookie = owner;
+    assert(res.status === 401, `expected 401, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("mcp registry server-url: 401 without a session", async () => {
+    const owner = sessionCookie;
+    sessionCookie = "";
+    const res = await api("/mcp/registry/server-url?qualifiedName=smithery-ai/filesystem");
+    sessionCookie = owner;
+    assert(res.status === 401, `expected 401, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("mcp registry search: 200 with empty results when SMITHERY_API_KEY is unset", async () => {
+    const res = await api("/mcp/registry/search?q=filesystem");
+    assert(res.status === 200, `expected 200, got ${res.status}: ${JSON.stringify(res.body)}`);
+    assert(
+      res.body.configured === false && Array.isArray(res.body.servers) && res.body.servers.length === 0,
+      `expected a graceful not-configured response, got: ${JSON.stringify(res.body)}`,
+    );
+  });
+
+  await test("mcp registry search: missing q is 400", async () => {
+    const res = await api("/mcp/registry/search");
+    assert(res.status === 400, `expected 400 for a missing q, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("mcp registry server-url: 400 when SMITHERY_API_KEY is unset", async () => {
+    const res = await api("/mcp/registry/server-url?qualifiedName=smithery-ai/filesystem");
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+    assert(/not configured/i.test(res.body.error ?? ""), `expected a "not configured" message, got: ${JSON.stringify(res.body)}`);
+  });
+
   // --- Security regression: IDOR on node/edge/credential mutation routes ---
   await test("security: cannot mutate another user's node via your own graphId (IDOR)", async () => {
     const attackerCookie = sessionCookie;

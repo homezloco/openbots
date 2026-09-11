@@ -5,11 +5,14 @@ import type { AgentGraph, AgentNode, ProviderId } from "@openbots/graph-schema";
 import {
   deleteNode,
   discoverMcp,
+  getMcpRegistryServerUrl,
   listGraphs,
   listUserCredentials,
+  searchMcpRegistry,
   updateNode,
   type DiscoveredMcpTool,
   type GraphSummary,
+  type McpRegistryServer,
   type UserCredentialSummary,
 } from "../lib/api";
 import { PROVIDERS, ROLES } from "./HierarchyCanvas";
@@ -92,6 +95,16 @@ export function AgentSettingsForm({
     (node.mcpServers ?? []).length > 0 ? (node.mcpServers ?? []).map(toDraft) : [toDraft({ slug: "", url: "", allowedTools: [] })],
   );
   const [userCreds, setUserCreds] = useState<UserCredentialSummary[] | null>(null);
+  // "Browse MCP servers" picker — deliberately kept separate from
+  // McpServerDraft/mcpServers: this is transient UI state that has no
+  // business flowing through toDraft()/save()'s PATCH payload.
+  const [pickerOpenIndex, setPickerOpenIndex] = useState<number | null>(null);
+  const [pickerQuery, setPickerQuery] = useState("");
+  const [pickerResults, setPickerResults] = useState<McpRegistryServer[]>([]);
+  const [pickerConfigured, setPickerConfigured] = useState(true);
+  const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerError, setPickerError] = useState<string | null>(null);
+  const [pickerPicking, setPickerPicking] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -151,6 +164,83 @@ export function AgentSettingsForm({
         discovering: false,
         discoverError: err instanceof Error ? err.message : "Discover failed",
       });
+    }
+  }
+
+  useEffect(() => {
+    if (pickerOpenIndex === null || pickerQuery.trim().length < 2) {
+      setPickerResults([]);
+      setPickerLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setPickerLoading(true);
+    setPickerError(null);
+    const timer = setTimeout(() => {
+      searchMcpRegistry(pickerQuery.trim(), 1, 10, false, controller.signal)
+        .then((result) => {
+          setPickerConfigured(result.configured);
+          setPickerResults(result.servers);
+          setPickerLoading(false);
+        })
+        .catch((err) => {
+          if (controller.signal.aborted) return;
+          setPickerError(err instanceof Error ? err.message : "Search failed");
+          setPickerLoading(false);
+        });
+    }, 400);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [pickerQuery, pickerOpenIndex]);
+
+  /** Everything after the last "/" in qualifiedName, sanitized to this schema's slug shape, de-duped against sibling rows. */
+  function deriveSlug(qualifiedName: string, index: number): string {
+    const base =
+      qualifiedName
+        .split("/")
+        .pop()
+        ?.toLowerCase()
+        .replace(/[^a-z0-9-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 32) || "mcp";
+    const taken = new Set(mcpServers.filter((_, i) => i !== index).map((s) => s.slug));
+    if (!taken.has(base)) return base;
+    for (let n = 2; ; n++) {
+      const candidate = `${base.slice(0, 32 - String(n).length - 1)}-${n}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+  }
+
+  async function pickServer(index: number, server: McpRegistryServer) {
+    setPickerPicking(server.qualifiedName);
+    setPickerError(null);
+    try {
+      const { url } = await getMcpRegistryServerUrl(server.qualifiedName);
+      const slug = deriveSlug(server.qualifiedName, index);
+      // Discover using the just-fetched `url` directly, not by calling
+      // discoverRow(index) — that function reads mcpServers[index] from
+      // its own closure, which would still see the pre-patch (stale)
+      // row here since the patchMcpServer state update hasn't been
+      // applied/re-rendered yet by the time this line runs.
+      const credentialProvider = mcpServers[index]?.credentialProvider.trim() || undefined;
+      patchMcpServer(index, { slug, url, discovering: true, discoverError: null });
+      setPickerOpenIndex(null);
+      setPickerQuery("");
+      try {
+        const result = await discoverMcp({ url, ...(credentialProvider ? { credentialProvider } : {}) });
+        patchMcpServer(index, { discovering: false, discovered: result.tools, allowedTools: [], discoverError: null });
+      } catch (discoverErr) {
+        patchMcpServer(index, {
+          discovering: false,
+          discoverError: discoverErr instanceof Error ? discoverErr.message : "Discover failed",
+        });
+      }
+    } catch (err) {
+      setPickerError(err instanceof Error ? err.message : "Could not resolve a connection URL for this server");
+    } finally {
+      setPickerPicking(null);
     }
   }
 
@@ -498,12 +588,68 @@ export function AgentSettingsForm({
                 </button>
                 <button
                   type="button"
+                  onClick={() => {
+                    setPickerOpenIndex(pickerOpenIndex === i ? null : i);
+                    setPickerQuery("");
+                    setPickerResults([]);
+                    setPickerError(null);
+                  }}
+                >
+                  {pickerOpenIndex === i ? "Close browser" : "Browse MCP servers (Smithery)"}
+                </button>
+                <button
+                  type="button"
                   onClick={() => setMcpServers((prev) => prev.filter((_, j) => j !== i))}
                   disabled={mcpServers.length === 1}
                 >
                   Remove server
                 </button>
               </div>
+              {pickerOpenIndex === i && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, border: "1px solid var(--border)", borderRadius: 4, padding: 8 }}>
+                  <p style={{ margin: 0, fontSize: 12, color: "var(--text-faint)" }}>
+                    Listings come from Smithery, a third-party directory. &quot;Verified&quot; confirms who published a
+                    server, not that its code is safe — review a server before allowlisting it. Picking one here
+                    never grants access by itself; it still has to be added to ALLOWED_MCP_SERVERS.
+                  </p>
+                  {!pickerConfigured ? (
+                    <p style={{ margin: 0, fontSize: 13, color: "var(--text-faint)" }}>
+                      Server browsing isn&apos;t configured — ask your operator to set SMITHERY_API_KEY.
+                    </p>
+                  ) : (
+                    <>
+                      <input
+                        placeholder="Search MCP servers…"
+                        value={pickerQuery}
+                        onChange={(e) => setPickerQuery(e.target.value)}
+                        autoFocus
+                      />
+                      {pickerLoading && <span style={{ fontSize: 12, color: "var(--text-faint)" }}>Searching…</span>}
+                      {pickerError && <p style={{ color: "var(--danger)", margin: 0, fontSize: 13 }}>{pickerError}</p>}
+                      {pickerResults.length > 0 && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 240, overflowY: "auto" }}>
+                          {pickerResults.map((result) => (
+                            <button
+                              key={result.qualifiedName}
+                              type="button"
+                              onClick={() => void pickServer(i, result)}
+                              disabled={pickerPicking === result.qualifiedName}
+                              style={{ textAlign: "left", display: "flex", flexDirection: "column", gap: 2, padding: 8 }}
+                            >
+                              <span>
+                                <strong>{result.displayName}</strong>{" "}
+                                {result.verified && <span style={{ fontSize: 11, color: "var(--text-faint)" }}>· verified publisher</span>}
+                                {pickerPicking === result.qualifiedName && <span style={{ fontSize: 11 }}> · resolving…</span>}
+                              </span>
+                              <span style={{ fontSize: 12, color: "var(--text-faint)" }}>{result.description}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
               {server.discoverError && <p style={{ color: "var(--danger)", margin: 0, fontSize: 13 }}>{server.discoverError}</p>}
               {server.discovered.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>

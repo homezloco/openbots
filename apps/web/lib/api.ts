@@ -199,6 +199,30 @@ export const discoverMcp = (body: { url: string; credentialProvider?: string }) 
     body: JSON.stringify(body),
   });
 
+// --- MCP server marketplace picker (discovery UX only — never bypasses
+// the operator's ALLOWED_MCP_SERVERS allowlist; picking a result just
+// fills in the same url/slug fields a hand-typed entry would) ---
+
+export interface McpRegistryServer {
+  qualifiedName: string;
+  displayName: string;
+  description: string;
+  iconUrl: string | null;
+  verified: boolean;
+  useCount: number;
+  homepage: string | null;
+  owner: string;
+}
+
+export const searchMcpRegistry = (q: string, page = 1, pageSize = 10, verifiedOnly = false, signal?: AbortSignal) =>
+  request<{ configured: boolean; servers: McpRegistryServer[]; totalCount: number; totalPages: number }>(
+    `/mcp/registry/search?q=${encodeURIComponent(q)}&page=${page}&pageSize=${pageSize}&verifiedOnly=${verifiedOnly}`,
+    { signal },
+  );
+
+export const getMcpRegistryServerUrl = (qualifiedName: string) =>
+  request<{ url: string }>(`/mcp/registry/server-url?qualifiedName=${encodeURIComponent(qualifiedName)}`);
+
 // --- Scheduled triggers (run a graph on a recurring cron schedule) ---
 
 export interface ScheduledTrigger {

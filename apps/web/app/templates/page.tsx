@@ -7,7 +7,7 @@ import { useAuth } from "../../components/AuthProvider";
 
 /** Templates are self-contained graph snapshots you can instantiate into a fresh, owned graph. See PLAN.md. */
 export default function TemplatesPage() {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const router = useRouter();
   const [templates, setTemplates] = useState<TemplateSummary[]>([]);
   const [graphs, setGraphs] = useState<GraphSummary[]>([]);
@@ -17,9 +17,10 @@ export default function TemplatesPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!user) return;
     listTemplates().then(setTemplates).catch((err) => setError(err.message));
     listGraphs().then(setGraphs).catch((err) => setError(err.message));
-  }, []);
+  }, [user]);
 
   async function saveAsTemplate() {
     if (!sourceGraphId || !name) return;
@@ -48,6 +49,18 @@ export default function TemplatesPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (loading) return null;
+  if (!user) {
+    return (
+      <div style={{ padding: 24 }}>
+        <h1>Templates</h1>
+        <p>
+          <a href="/login">Log in</a> to see your templates.
+        </p>
+      </div>
+    );
   }
 
   return (

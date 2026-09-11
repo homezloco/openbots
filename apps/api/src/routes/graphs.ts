@@ -39,7 +39,7 @@ const updateGraphBody = z.object({
   entryNodeId: z.string().uuid().optional(),
 });
 
-/** Every graph gets an owner at creation; mutations require the caller to match. Reads stay public. */
+/** Every graph gets an owner at creation; per-graph reads and mutations require the caller to match. */
 async function requireGraphOwner(
   req: FastifyRequest,
   reply: FastifyReply,
@@ -126,8 +126,9 @@ export async function graphRoutes(app: FastifyInstance) {
     }));
   });
 
-  app.get("/graphs/:id", async (req) => {
+  app.get("/graphs/:id", { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    if (!(await requireGraphOwner(req, reply, id))) return;
     return loadLiveGraph(id);
   });
 

@@ -919,6 +919,49 @@ async function main() {
     assert(owner.status === 200, `expected the actual owner to be able to read their own graph's routing changes, got ${owner.status}`);
   });
 
+  await test("security: GET /graphs/:id requires authentication and ownership", async () => {
+    const ownerCookie = sessionCookie;
+
+    sessionCookie = "";
+    const unauth = await api(`/graphs/${basicGraphId}`);
+    assert(unauth.status === 401, `expected 401 with no session, got ${unauth.status}: ${JSON.stringify(unauth.body)}`);
+
+    const otherEmail = `e2e-other-graphget-${Date.now()}@openbots.dev`;
+    await api("/auth/signup", { method: "POST", body: JSON.stringify({ email: otherEmail, password }) });
+    const wrongUser = await api(`/graphs/${basicGraphId}`);
+    assert(wrongUser.status === 403, `expected 403 for a non-owning authenticated user, got ${wrongUser.status}: ${JSON.stringify(wrongUser.body)}`);
+
+    sessionCookie = ownerCookie;
+    const owner = await api(`/graphs/${basicGraphId}`);
+    assert(owner.status === 200 && owner.body.id === basicGraphId, `expected the owner to read their graph, got ${owner.status}`);
+  });
+
+  await test("security: GET /templates is scoped to the caller; instantiate rejects another user's template", async () => {
+    const ownerCookie = sessionCookie;
+    const mine = await api("/templates", {
+      method: "POST",
+      body: JSON.stringify({ graphId: basicGraphId, name: `E2E private template ${Date.now()}` }),
+    });
+    assert(mine.status === 201, `template create failed: ${JSON.stringify(mine.body)}`);
+
+    sessionCookie = "";
+    const unauth = await api("/templates");
+    assert(unauth.status === 401, `expected 401 listing templates with no session, got ${unauth.status}`);
+
+    const otherEmail = `e2e-other-tmpl-${Date.now()}@openbots.dev`;
+    await api("/auth/signup", { method: "POST", body: JSON.stringify({ email: otherEmail, password }) });
+    const list = await api("/templates");
+    assert(list.status === 200, `expected 200 for an authenticated list, got ${list.status}`);
+    assert(
+      !list.body.some((t: { id: string }) => t.id === mine.body.id),
+      "another user listed a template they did not create",
+    );
+    const inst = await api(`/templates/${mine.body.id}/instantiate`, { method: "POST" });
+    assert(inst.status === 403, `expected 403 instantiating someone else's template, got ${inst.status}: ${JSON.stringify(inst.body)}`);
+
+    sessionCookie = ownerCookie;
+  });
+
   // --- Add existing agent: copies config, excludes consensusGroup, IDOR-safe in both directions ---
   await test("add existing agent copies node config, excluding consensusGroup, with IDOR checks", async () => {
     const sourceGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E source graph" }) });

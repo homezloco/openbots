@@ -38,8 +38,8 @@ export async function templateRoutes(app: FastifyInstance) {
     return reply.code(201).send({ ...template, createdAt: template.createdAt.toISOString() });
   });
 
-  app.get("/templates", async () => {
-    const rows = await db.select().from(agentTemplates);
+  app.get("/templates", { preHandler: requireAuth }, async (req) => {
+    const rows = await db.select().from(agentTemplates).where(eq(agentTemplates.authorId, req.userId!));
     return rows.map((t) => ({
       id: t.id,
       name: t.name,
@@ -55,6 +55,7 @@ export async function templateRoutes(app: FastifyInstance) {
     const { id: templateId } = req.params as { id: string };
     const template = await db.query.agentTemplates.findFirst({ where: eq(agentTemplates.id, templateId) });
     if (!template) return reply.code(404).send({ error: "Template not found" });
+    if (template.authorId !== req.userId) return reply.code(403).send({ error: "You did not create this template" });
 
     const graph = template.graph as AgentGraph;
 

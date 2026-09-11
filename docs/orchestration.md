@@ -37,13 +37,15 @@ once the lazy-resolution loop above is proven in practice.
 - `explicit`: hard-wired. Highest-`priority` explicit edge out of a node
   wins.
 - `auto`: resolved by matching the run's output against candidate target
-  node `description` fields (mirrors Grok Bot's implicit delegation).
+  node **name + description** (mirrors Grok Bot's implicit delegation).
   `matchAutoEdge` in `resolve.ts` currently does keyword-overlap scoring —
   a first pass modeled on the keyword-scoring layer of a sibling project's
-  classifier (local-code's `ClassificationRouter`), which layers keyword
-  scoring -> a trained classifier -> learned corrections -> an LLM
-  fallback. Add later layers here before relying on `auto` edges for
-  anything ambiguous in production.
+  classifier (local-code's `ClassificationRouter`). Scoring description-only
+  was a real bug: a lead that named "Loudest Backend Specialist" tied on
+  the shared token "loudest" and the first auto edge (Frontend) won. The
+  specialist then receives the **original user request**, not the router's
+  "I'm sending this to X" essay. Explicit worker→worker pipelines still
+  chain output.
 
 ## `consensus` edges (fan-out/join)
 
@@ -58,6 +60,16 @@ the actual consensus judgment call.
 never at node-creation time — it references edge ids, which don't exist
 until the node and its edges already exist. This wasn't discovered until
 the e2e suite tried to exercise consensus for the first time.
+
+**Aggregator hops are terminal**, and `resolveNextHop` will not follow an
+edge whose target is some node's `aggregatorNodeId`. Real team graphs
+wired every specialist `--explicit-->` the sign-off reviewer (the
+aggregator) and the reviewer `--auto-->` back to the specialists. A
+single-specialist route then dumped prose onto a node whose prompt
+expects a JSON array of `{nodeId, output}`, and the reviewer looped.
+The reviewer only runs on ALL fan-out, with that JSON array. Explicit
+specialist → reviewer edges still exist on those graphs; they are
+ignored, and `computeWarnings` says so.
 
 **Hybrid auto/consensus nodes.** `edgeIds` don't have to be `kind:
 "consensus"` edges — `dispatchConsensus` resolves them purely by id, so

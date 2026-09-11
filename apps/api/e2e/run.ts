@@ -380,6 +380,105 @@ async function main() {
     assert(run.events[1].nodeId === billing.body.id, `expected billing routing, got hop to ${run.events[1].nodeId}`);
   });
 
+  await testWithRetries("auto-routing matches a specialist's name, not only its description", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E auto-route by name" }) });
+    const graphId = g.body.id;
+    const lead = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Lead",
+        role: "supervisor",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: 'Reply with exactly this sentence and nothing else: "The Backend Specialist should handle this."',
+        position: { x: 0, y: 0 },
+      }),
+    });
+    const backend = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Backend Specialist",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Reply with one short sentence starting 'Backend got it:'.",
+        // Deliberately no "backend" token — scoring description-only used
+        // to tie on shared words and pick the first auto edge (Frontend).
+        description: "Express API, data logic, and the metrics endpoint",
+        position: { x: 0, y: 180 },
+      }),
+    });
+    const frontend = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Frontend Specialist",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Reply with one short sentence starting 'Frontend got it:'.",
+        description: "UI layout, accessibility, and the Create React App",
+        position: { x: 300, y: 180 },
+      }),
+    });
+    await api(`/graphs/${graphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: lead.body.id, targetNodeId: frontend.body.id, kind: "auto" }),
+    });
+    await api(`/graphs/${graphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: lead.body.id, targetNodeId: backend.body.id, kind: "auto" }),
+    });
+    await api(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: lead.body.id }) });
+    const created = await api("/runs", { method: "POST", body: JSON.stringify({ graphId, input: "Fix the analytics JSON." }) });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(run.events[1]?.nodeId === backend.body.id, `expected Backend Specialist, got ${JSON.stringify(run.events)}`);
+  });
+
+  await testWithRetries("auto-routed specialist receives the original user request, not the router's essay", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E auto-route original input" }) });
+    const graphId = g.body.id;
+    const lead = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Lead",
+        role: "supervisor",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Reply with exactly: Billing should handle this because of invoices.",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    const billing = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Billing",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Quote the user's original question verbatim in your answer, including the exact phrase WIDGETIZER_CHARGE_TWICE if it appears.",
+        description: "Handles billing invoices payments subscription pricing questions",
+        position: { x: 0, y: 180 },
+      }),
+    });
+    await api(`/graphs/${graphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: lead.body.id, targetNodeId: billing.body.id, kind: "auto" }),
+    });
+    await api(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: lead.body.id }) });
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId, input: "Why was I charged twice on WIDGETIZER_CHARGE_TWICE?" }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(run.events[1]?.nodeId === billing.body.id, `expected billing hop, got ${JSON.stringify(run.events)}`);
+    assert(
+      /WIDGETIZER_CHARGE_TWICE/.test(String(run.output)),
+      `specialist should see the original user phrase, got: ${run.output}`,
+    );
+  });
+
   // --- Consensus fan-out/join ---
   await test("consensus fan-out runs both branches concurrently and reaches the aggregator", async () => {
     const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E consensus" }) });
@@ -1371,6 +1470,27 @@ async function main() {
     assert(patched.status === 200, `failed to set consensusGroup: ${JSON.stringify(patched.body)}`);
 
     await api(`/graphs/${hybridGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: leadEngineerId }) });
+
+    // Real team graphs (Loudest, Webaroni, CanWeb) also wired every
+    // specialist --explicit--> the aggregator and the aggregator --auto-->
+    // back to specialists. Those edges must not fire on a single-specialist
+    // route (reviewer expects a JSON array) and must not loop after ALL.
+    await api(`/graphs/${hybridGraphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: projectAlphaId, targetNodeId: hybridAggregatorId, kind: "explicit" }),
+    });
+    await api(`/graphs/${hybridGraphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: projectBetaId, targetNodeId: hybridAggregatorId, kind: "explicit" }),
+    });
+    await api(`/graphs/${hybridGraphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: hybridAggregatorId, targetNodeId: projectAlphaId, kind: "auto" }),
+    });
+    await api(`/graphs/${hybridGraphId}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: hybridAggregatorId, targetNodeId: projectBetaId, kind: "auto" }),
+    });
   });
 
   await testWithRetries("hybrid node: naming one specialist routes normally, no fan-out", async () => {
@@ -1436,7 +1556,8 @@ async function main() {
       lead.consensusGroup?.edgeIds?.includes(newEdge.body.id),
       `expected the new edge ${newEdge.body.id} to be auto-added to consensusGroup.edgeIds, got: ${JSON.stringify(lead.consensusGroup)}`,
     );
-    assert(graph.body.warnings.length === 0, `expected no coverage warning right after auto-sync, got: ${JSON.stringify(graph.body.warnings)}`);
+    const coverageWarnings = (graph.body.warnings as string[]).filter((w) => /ALL fan-out covers/.test(w));
+    assert(coverageWarnings.length === 0, `expected no coverage warning right after auto-sync, got: ${JSON.stringify(graph.body.warnings)}`);
   });
 
   await test("PATCH consensusGroup: null clears a hybrid node back to plain auto routing", async () => {

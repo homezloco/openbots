@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { generateText, stepCountIs, type Tool } from "ai";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, and } from "drizzle-orm";
 import {
   commitWorktreeChanges,
   ensureWorktree,
@@ -23,7 +23,7 @@ import {
   runs,
   usageEvents,
 } from "../db/schema.js";
-import { resolveNextHop, startsWithSentinel } from "./resolve.js";
+import { aggregatorNodeIds, resolveNextHop, startsWithSentinel } from "./resolve.js";
 import { withNodeTimeout } from "./circuitBreaker.js";
 import { withRetry } from "./retry.js";
 import { getCredentials } from "./credentials.js";
@@ -85,7 +85,11 @@ export async function dispatchHop(runId: string): Promise<void> {
   const startedAt = new Date();
   publishRunEvent({ runId, graphId: graph.id, type: "hop_dispatched", nodeId: node.id });
 
-  const autoRoutingTargets = getAutoRoutingTargets(graph, node.id);
+  // An aggregator hop is a join, not a router — injecting its outgoing
+  // auto edges (the Loudest reviewer loops back to specialists) taught it
+  // UNKNOWN/ALL and it refused to synthesize. Don't.
+  const isAggregator = aggregatorNodeIds(graph).has(node.id);
+  const autoRoutingTargets = isAggregator ? [] : getAutoRoutingTargets(graph, node.id);
 
   let result: AgentCallResult;
   try {
@@ -134,9 +138,34 @@ export async function dispatchHop(runId: string): Promise<void> {
         finishedAt: new Date(),
       });
       publishRunEvent({ runId, graphId: graph.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
-      await dispatchConsensus(runId, graph, node, output);
+      // Fan-out branches get the original user request, not the lead's
+      // "ALL …" routing essay — specialists were treating the essay as
+      // the task and pushing back on role confusion.
+      await dispatchConsensus(runId, graph, node, run.input);
       return;
     }
+  }
+
+  // Aggregator output is the answer. Its outgoing auto edges (if any)
+  // are a cycle back into the specialists it just joined.
+  if (isAggregator) {
+    await db.insert(runEvents).values({
+      runId,
+      nodeId: node.id,
+      sequence,
+      status: "succeeded",
+      input: run.input,
+      output,
+      startedAt,
+      finishedAt: new Date(),
+    });
+    publishRunEvent({ runId, graphId: graph.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
+    await db
+      .update(runs)
+      .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
+      .where(eq(runs.id, runId));
+    publishRunEvent({ runId, graphId: graph.id, type: "run_completed", payload: { output } });
+    return;
   }
 
   const { edge, nextNodeId } = resolveNextHop(graph, node.id, output);
@@ -170,9 +199,28 @@ export async function dispatchHop(runId: string): Promise<void> {
     return;
   }
 
+  const [alreadyVisited] = await db
+    .select({ id: runEvents.id })
+    .from(runEvents)
+    .where(and(eq(runEvents.runId, runId), eq(runEvents.nodeId, nextNodeId), eq(runEvents.status, "succeeded")))
+    .limit(1);
+  if (alreadyVisited) {
+    await db
+      .update(runs)
+      .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
+      .where(eq(runs.id, runId));
+    publishRunEvent({ runId, graphId: graph.id, type: "run_completed", payload: { output } });
+    return;
+  }
+
+  // Auto-edge handoff: the specialist does the user's request, not the
+  // router's "I'm sending this to X" paragraph. Explicit pipelines still
+  // chain the previous hop's output (summarize → translate).
+  const nextInput = edge?.kind === "auto" ? run.input : output;
+
   await db
     .update(runs)
-    .set({ currentNodeId: nextNodeId, input: output, updatedAt: new Date() })
+    .set({ currentNodeId: nextNodeId, input: nextInput, updatedAt: new Date() })
     .where(eq(runs.id, runId));
   await enqueueHop(runId);
 }
@@ -370,7 +418,22 @@ function appendAutoRoutingContext(
   const fanOutLine = canFanOut
     ? " If the request applies to multiple or all of these specialists at once, start your reply with the single word ALL instead of naming one."
     : "";
-  return `${systemPrompt}\n\nYou can delegate to one of these specialists — mention the target's name clearly in your response so it can be routed correctly:\n${list}\n\nIf none of these fit, or you need the user to clarify before you can route, start your reply with the single word UNKNOWN — do not guess a specialist.${fanOutLine} If you already have a complete, final answer for the user (including reporting a tool's error clearly) and do NOT want to hand off to a specialist — even if your answer happens to mention one of them by name, e.g. suggesting who could look into something further — start your reply with the single word DONE so it isn't auto-routed there by mistake.`;
+  return `${systemPrompt}\n\nYou can delegate to one of these specialists — mention the target's exact name clearly in your response so it can be routed correctly:\n${list}\n\nIf this prompt includes a multi-turn transcript, the LATEST "User:" message is the task to route or answer; earlier turns are context only. If none of these fit, or you need the user to clarify before you can route, start your reply with the single word UNKNOWN — do not guess a specialist.${fanOutLine} If you already have a complete, final answer for the user (including reporting a tool's error clearly) and do NOT want to hand off to a specialist — even if your answer happens to mention one of them by name, e.g. suggesting who could look into something further — start your reply with the single word DONE so it isn't auto-routed there by mistake.`;
+}
+
+/**
+ * Leaf specialists (and aggregators, which we treat as non-routers) used
+ * to receive a router's "go ask the backend" essay and then argue about
+ * whose job it was. Tell them the input is the task.
+ */
+function appendAssignedTaskContext(
+  systemPrompt: string,
+  isRouter: boolean,
+  role: AgentNode["role"],
+): string {
+  if (isRouter) return systemPrompt;
+  if (role !== "worker" && role !== "reviewer") return systemPrompt;
+  return `${systemPrompt}\n\nThis input is your assigned task. Do the work yourself with your own tools. Do not ask which teammate should handle it. If the input is a JSON array of specialist reports, synthesize them; otherwise treat it as a user request.`;
 }
 
 /**
@@ -533,12 +596,17 @@ async function callAgent(
   const metricsSources = wantsMetrics ? await getMetricsSources(ownerId) : [];
   const canRead = Boolean(node.fileAccessRoot) && node.tools.includes("read_file");
 
+  const isRouter = autoRoutingTargets.length > 0 || Boolean(node.consensusGroup);
   const systemPrompt = appendProjectContext(
     appendMetricsSourcesContext(
       appendRemoteCommandContext(
         appendReachableGraphsContext(
           appendWriteContext(
-            appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
+            appendAssignedTaskContext(
+              appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
+              isRouter,
+              node.role,
+            ),
             canWrite,
           ),
           reachableGraphs,

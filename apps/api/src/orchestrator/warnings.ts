@@ -42,5 +42,27 @@ export function computeWarnings(graph: AgentGraph): string[] {
     }
   }
 
+  // Edges into a consensus aggregator never fire on a sequential hop
+  // (resolveNextHop skips them — aggregator only runs on ALL). Flag the
+  // leftover specialist → reviewer edges the team graphs were built with.
+  const aggregatorIds = new Set(
+    graph.nodes.map((n) => n.consensusGroup?.aggregatorNodeId).filter((id): id is string => Boolean(id)),
+  );
+  for (const id of aggregatorIds) {
+    const agg = graph.nodes.find((n) => n.id === id);
+    const inbound = graph.edges.filter((e) => e.targetNodeId === id && e.kind === "explicit");
+    if (agg && inbound.length > 0) {
+      warnings.push(
+        `"${agg.name}" is a consensus aggregator — explicit edges into it are ignored on single-specialist routes (it only runs on ALL).`,
+      );
+    }
+    const outboundAuto = graph.edges.filter((e) => e.sourceNodeId === id && e.kind === "auto");
+    if (agg && outboundAuto.length > 0) {
+      warnings.push(
+        `"${agg.name}" has outgoing auto edges; aggregator hops are terminal, so those edges never fire.`,
+      );
+    }
+  }
+
   return warnings;
 }

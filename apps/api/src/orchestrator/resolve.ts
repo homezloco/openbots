@@ -1,5 +1,14 @@
 import type { AgentGraph, RoutingEdge } from "@openbots/graph-schema";
 
+/** Node ids that exist only as a consensus join — they run via dispatchConsensus, never as a sequential next hop. */
+export function aggregatorNodeIds(graph: AgentGraph): Set<string> {
+  const ids = new Set<string>();
+  for (const n of graph.nodes) {
+    if (n.consensusGroup?.aggregatorNodeId) ids.add(n.consensusGroup.aggregatorNodeId);
+  }
+  return ids;
+}
+
 /**
  * Core de-risking move for drag-and-drop rerouting: this is called fresh
  * before every hop, never planned ahead for a whole run. A canvas edit just
@@ -19,17 +28,31 @@ export function resolveNextHop(
     return { edge: null, nextNodeId: null };
   }
 
+  const aggregators = aggregatorNodeIds(graph);
+
   const explicit = outgoing
     .filter((e) => e.kind === "explicit")
     .sort((a, b) => b.priority - a.priority);
   if (explicit.length > 0) {
     const chosen = explicit[0];
+    // Specialist → sign-off-reviewer explicit edges are a common mistaken
+    // encoding of "review after every hop". The reviewer is the consensus
+    // aggregator and expects a JSON array of {nodeId, output} — dumping a
+    // single specialist's prose there is what produced Loudest's
+    // "this doesn't match the expected input format" UNKNOWN. Aggregators
+    // only run via dispatchConsensus.
+    if (aggregators.has(chosen.targetNodeId)) {
+      return { edge: null, nextNodeId: null };
+    }
     return { edge: chosen, nextNodeId: chosen.targetNodeId };
   }
 
   const auto = outgoing.filter((e) => e.kind === "auto");
   if (auto.length > 0) {
     const chosen = matchAutoEdge(graph, auto, lastOutput);
+    if (chosen && aggregators.has(chosen.targetNodeId)) {
+      return { edge: null, nextNodeId: null };
+    }
     return { edge: chosen, nextNodeId: chosen?.targetNodeId ?? null };
   }
 
@@ -99,7 +122,11 @@ function matchAutoEdge(
   let bestScore = 0;
   for (const edge of candidates) {
     const target = graph.nodes.find((n) => n.id === edge.targetNodeId);
-    const score = overlapScore(outputTokens, tokenize(target?.description ?? ""));
+    // Name AND description: appendAutoRoutingContext tells the router to
+    // mention the target's exact name, but scoring description-only meant
+    // "Loudest Backend Specialist" tied on the shared token "loudest" and
+    // the first auto edge (Frontend) won — a real misroute.
+    const score = overlapScore(outputTokens, tokenize(`${target?.name ?? ""} ${target?.description ?? ""}`));
     if (score > 0 && (score > bestScore || (score === bestScore && edge.priority > (best?.priority ?? -Infinity)))) {
       best = edge;
       bestScore = score;

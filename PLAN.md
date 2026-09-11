@@ -969,6 +969,151 @@ model calls) just to prove an already-untouched guard still runs first.
 Confirmed unmodified by direct diff instead of paying that
 cost/flakiness in the permanent suite.
 
+## n8n competitive gap analysis (researched 2026-09-11)
+
+Targeted follow-up to the wider competitive scan above, specifically
+against n8n (400+ integrations, Sustainable Use License, AI Agent/AI
+Agent Tool nodes added on top of its general workflow engine). Confirmed
+via research, not assumption: n8n has real-time execution *viewing*
+(nodes highlight as they run) but nothing that lets you change a
+workflow's path while it's actively executing — OpenBots' live
+mid-run rerouting is a genuine, structural differentiator, not just
+positioning, because it falls out of `dispatchHop`'s "resolve fresh
+every hop" design rather than being bolted on.
+
+**Real gaps, roughly in priority order:**
+
+1. **No event/webhook triggers.** n8n workflows start from any inbound
+   webhook (Stripe, GitHub, Slack, etc.). OpenBots only has manual runs
+   and cron (`scheduled_triggers`) — nothing reacts to an external
+   event. Highest-leverage gap: fits the existing architecture cleanly
+   (same shape as `orchestrator/scheduledTrigger.ts` — re-read fresh
+   from Postgres, create the run through the shared `createRun()`
+   helper — just HTTP-triggered instead of cron-triggered) and it's
+   probably the single most-requested automation-platform primitive.
+2. **Integration breadth.** n8n ships 400+ pre-built, zero-config app
+   connectors. OpenBots deliberately keeps a small built-in tool set and
+   bets on MCP as the extensibility path instead of hand-building
+   connectors (see "MCP client support" above) — a legitimate different
+   strategy, but today reaching Slack/Gmail/Salesforce/etc. means the
+   operator standing up an MCP server themselves, not clicking a node.
+3. **Per-node retry/error-handling UI.** n8n exposes configurable retry
+   count/delay and dedicated error-workflow fallbacks per node. OpenBots
+   has `withRetry` (transient provider errors only) and `fallbackChain`
+   (model/auth errors only) — nothing user-configurable, no general "on
+   failure, do this instead" pattern exposed anywhere.
+4. **No dry-run / pinned-data testing.** n8n lets you test a node against
+   pinned/replayed data without real side effects. OpenBots' rewind-and-
+   fork always re-executes for real; there's no way to test a hop or an
+   edited graph without a live run and its real cost/side effects.
+5. **No non-agent nodes.** Every OpenBots hop is an LLM call — there's no
+   cheaper "pure data/logic/transform, no model involved" node the way
+   n8n handles plain ETL/automation alongside its AI nodes.
+6. **Team/RBAC and workflow versioning.** n8n Enterprise has SSO/RBAC/
+   environments and git-based workflow version control. Already tracked
+   as known gap #2 (single-owner only, by design) — listed here again
+   only because it's specifically what blocks n8n's Enterprise tier from
+   being a fair comparison at all today.
+
+## Getting ahead of n8n, not just matching it (2026-09-11)
+
+Closing gaps 1-6 above gets OpenBots to competitive parity on n8n's own
+turf. That's necessary but not differentiating — n8n has a multi-year
+head start on integration breadth and enterprise features that isn't
+worth racing head-on. The better bet is doubling down on what's
+structurally hard for a general-purpose workflow engine to retrofit,
+the same way live mid-run rerouting already is:
+
+- **Make the review-revise-report loop visible, not just correct.**
+  `dispatch_to_graph`'s new blocking behavior (see above) is the same
+  pattern LangGraph/CrewAI/Anthropic's own research system all use, but
+  every one of them runs it in code/logs only. OpenBots has the one
+  thing they don't: a live canvas already built to visualize hop-by-hop
+  activity. Animating a delegate → wait → review → revise round
+  actually happening on the gateway-node edges (pulses, a round counter)
+  would make a pattern that's currently invisible everywhere else
+  something you can *watch*, not just trust happened.
+- **Explainable auto-routing.** `appendAutoRoutingContext`'s injected
+  candidate list and the model's routing reasoning already exist inside
+  the hop — they're just not surfaced. n8n's branching (IF/Switch nodes)
+  is deterministic, so it has nothing to explain; OpenBots' semantic
+  routing is exactly the kind of "why did it pick that" black box that
+  erodes trust the first time it misroutes. Surfacing the match/score on
+  edge hover would turn "the model guessed wrong" into a fixable
+  description-wording problem a human can iterate on directly.
+- **Comparative rewind-and-fork.** Today a fork re-executes one
+  checkpoint as a new run. Forking the *same* checkpoint twice with two
+  different prompts/models/tiers and diffing the two real outputs
+  side-by-side turns rewind-and-fork from "redo a step" into "A/B test
+  an agent configuration against real history" — n8n's pinned-data
+  replay has no equivalent because it's not built around comparing
+  alternate agent behavior, only replaying identical data.
+- **Cost/latency-aware routing.** `recordUsage` and the reviewer/tier
+  warning already track real per-hop cost. A "prefer the cheapest
+  capable specialist" routing mode, or a suggestion to downgrade an
+  over-tiered node that's never actually needed its capability, is a
+  genuinely agent-specific optimization with no analog in n8n's node
+  model (a Slack-message node doesn't have a cost tier).
+- **Lean into safety as the actual product, not a footnote.** Letting an
+  LLM write to a real codebase and push is inherently higher-stakes than
+  "call an API" — most competitors either don't support real write
+  access at all or support it with much thinner guardrails than the
+  git-worktree isolation + confirmed-only `/push`/`/pr` + dual-gated
+  allowlists already built here. This is mostly a positioning/docs
+  opportunity, not new code: "the only agent platform safe enough to
+  give real write access to" is a real, defensible claim today.
+- **Bet on MCP to close gap #2 faster than hand-building connectors
+  ever could.** Every MCP server the wider ecosystem builds becomes
+  usable in OpenBots for free the moment `ALLOWED_MCP_SERVERS` allows
+  it — if MCP adoption keeps growing at its current rate, this closes
+  the integration-breadth gap on a much shorter timeline than building
+  and maintaining a rival connector library by hand, without OpenBots
+  ever needing to become an integrations company.
+
+### MCP marketplace/registry landscape for the "bet on MCP" plan (researched 2026-09-11)
+
+Concrete follow-up on what to actually integrate with. The **official
+registry** (`registry.modelcontextprotocol.io`, launched preview
+2025-09, backed by Anthropic/GitHub/PulseMCP/Microsoft) is metadata-only
+— namespace-verified identity (reverse-DNS tied to a GitHub account or
+domain), *not* a safety/audit rating; the docs explicitly say it's meant
+to be consumed by **downstream aggregators**, not directly by host
+applications like OpenBots. So the right integration target is one of
+those aggregators, not the raw registry.
+
+- **PulseMCP** is the strongest concrete candidate: 18,000+ servers
+  cataloged with daily updates, a real "Sub-Registry API" that
+  implements the *same* Generic MCP Registry API spec the official
+  registry defines (so it's a standards-compatible superset, not a
+  proprietary format), OpenAPI 3.1 docs at `pulsemcp.com/api/docs/v0.1`,
+  and API-key auth described as built for "trusted partners" — i.e.
+  actually meant for exactly this kind of product integration, not just
+  human browsing. Also classifies servers as "official providers" vs
+  community, useful for defaulting a picker to higher-trust results.
+- **Smithery** additionally *hosts* remote endpoints (not just catalog
+  metadata) — a server picked from Smithery can be Streamable-HTTP-ready
+  immediately, no self-hosting required, which directly removes today's
+  actual friction in gap #2 (an operator currently has to stand up their
+  own MCP server before any of this matters).
+- **Klavis AI** hosts production MCP servers with built-in OAuth across
+  600+ tools — relevant because OpenBots' own MCP credential model
+  (`credentialProvider` → a single stored bearer token) is intentionally
+  simple; a Klavis-hosted server that's already handled OAuth on the
+  provider's behalf is a complementary fit, not a competing approach.
+
+**Integration shape that keeps the existing security model intact:**
+a "Browse verified MCP servers" picker in `AgentSettingsForm` (next to
+the existing `Discover tools` button) that queries one of these APIs for
+name/description/url/transport — pure discovery UX. It must **never**
+bypass `ALLOWED_MCP_SERVERS`: picking a server from the browser still
+just fills in the URL field, and the operator still has to add it to
+the allowlist before any node can actually use it, exactly the same
+"config is a UX convenience, not the security boundary" rule
+`fileAccessRoot`/`dispatchTargets` already follow. Not started — next
+step would be a small `POST /mcp/marketplace/search` proxy route (server-
+side, so the aggregator's API key never reaches the browser) rather than
+calling a third-party API directly from `apps/web`.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

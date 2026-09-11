@@ -5,7 +5,7 @@ import { tool, type Tool } from "ai";
 import { z } from "zod";
 
 export type ToolName = "current_time" | "calculator" | "pc_telemetry";
-export const FILE_TOOL_NAMES = ["read_file", "list_directory"] as const;
+export const FILE_TOOL_NAMES = ["read_file", "list_directory", "search_knowledge"] as const;
 export const WRITE_TOOL_NAMES = ["write_file", "edit_file"] as const;
 
 /**
@@ -134,6 +134,156 @@ async function resolveWithinRoot(root: string, relativePath: string): Promise<st
 const MAX_FILE_READ_BYTES = 50_000;
 const MAX_FILE_WRITE_BYTES = 200_000;
 
+const SEARCH_SKIP_DIRS = new Set(["node_modules", ".git", ".openbots", "dist", "build", ".next", "coverage", "vendor"]);
+const SEARCH_TEXT_EXT = new Set([
+  ".md",
+  ".txt",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".json",
+  ".py",
+  ".go",
+  ".rs",
+  ".yml",
+  ".yaml",
+  ".html",
+  ".css",
+  ".csv",
+]);
+const SEARCH_MAX_FILES = 80;
+const SEARCH_MAX_FILE_BYTES = 64_000;
+const SEARCH_CHUNK = 800;
+const SEARCH_TOP_K = 8;
+
+function tokenizeQuery(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length > 2),
+  );
+}
+
+function overlapScore(query: Set<string>, text: string): number {
+  if (query.size === 0) return 0;
+  const tokens = tokenizeQuery(text);
+  let n = 0;
+  for (const t of query) if (tokens.has(t)) n++;
+  return n;
+}
+
+interface KnowledgeHit {
+  path: string;
+  score: number;
+  excerpt: string;
+}
+
+async function walkTextFiles(root: string): Promise<{ rel: string; content: string }[]> {
+  const realRoot = await realpath(root);
+  const out: { rel: string; content: string }[] = [];
+
+  async function visit(dir: string): Promise<void> {
+    if (out.length >= SEARCH_MAX_FILES) return;
+    let entries: Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= SEARCH_MAX_FILES) return;
+      if (SEARCH_SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+      const full = resolve(dir, entry.name);
+      if (entry.isDirectory()) {
+        await visit(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const ext = entry.name.includes(".") ? entry.name.slice(entry.name.lastIndexOf(".")).toLowerCase() : "";
+      if (!SEARCH_TEXT_EXT.has(ext)) continue;
+      let real: string;
+      try {
+        real = await realpath(full);
+      } catch {
+        continue;
+      }
+      const relToRoot = relative(realRoot, real);
+      if (relToRoot.startsWith("..") || isAbsolute(relToRoot)) continue;
+      let content: string;
+      try {
+        const info = await stat(real);
+        if (info.size > SEARCH_MAX_FILE_BYTES) continue;
+        content = await readFile(real, "utf8");
+      } catch {
+        continue;
+      }
+      out.push({ rel: relToRoot, content });
+    }
+  }
+
+  await visit(realRoot);
+  return out;
+}
+
+function chunkContent(content: string): string[] {
+  const chunks: string[] = [];
+  for (let i = 0; i < content.length; i += SEARCH_CHUNK) {
+    chunks.push(content.slice(i, i + SEARCH_CHUNK));
+  }
+  return chunks;
+}
+
+async function embedRerank(query: string, hits: KnowledgeHit[]): Promise<KnowledgeHit[]> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key || hits.length === 0) return hits;
+  try {
+    const { embed, embedMany } = await import("ai");
+    const { openai } = await import("@ai-sdk/openai");
+    const model = openai.embedding("text-embedding-3-small");
+    const q = await embed({ model, value: query });
+    const docs = await embedMany({ model, values: hits.map((h) => h.excerpt) });
+    const qv = q.embedding;
+    const reranked = hits.map((h, i) => {
+      const dv = docs.embeddings[i] ?? [];
+      let dot = 0;
+      let qn = 0;
+      let dn = 0;
+      for (let j = 0; j < qv.length; j++) {
+        const a = qv[j] ?? 0;
+        const b = dv[j] ?? 0;
+        dot += a * b;
+        qn += a * a;
+        dn += b * b;
+      }
+      const cosine = qn && dn ? dot / (Math.sqrt(qn) * Math.sqrt(dn)) : 0;
+      return { ...h, score: cosine * 0.7 + h.score * 0.3 };
+    });
+    reranked.sort((a, b) => b.score - a.score);
+    return reranked;
+  } catch {
+    return hits;
+  }
+}
+
+async function searchKnowledge(root: string, query: string, subpath: string): Promise<{ query: string; hits: KnowledgeHit[] }> {
+  const start = await resolveWithinRoot(root, subpath);
+  const files = await walkTextFiles(start);
+  const qTokens = tokenizeQuery(query);
+  const hits: KnowledgeHit[] = [];
+  for (const file of files) {
+    for (const chunk of chunkContent(file.content)) {
+      const score = overlapScore(qTokens, chunk);
+      if (score <= 0) continue;
+      hits.push({ path: file.rel, score, excerpt: chunk.trim() });
+    }
+  }
+  hits.sort((a, b) => b.score - a.score);
+  const top = hits.slice(0, SEARCH_TOP_K);
+  return { query, hits: await embedRerank(query, top) };
+}
+
 /** Built fresh per node, bound to that node's fileAccessRoot — never shared across nodes with different roots. */
 function createFileTools(root: string): Record<(typeof FILE_TOOL_NAMES)[number], Tool> {
   return {
@@ -156,6 +306,14 @@ function createFileTools(root: string): Record<(typeof FILE_TOOL_NAMES)[number],
         const content = await readFile(target, "utf8");
         return { content: content.slice(0, MAX_FILE_READ_BYTES), truncated: content.length > MAX_FILE_READ_BYTES };
       },
+    }),
+    search_knowledge: tool({
+      description: `Search text files under ${root} for a query and return the top matching excerpts with paths. Read-only. Cannot see outside this root. Prefer this over reading every file when you need to find something in the folder.`,
+      inputSchema: z.object({
+        query: z.string().min(1),
+        path: z.string().default(".").describe("Subdirectory relative to the root, default the whole root"),
+      }),
+      execute: async ({ query, path }) => searchKnowledge(root, query, path),
     }),
   };
 }
@@ -283,7 +441,12 @@ export function listAvailableTools(): { name: string; description: string; requi
   }));
   const fileTools = FILE_TOOL_NAMES.map((name) => ({
     name,
-    description: name === "read_file" ? "Read a text file within a configured root directory." : "List entries in a directory within a configured root.",
+    description:
+      name === "read_file"
+        ? "Read a text file within a configured root directory."
+        : name === "list_directory"
+          ? "List entries in a directory within a configured root."
+          : "Search text files in a configured root and return ranked excerpts (lightweight RAG, not a vector database).",
     requiresFileAccessRoot: true,
   }));
   const writeTools = WRITE_TOOL_NAMES.map((name) => ({

@@ -666,7 +666,9 @@ async function callAgent(
   const reachableGraphs =
     wantsDispatch || wantsGraphManagement ? await getDispatchableGraphs(ownerId, node.dispatchTargets) : [];
   const metricsSources = wantsMetrics ? await getMetricsSources(ownerId) : [];
-  const canRead = Boolean(node.fileAccessRoot) && node.tools.includes("read_file");
+  const canRead =
+    Boolean(node.fileAccessRoot) &&
+    (node.tools.includes("read_file") || node.tools.includes("search_knowledge") || node.tools.includes("list_directory"));
 
   const isRouter = autoRoutingTargets.length > 0 || Boolean(node.consensusGroup);
   const systemPrompt = appendProjectContext(

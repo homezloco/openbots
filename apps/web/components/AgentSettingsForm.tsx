@@ -15,7 +15,7 @@ import {
 import { PROVIDERS, ROLES } from "./HierarchyCanvas";
 
 const TIERS: AgentNode["tier"][] = [undefined, "economy", "standard", "flagship"];
-const FILE_TOOLS = ["read_file", "list_directory"];
+const FILE_TOOLS = ["read_file", "list_directory", "search_knowledge"];
 const WRITE_TOOLS = ["write_file", "edit_file"];
 const DISPATCH_TOOL = "dispatch_to_graph";
 const MANAGE_TOOL = "manage_target_graphs";

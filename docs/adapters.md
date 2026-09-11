@@ -92,7 +92,7 @@ matching operator allowlist.
 | Tool | Where it lives | Notes |
 |---|---|---|
 | `calculator`, `current_time` | `packages/providers` | Always safe. |
-| `read_file`, `list_directory` | `packages/providers` | `ALLOWED_FILE_ACCESS_ROOTS`; empty-deny. |
+| `read_file`, `list_directory`, `search_knowledge` | `packages/providers` | `ALLOWED_FILE_ACCESS_ROOTS`; empty-deny. `search_knowledge` chunks the folder and ranks excerpts (lexical; OpenAI embedding re-rank if `OPENAI_API_KEY` is set). Not a vector database. |
 | `write_file`, `edit_file` | `packages/providers` | Separate `ALLOWED_FILE_WRITE_ROOTS`; isolated git worktree. |
 | `pc_telemetry` | `packages/providers` | Read-only WebSocket to a local monitor. |
 | `business_metrics` | `apps/api` | Account `metrics_<slug>` credentials at `/settings`. |

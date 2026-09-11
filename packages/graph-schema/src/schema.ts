@@ -131,7 +131,7 @@ export const AgentNode = z.object({
   tools: z.array(z.string()).default([]),
   /**
    * Absolute directory path this node's file-reading tools ("read_file",
-   * "list_directory") are confined to — every resolved path is checked to
+   * "list_directory", "search_knowledge") are confined to — every resolved path is checked to
    * stay within this root before any read happens, so a "worker" tool
    * name in `tools` alone is not enough to grant filesystem access. Unset
    * means no file access regardless of what's in `tools`. See

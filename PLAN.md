@@ -841,9 +841,10 @@ the prioritization survives past this session.
   `POST /graphs/:id/runs/:runId/fork` copies prefix hops as history and
   re-executes the checkpoint as a new run. Source run is immutable.
   Canvas: **Fork from here** on the run trail.
-- **Lightweight knowledge-base/RAG tool** (embed + search a folder), to
-  stop being a hard "no" on the most commonly expected AI-app-builder
-  feature (Dify's strongest area) without trying to become a RAG platform.
+- ~~**Lightweight knowledge-base/RAG tool**~~ Shipped 2026-09-11:
+  `search_knowledge` is dual-gated with `fileAccessRoot` like read_file.
+  In-process walk/chunk/rank over that folder (lexical, plus optional
+  OpenAI embedding re-rank). Not a hosted vector DB.
 - **Template/graph sharing marketplace** — extends the existing
   `agent_templates` export/instantiate mechanism, blocked on real
   multi-user/team sharing (known gap #2) landing first.

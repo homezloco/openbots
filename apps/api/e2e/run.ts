@@ -746,6 +746,66 @@ async function main() {
     assert(/escapes the allowed root|blocked|denied|could not|cannot access/i.test(output), `expected traversal-blocked language in output, got: ${output.slice(0, 300)}`);
   });
 
+  await testWithRetries("search_knowledge finds Widgetizer in the file-access root", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E search knowledge" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Searcher",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Use search_knowledge to answer. Quote matching excerpts.",
+        tools: ["search_knowledge"],
+        fileAccessRoot: "/tmp/testrepo",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: g.body.id,
+        input: "Search the knowledge folder for Widgetizer and quote what you find.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(/widgetizer/i.test(String(run.output)), `expected Widgetizer from search_knowledge, got: ${run.output}`);
+  });
+
+  await test("search_knowledge is not granted by fileAccessRoot alone", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E search dual-gate" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "NoSearch",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Answer honestly about which tools you have. Do not invent a search tool.",
+        tools: [],
+        fileAccessRoot: "/tmp/testrepo",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: g.body.id,
+        input: "Do you have a search_knowledge tool? Name every tool you can actually call.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    const out = String(run.output);
+    assert(
+      /don'?t have|do not have|no tools|none are available|can'?t (browse|search|call)/i.test(out),
+      `expected the model to deny having search_knowledge, got: ${out}`,
+    );
+  });
+
   // --- Engine-level CLAUDE.md awareness (apps/api/e2e/fixtures/testrepo/CLAUDE.md) ---
   await testWithRetries("engine auto-tells a file-scoped agent to read CLAUDE.md when one exists in its root", async () => {
     const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E CLAUDE.md awareness" }) });

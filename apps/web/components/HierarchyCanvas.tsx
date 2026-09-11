@@ -422,7 +422,7 @@ export function HierarchyCanvas({
       ...rest,
       fileAccessRoot: form.fileAccessRoot || undefined,
       tools: form.fileAccessRoot
-        ? ["read_file", "list_directory", ...(allowWrites ? ["write_file", "edit_file"] : [])]
+        ? ["read_file", "list_directory", "search_knowledge", ...(allowWrites ? ["write_file", "edit_file"] : [])]
         : [],
       position,
     });

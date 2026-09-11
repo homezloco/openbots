@@ -320,7 +320,7 @@ export function AgentSettingsForm({
         <span>
           Allow dispatch to other graphs{" "}
           <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
-            (dispatch_to_graph — fire-and-forget starts a run in a graph below; check_dispatch_status lets it check back later)
+            (dispatch_to_graph — starts a run in a graph below and waits for its real result, bounded by a timeout; check_dispatch_status covers the rare case it times out)
           </span>
         </span>
       </label>

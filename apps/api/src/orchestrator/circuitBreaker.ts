@@ -19,7 +19,7 @@ export class NodeTimeoutError extends Error {
 // real consensus fan-out ran the full 90s and still got cut off before
 // finishing, worse than before (a total wipeout instead of a partial
 // success). The two caps have to move together.
-const DEFAULT_NODE_TIMEOUT_MS = 180_000;
+export const DEFAULT_NODE_TIMEOUT_MS = 180_000;
 
 export async function withNodeTimeout<T>(
   nodeId: string,

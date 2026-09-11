@@ -913,6 +913,62 @@ on an interactive prompt), surfacing and fixing one real
 `react-hooks/rules-of-hooks` false-positive and three unescaped-JSX-entity
 errors.
 
+## `dispatch_to_graph` reversed from fire-and-forget to blocking agent-as-tool (2026-09-11)
+
+Live dogfooding on the Acme Portfolio demo surfaced the real gap: a user
+asked the Lead to dispatch a duplicate-charge investigation to the
+Payments team, got back "I've dispatched this... let me know if you'd
+like me to check on the status later," and asked "shouldn't it wait and
+provide me the status?" That's a fair ask — the whole point of a Lead is
+to act like an assistant that delegates, waits, reviews, and reports
+back, not a fire-and-forget dispatcher.
+
+The original fire-and-forget design (see "Cross-graph dispatch and
+business metrics" above, and `docs/orchestration.md`) was deliberate: a
+sub-run can take a long time, and blocking one BullMQ worker slot on
+another graph's entire run fights the async-by-default grain the rest of
+the engine is built around. That reasoning wasn't wrong, but researching
+how LangGraph's supervisor pattern, CrewAI's hierarchical manager, and
+Anthropic's own production multi-agent research system handle exactly
+this found that all three block synchronously — Anthropic's own
+engineering writeup says so outright ("our lead agents execute subagents
+synchronously... this simplifies coordination, but creates
+bottlenecks"), and none of them have a distinct "send it back for
+revision" primitive either, just "the orchestrator calls the tool
+again." OpenBots already had that for free via each hop's existing
+`stepCountIs(20)` multi-tool-call loop — the only real gap was that
+`dispatch_to_graph` never returned anything worth reviewing.
+
+**Shipped:** `dispatch_to_graph` now blocks and returns the target run's
+real output (`outcome: "completed" | "failed" | "still_running"`),
+bounded by a per-hop timeout budget that shrinks across repeat calls in
+the same hop rather than a flat per-call constant (a hop calling the
+tool twice — original, then a revision — must not let call 2 blow past
+the hop's own ceiling on top of what call 1 already spent). A
+dispatch-capable node's own hop timeout is extended from the default
+180s to 600s (`DISPATCH_HOP_TIMEOUT_MS`), applied at every
+`withNodeTimeout` call site including a consensus branch carrying the
+tool. `check_dispatch_status` gained the same failure-detail lookup
+(`runs.output` is null on a failed run — the real error text lives on
+the failed hop's `runEvents` row) so a `still_running`/`failed` outcome
+is actually reviewable, not a dead end. See `docs/orchestration.md`'s
+"Cross-graph dispatch" section and `CLAUDE.md` for the full mechanics.
+
+**Explicitly not built:** no new run status, no suspend/resume/
+continuation architecture, no separate worker pool for waiting
+dispatches — the bounded-blocking approach gets the requested UX today
+with a contained change; revisit only if `WORKER_CONCURRENCY` pressure
+from this pattern proves a real bottleneck at higher concurrency.
+
+**Not covered by an automated e2e case:** the depth-cap-under-blocking
+interaction (`MAX_DISPATCH_DEPTH` still refusing fast). The depth check
+runs and returns *before* any run is created or any new polling code
+executes, so it's provably unmodified by this change — a dedicated e2e
+case would need a real 4-hop chained dispatch (multiple sequential real
+model calls) just to prove an already-untouched guard still runs first.
+Confirmed unmodified by direct diff instead of paying that
+cost/flakiness in the permanent suite.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

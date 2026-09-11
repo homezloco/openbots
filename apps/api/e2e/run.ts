@@ -2375,30 +2375,26 @@ async function main() {
     assert(/no dispatchable graph/i.test(String(run.output)), `expected a not-found error mentioned, got: ${run.output}`);
   });
 
-  await test("dispatch_to_graph fires a real, independent run in the target graph", async () => {
+  await test("dispatch_to_graph blocks and returns the target graph's real result inline", async () => {
     const before = await api(`/graphs/${dispatchTargetGraphId}/runs`);
     const beforeCount = before.body.length;
 
     const created = await api("/runs", {
       method: "POST",
-      body: JSON.stringify({ graphId: dispatchSourceGraphId, input: "Please dispatch the message 'ping' now." }),
+      body: JSON.stringify({ graphId: dispatchSourceGraphId, input: "Please dispatch the message 'ping' now, and tell me exactly what it said back." }),
     });
-    const dispatcherRun = await waitForRun(created.body.id);
+    const dispatcherRun = await waitForRun(created.body.id, 120_000);
     assert(dispatcherRun.status === "completed", `dispatcher run failed: ${JSON.stringify(dispatcherRun.events)}`);
-    assert(/dispatch/i.test(String(dispatcherRun.output)), `expected the dispatcher to report dispatching, got: ${dispatcherRun.output}`);
+    // The whole point of blocking dispatch: the DISPATCHER's own output
+    // already contains the target's real answer — no need to poll the
+    // target graph's run list from outside to find out what happened.
+    assert(
+      String(dispatcherRun.output).toLowerCase().includes("pong"),
+      `expected the dispatcher's own output to report the target's real "pong" reply, got: ${dispatcherRun.output}`,
+    );
 
-    let sawNewRun = false;
-    for (let i = 0; i < 10 && !sawNewRun; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      const after = await api(`/graphs/${dispatchTargetGraphId}/runs`);
-      sawNewRun = after.body.length > beforeCount;
-    }
-    assert(sawNewRun, "expected a new run to appear in the target graph's run history");
-
-    const targetRuns = await api(`/graphs/${dispatchTargetGraphId}/runs`);
-    const finished = await waitForRun(targetRuns.body[0].id);
-    assert(finished.status === "completed", `dispatched run did not complete: ${JSON.stringify(finished.events)}`);
-    assert(String(finished.output).toLowerCase().includes("pong"), `unexpected dispatched run output: ${finished.output}`);
+    const after = await api(`/graphs/${dispatchTargetGraphId}/runs`);
+    assert(after.body.length > beforeCount, "expected a new run to appear in the target graph's run history");
   });
 
   // --- check_dispatch_status: on-demand pull for a run already dispatched ---
@@ -2440,6 +2436,81 @@ async function main() {
     assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
     assert(/nothing has been dispatched/i.test(String(run.output)), `expected a clear "nothing dispatched yet" message, got: ${run.output}`);
   });
+
+  // --- dispatch_to_graph: blocking-wait timeout fallback ---
+  // DISPATCH_POLL_TIMEOUT_MS must be set low (a few seconds) in this
+  // stack's actual running environment for this test to observe
+  // outcome:"still_running" rather than waiting out the real 480s
+  // default — see .env.example / CI workflow. The mcp-echo delay tool
+  // (server.mjs's echo delayMs) is what makes the target reliably
+  // outlast that low timeout deterministically, independent of real
+  // model/API latency.
+  let dispatchSlowTargetId = "";
+  let dispatchSlowTargetName = "";
+  await test("dispatch_to_graph timeout-fallback setup: a target that reliably outlasts the poll timeout", async () => {
+    dispatchSlowTargetName = `E2E dispatch slow target ${Date.now()}`;
+    const target = await api("/graphs", { method: "POST", body: JSON.stringify({ name: dispatchSlowTargetName }) });
+    dispatchSlowTargetId = target.body.id;
+    const node = await api(`/graphs/${dispatchSlowTargetId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "SlowWorker",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt:
+          "When given any task, call mcp_echo_echo with text 'slow-task-done' and delayMs 15000, then reply with exactly what it echoed.",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"] }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `slow target node create failed: ${JSON.stringify(node.body)}`);
+    await api(`/graphs/${dispatchSlowTargetId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const graph = await api(`/graphs/${dispatchSourceGraphId}`);
+    const dispatcher = graph.body.nodes.find((n: any) => n.name === "Dispatcher");
+    const patched = await api(`/graphs/${dispatchSourceGraphId}/nodes/${dispatcher.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ dispatchTargets: [...dispatcher.dispatchTargets, dispatchSlowTargetId] }),
+    });
+    assert(patched.status === 200, `failed to add slow dispatch target: ${JSON.stringify(patched.body)}`);
+  });
+
+  await testWithRetries("dispatch_to_graph degrades to still-running when the target outlasts the poll timeout", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: dispatchSourceGraphId,
+        input: `Dispatch the task 'go slow' to targetGraphName "${dispatchSlowTargetName}" and tell me plainly whether you got a final answer back or whether it's still working.`,
+      }),
+    });
+    const dispatcherRun = await waitForRun(created.body.id, 120_000);
+    assert(dispatcherRun.status === "completed", `dispatcher run failed: ${JSON.stringify(dispatcherRun.events)}`);
+    const out = String(dispatcherRun.output);
+    assert(!/slow-task-done/i.test(out), `expected the poll to time out before the slow target finished, but got its real output: ${out}`);
+    assert(/still|progress|not (yet|done|finished|complete)|working on/i.test(out), `expected an honest "still running" report, got: ${out}`);
+
+    // The detached child keeps running and finishes on its own — proves
+    // the timeout fallback degrades gracefully rather than killing it.
+    const targetRuns = await api(`/graphs/${dispatchSlowTargetId}/runs`);
+    assert(targetRuns.body.length > 0, "expected the slow target's run to have actually started");
+    const finished = await waitForRun(targetRuns.body[0].id, 60_000);
+    assert(finished.status === "completed", `slow target run did not eventually complete on its own: ${JSON.stringify(finished.events)}`);
+    assert(/slow-task-done/i.test(String(finished.output)), `expected the slow target to eventually echo slow-task-done, got: ${finished.output}`);
+  });
+
+  // A dedicated "depth cap still resolves fast under blocking" e2e case
+  // was considered and dropped: MAX_DISPATCH_DEPTH's check in
+  // dispatchTool.ts runs and returns BEFORE any new polling code — a
+  // depth-refused call never creates a run and never reaches
+  // waitForDispatchedRun at all, so this code path is provably untouched
+  // by this change. Exercising it end-to-end would need a 4-hop real
+  // dispatch chain (multiple chained real model calls just to prove an
+  // unmodified guard still runs first) — cost/flakiness not justified by
+  // what it would actually be testing. Confirmed by direct diff instead:
+  // the depth check (dispatchTool.ts) is byte-for-byte unchanged by this
+  // commit (see PLAN.md).
 
   // --- manage_target_graphs: full cross-graph node/edge editing ---
   let managementTargetGraphId = "";

@@ -331,19 +331,58 @@ exception, added specifically so a "big picture" agent in one graph can
 delegate real work into another graph without a human relaying it by
 hand.
 
-**Fire-and-forget, not a cross-graph call stack.** The tool starts a real
-run in the target graph via the same `createRun()` helper `/push` and
-scheduled triggers already use, and returns immediately with
-`{dispatched, runId, message}` — it never waits for or sees that run's
-actual output. A synchronous "call another graph and block for its
-result" design was considered and rejected: a sub-run can take a long
-time (especially a consensus fan-out one), and blocking one BullMQ
-worker slot on another graph's entire run fights the same
-async-by-default grain `write_file`/`/push` were built around. The
-system prompt explicitly teaches a dispatch-capable node this contract
-(`engine.ts::appendDispatchContext`) so it never describes or guesses at
-a dispatched run's outcome — the same honesty instinct
-`appendWriteContext`'s "never claim you pushed" already establishes.
+**Agent-as-tool (reversed 2026-09-11), bounded by a shrinking timeout
+budget, not a cross-graph call stack.** The tool starts a real run in the
+target graph via the same `createRun()` helper `/push` and scheduled
+triggers already use, then **blocks and returns that run's real output**
+— OpenAI's Agents SDK terminology fits well here: this is "agent-as-tool"
+(the caller stays in charge and incorporates the result), not a
+"handoff" (full conversation transfer, which is what in-graph `auto`/
+`explicit` routing edges already do).
+
+This was originally fire-and-forget, and a blocking design was
+considered and rejected then for a real reason: a sub-run can take a long
+time, and blocking one BullMQ worker slot on another graph's entire run
+fights the async-by-default grain `write_file`/`/push` were built
+around. That reasoning wasn't wrong, but it treated the choice as binary.
+Research into how the rest of the industry does this (LangGraph's
+supervisor pattern, CrewAI's hierarchical manager, and — most tellingly —
+Anthropic's own production multi-agent research system) found that
+*every one of them blocks synchronously*, Anthropic's own engineering
+writeup says so explicitly ("our lead agents execute subagents
+synchronously, waiting for each set of subagents to complete before
+proceeding... this simplifies coordination, but creates bottlenecks"),
+and none of them have a distinct "send it back for revision" primitive
+either — it's uniformly just "the orchestrator calls the tool again."
+OpenBots already supports that for free: each hop's `generateText` call
+already allows up to `stepCountIs(20)` sequential tool calls, so a
+review-then-revise round needed zero new engine primitive, only a tool
+that actually returns a real result to review.
+
+The bound that makes this safe: `engine.ts` extends a dispatch-capable
+node's own hop timeout from the default 180s (`DEFAULT_NODE_TIMEOUT_MS`)
+to `DISPATCH_HOP_TIMEOUT_MS` (600s) — applied at **every**
+`withNodeTimeout` call site, including the per-branch call inside
+`dispatchConsensus`, since a single branch carrying `dispatch_to_graph`
+extends that whole fan-out round's worst case, not just its own. Each
+dispatch call computes its own remaining budget from a shared
+`hopDeadlineEpochMs` (threaded through `callAgent`) rather than a flat
+per-call constant — a hop that calls the tool twice (original, then a
+revision) must not let call 2 blow past the hop's own ceiling on top of
+whatever call 1 already spent, or the whole hop hits `NodeTimeoutError`
+and discards call 1's real result along with everything else. A target
+still running past its call's budget degrades to
+`outcome: "still_running"` (with the `runId`) rather than hanging —
+`check_dispatch_status` can look it up again if asked later. `WORKER_CONCURRENCY`
+(default 10) is the accepted cost of this — same tradeoff Anthropic
+documents for their own synchronous subagents — a blocking dispatch
+holds its own hop's worker slot for the wait, on top of the target's own
+hop(s) each needing slots too; raise it if leaning on this pattern
+heavily. The system prompt explicitly teaches a dispatch-capable node
+this contract (`engine.ts::appendReachableGraphsContext`) — review the
+result, revise (roughly 1-2 rounds, not hard-capped — the shrinking
+budget is what actually bounds a runaway loop) or report it honestly,
+never guess at an outcome you didn't get.
 
 **Security: name-based resolution + fresh ownership check, no third
 allowlist.** The model only ever supplies a graph **name** in its tool

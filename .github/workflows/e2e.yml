@@ -46,6 +46,11 @@ jobs:
           ALLOWED_MCP_SERVERS=http://mcp-echo:3930,http://127.0.0.1:3930
           SSH_KNOWN_HOSTS=203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
           COOKIE_SECURE=false
+          # Low on purpose: makes dispatch_to_graph's timeout-fallback e2e
+          # case deterministic. Comfortably above a trivial single-hop
+          # dispatch's real latency, comfortably below the mcp-echo delay
+          # tool's slow-path duration used to force the fallback.
+          DISPATCH_POLL_TIMEOUT_MS=3000
           EOF
 
       - name: Start postgres + redis

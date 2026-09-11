@@ -482,7 +482,7 @@ export function listAvailableTools(): { name: string; description: string; requi
     },
     {
       name: "dispatch_to_graph",
-      description: "Fire-and-forget: start a run in another graph you own, without waiting for its result.",
+      description: "Agent-as-tool: start a run in another graph you own and block for its real result, bounded by a timeout.",
       requiresFileAccessRoot: false,
     },
     {

@@ -19,10 +19,15 @@ const SUPPORTED_VERSIONS = ["2025-11-25", "2025-03-26", "2024-11-05", "2026-07-2
 const TOOLS = [
   {
     name: "echo",
-    description: "Echo the given text back. Returns JSON { echo: <the text you sent> }.",
+    description:
+      "Echo the given text back. Returns JSON { echo: <the text you sent> }. Optional delayMs sleeps " +
+      "before responding (clamped, e2e-only — used to deterministically exercise dispatch_to_graph's timeout fallback).",
     inputSchema: {
       type: "object",
-      properties: { text: { type: "string", description: "Text to echo" } },
+      properties: {
+        text: { type: "string", description: "Text to echo" },
+        delayMs: { type: "number", description: "Optional: milliseconds to sleep before responding" },
+      },
       required: ["text"],
     },
   },
@@ -41,7 +46,10 @@ function error(id, code, message) {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-function handleMessage(msg) {
+const MAX_DELAY_MS = 30_000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function handleMessage(msg) {
   if (!msg || typeof msg !== "object") return null;
   const { id, method, params } = msg;
   if (typeof method !== "string") return id === undefined ? null : error(id, -32600, "Invalid request");
@@ -62,6 +70,9 @@ function handleMessage(msg) {
     const args = params?.arguments && typeof params.arguments === "object" ? params.arguments : {};
     if (name === "echo") {
       const text = typeof args.text === "string" ? args.text : "";
+      if (typeof args.delayMs === "number" && args.delayMs > 0) {
+        await sleep(Math.min(args.delayMs, MAX_DELAY_MS));
+      }
       return result(id, { content: [{ type: "text", text: JSON.stringify({ echo: text }) }] });
     }
     if (name === "secret_ping") {
@@ -123,7 +134,7 @@ createServer(async (req, res) => {
   }
 
   const messages = Array.isArray(body) ? body : [body];
-  const responses = messages.map(handleMessage).filter(Boolean);
+  const responses = (await Promise.all(messages.map(handleMessage))).filter(Boolean);
   const sessionId = req.headers["mcp-session-id"] || randomUUID();
   const headers = {
     "mcp-session-id": String(sessionId),

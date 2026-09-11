@@ -24,11 +24,17 @@ import {
   usageEvents,
 } from "../db/schema.js";
 import { aggregatorNodeIds, resolveNextHop, startsWithSentinel } from "./resolve.js";
-import { withNodeTimeout } from "./circuitBreaker.js";
+import { DEFAULT_NODE_TIMEOUT_MS, withNodeTimeout } from "./circuitBreaker.js";
 import { withRetry } from "./retry.js";
 import { getCredentials } from "./credentials.js";
 import { classifyProviderError } from "./providerErrors.js";
-import { createCheckDispatchStatusTool, createDispatchToGraphTool, getDispatchableGraphs, type DispatchableGraph } from "./dispatchTool.js";
+import {
+  createCheckDispatchStatusTool,
+  createDispatchToGraphTool,
+  DISPATCH_HOP_TIMEOUT_MS,
+  getDispatchableGraphs,
+  type DispatchableGraph,
+} from "./dispatchTool.js";
 import {
   createCreateTargetEdgeTool,
   createCreateTargetNodeTool,
@@ -51,6 +57,18 @@ interface AgentCallResult {
   model: string;
   inputTokens: number;
   outputTokens: number;
+}
+
+/**
+ * A dispatch-capable node can block inside its own hop waiting on another
+ * graph's entire run (see dispatchTool.ts) — the default 180s node
+ * timeout is tuned for a normal model-call-plus-a-few-tool-calls hop, not
+ * one that includes waiting on a full run elsewhere. Applied at every
+ * withNodeTimeout call site, not just the main hop path, since a
+ * consensus branch can carry dispatch_to_graph too.
+ */
+function hopTimeoutMsFor(node: AgentNode): number {
+  return node.tools.includes("dispatch_to_graph") ? DISPATCH_HOP_TIMEOUT_MS : DEFAULT_NODE_TIMEOUT_MS;
 }
 
 /**
@@ -101,8 +119,14 @@ export async function dispatchHop(runId: string): Promise<void> {
   const autoRoutingTargets = isAggregator ? [] : getAutoRoutingTargets(graph, node.id);
 
   let result: AgentCallResult;
+  const hopTimeoutMs = hopTimeoutMsFor(node);
+  const hopDeadlineEpochMs = startedAt.getTime() + hopTimeoutMs;
   try {
-    result = await withNodeTimeout(node.id, () => callAgent(node, run.input, runId, autoRoutingTargets, graph.ownerId));
+    result = await withNodeTimeout(
+      node.id,
+      () => callAgent(node, run.input, runId, autoRoutingTargets, graph.ownerId, hopDeadlineEpochMs),
+      hopTimeoutMs,
+    );
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     await db.insert(runEvents).values({
@@ -320,8 +344,12 @@ async function dispatchConsensus(
       publishRunEvent({ runId, graphId: graph.id, type: "hop_dispatched", nodeId: targetNode.id });
 
       try {
-        const result = await withNodeTimeout(targetNode.id, () =>
-          callAgent(targetNode, input, runId, getAutoRoutingTargets(graph, targetNode.id), graph.ownerId),
+        const branchTimeoutMs = hopTimeoutMsFor(targetNode);
+        const branchDeadlineEpochMs = startedAt.getTime() + branchTimeoutMs;
+        const result = await withNodeTimeout(
+          targetNode.id,
+          () => callAgent(targetNode, input, runId, getAutoRoutingTargets(graph, targetNode.id), graph.ownerId, branchDeadlineEpochMs),
+          branchTimeoutMs,
         );
         await recordUsage(runId, targetNode.id, result);
         finishHopSpan(hopSpan, {
@@ -535,7 +563,10 @@ function appendReachableGraphsContext(
   const capabilities: string[] = [];
   if (wantsDispatch) {
     capabilities.push(
-      "start independent work in one of them with dispatch_to_graph (fire-and-forget — it does NOT wait for or return that run's result; use check_dispatch_status later if asked how it went)",
+      "delegate work to one of them with dispatch_to_graph — it BLOCKS and returns that graph's real result, " +
+        "so review it and report back to the user; call it again with revised, fully self-contained instructions " +
+        "if the result needs another pass (usually 1-2 rounds at most); use check_dispatch_status if a dispatch " +
+        "timed out and you're asked about it later",
     );
   }
   if (wantsGraphManagement) {
@@ -619,6 +650,11 @@ async function callAgent(
   runId: string,
   autoRoutingTargets: { name: string; description: string }[] = [],
   ownerId: string | null = null,
+  // When this hop's own timeout actually expires — dispatch_to_graph uses
+  // it to compute a shrinking wait budget across possibly multiple calls
+  // in the same hop's tool loop, never trusting a flat per-call constant
+  // that could outlive the hop itself (see dispatchTool.ts).
+  hopDeadlineEpochMs: number = Date.now() + DEFAULT_NODE_TIMEOUT_MS,
 ): Promise<AgentCallResult> {
   const targets = [{ provider: node.provider, model: node.model }, ...node.fallbackChain];
   const prompt = typeof input === "string" ? input : JSON.stringify(input);
@@ -721,7 +757,7 @@ async function callAgent(
       if (wantsDispatch) {
         tools = {
           ...(tools ?? {}),
-          dispatch_to_graph: createDispatchToGraphTool(ownerId, node.dispatchTargets ?? [], runId, node.graphId),
+          dispatch_to_graph: createDispatchToGraphTool(ownerId, node.dispatchTargets ?? [], runId, node.graphId, hopDeadlineEpochMs),
           // Granted automatically alongside dispatch_to_graph — checking on
           // your own prior dispatch is a pure safety improvement over
           // today's "fire and forget with no recourse," not new exposure,

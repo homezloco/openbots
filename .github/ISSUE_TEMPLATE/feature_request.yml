@@ -1,0 +1,20 @@
+name: Feature request
+description: An idea or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you trying to do that OpenBots can't do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Rough ideas are fine — how it fits the graph/routing model matters more than polish.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

@@ -95,12 +95,30 @@ async function fetchLoginStyleSummary(baseUrl: string, creds: StoredLogin) {
   };
 }
 
-async function fetchMetrics(creds: StoredLogin, days?: number): Promise<unknown> {
-  if (!creds.baseUrl || !creds.style) {
-    throw new Error(
-      "This metrics credential is missing baseUrl and/or style — re-save it at /settings as JSON {username, password, baseUrl, style} (style is \"dashboard\" or \"login\").",
-    );
+function parseStoredLogin(raw: unknown): StoredLogin | { error: string; kind: "config" } {
+  if (!raw || typeof raw !== "object") {
+    return { error: "The stored metrics credential is malformed — re-save it at /settings.", kind: "config" };
   }
+  const o = raw as Record<string, unknown>;
+  if (typeof o.username !== "string" || !o.username || typeof o.password !== "string" || !o.password) {
+    return { error: "The stored metrics credential is missing username/password — re-save it at /settings.", kind: "config" };
+  }
+  if (typeof o.baseUrl !== "string" || !/^https?:\/\//.test(o.baseUrl)) {
+    return {
+      error: "The stored metrics credential is missing baseUrl — re-save it at /settings as JSON {username, password, baseUrl, style}.",
+      kind: "config",
+    };
+  }
+  if (!(METRICS_STYLES as readonly string[]).includes(String(o.style))) {
+    return {
+      error: 'The stored metrics credential is missing style — re-save it at /settings with style "dashboard" or "login".',
+      kind: "config",
+    };
+  }
+  return { username: o.username, password: o.password, baseUrl: o.baseUrl, style: o.style as MetricsStyle };
+}
+
+async function fetchMetrics(creds: StoredLogin, days?: number): Promise<unknown> {
   switch (creds.style) {
     case "dashboard":
       return fetchDashboardStyle(creds.baseUrl, creds, days);
@@ -140,8 +158,10 @@ export function createBusinessMetricsTool(ownerId: string | null): Tool {
       "Get real conversion/revenue/traffic numbers for a metrics source configured at " +
       "/settings. 'source' is the name the source was given when its credential was saved — " +
       "see the list of configured sources in your instructions, or ask the user to add one " +
-      "at /settings if none is listed. Returns an error naming the missing credential if a " +
-      "source isn't configured — never fabricate a number when that happens.",
+      "at /settings if none is listed. Returns {error, kind:'config'} when the source is " +
+      "missing or incomplete (the human must re-save it at /settings — you cannot fix that " +
+      "by editing a project) and {error, kind:'upstream'} when the remote site itself failed. " +
+      "Never fabricate a number.",
     inputSchema: z.object({
       source: z
         .string()
@@ -157,20 +177,28 @@ export function createBusinessMetricsTool(ownerId: string | null): Tool {
         where: and(eq(userCredentials.userId, ownerId), eq(userCredentials.provider, provider)),
       });
       if (!cred) {
-        return { error: `No "${provider}" credential configured yet — add one at /settings.` };
+        return {
+          error: `No "${provider}" credential configured yet — add one at /settings.`,
+          kind: "config",
+        };
       }
 
-      let creds: StoredLogin;
+      let parsed: unknown;
       try {
-        creds = JSON.parse(decryptCredential(cred.encryptedKey));
+        parsed = JSON.parse(decryptCredential(cred.encryptedKey));
       } catch {
-        return { error: `The stored "${provider}" credential is malformed — re-save it at /settings.` };
+        return { error: `The stored "${provider}" credential is malformed — re-save it at /settings.`, kind: "config" };
       }
+      const creds = parseStoredLogin(parsed);
+      if ("error" in creds) return creds;
 
       try {
         return await fetchMetrics(creds, days);
       } catch (err) {
-        return { error: err instanceof Error ? err.message : `Failed to fetch metrics for ${source}` };
+        return {
+          error: err instanceof Error ? err.message : `Failed to fetch metrics for ${source}`,
+          kind: "upstream",
+        };
       }
     },
   });

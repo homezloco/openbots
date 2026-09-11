@@ -41,9 +41,22 @@ the plaintext never appears in any API response.
 This is a *different* system from `user_credentials` — account-scoped,
 not graph/node-scoped, holding the GitHub PAT/SSH key `/push` and `/pr`
 use (see `docs/orchestration.md`'s "Confirmed push and PR creation"
-section). Don't conflate the two: a graph-scoped provider credential
-authenticates model calls; an account-scoped user credential
-authenticates git operations against GitHub.
+section) and `metrics_<slug>` logins for `business_metrics`. Don't
+conflate them: a graph-scoped provider credential authenticates model
+calls; an account-scoped user credential authenticates git or a named
+metrics source.
+
+**Metrics scale by slug, not by new tools.** Each site/app is one
+`metrics_<slug>` row the account adds at `/settings`:
+`{username, password, baseUrl, style}` (`style` is `"dashboard"` or
+`"login"`). N websites = N slugs, same tool. Save-time validation
+rejects an incomplete shape so a later hop cannot see `null`. The
+tool returns `{error, kind:"config"}` when the source is missing or
+incomplete (human fixes it at `/settings`) and `{error, kind:"upstream"}`
+when the remote site itself failed. Agents never write those rows —
+a file-writing specialist cannot "fix analytics" that is actually a
+missing OpenBots credential. Don't scrape Render/Railway for every
+new site; that's a one-off operator bootstrap, not the product path.
 
 ## MCP client
 

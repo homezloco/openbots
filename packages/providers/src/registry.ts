@@ -2,7 +2,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createXai } from "@ai-sdk/xai";
-import { MockLanguageModelV2 } from "ai/test";
+import { MockLanguageModelV3 } from "ai/test";
 import type { ProviderId } from "@openbots/graph-schema";
 import type { ProviderAdapter, ProviderCredentials } from "./types.js";
 
@@ -39,12 +39,20 @@ const MOCK_ROUTE_TO = /ROUTE_TO\s+(\S+)/;
  * <name>, so a future routing test can steer auto-routing deterministically
  * (resolve.ts matches an auto edge's target name against the output text).
  */
+// Derived from MockLanguageModelV3's own constructor type rather than a
+// hand-typed guess — this stays correct if the class's doGenerate
+// signature ever shifts again (e.g. a future MockLanguageModelV4) without
+// needing another manual edit here.
+type MockLanguageModelV3Config = ConstructorParameters<typeof MockLanguageModelV3>[0];
+type MockDoGenerate = NonNullable<MockLanguageModelV3Config["doGenerate"]>;
+type MockDoGenerateOptions = Parameters<MockDoGenerate>[0];
+
 const mockAdapter: ProviderAdapter = {
   id: "mock",
   capabilities: { streaming: false, toolCalling: false, vision: false, promptCaching: false },
   getModel: () =>
-    new MockLanguageModelV2({
-      doGenerate: async (options) => {
+    new MockLanguageModelV3({
+      doGenerate: async (options: MockDoGenerateOptions) => {
         const messages = (options.prompt ?? []) as { role: string; content: unknown }[];
         const systemText = messages
           .filter((m) => m.role === "system")

@@ -770,30 +770,39 @@ async function callAgent(
     (node.tools.includes("read_file") || node.tools.includes("search_knowledge") || node.tools.includes("list_directory"));
 
   const isRouter = autoRoutingTargets.length > 0 || Boolean(node.consensusGroup);
-  const systemPrompt = appendProjectContext(
-    appendMetricsSourcesContext(
-      appendRemoteCommandContext(
-        appendReachableGraphsContext(
-          appendWriteContext(
-            appendAssignedTaskContext(
-              appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
-              isRouter,
-              node.role,
-              canWrite,
+  // A transform node's "systemPrompt" is operation CONFIG (e.g. a
+  // template), not an LLM instruction — every appendXContext injection
+  // below would leak straight into its output (found by the mock-tier
+  // e2e: appendAssignedTaskContext's worker guidance got appended to a
+  // template transform's rendered result). Non-LLM providers get their
+  // prompt passed through untouched.
+  const isNonLlmProvider = node.provider === "transform";
+  const systemPrompt = isNonLlmProvider
+    ? node.systemPrompt
+    : appendProjectContext(
+        appendMetricsSourcesContext(
+          appendRemoteCommandContext(
+            appendReachableGraphsContext(
+              appendWriteContext(
+                appendAssignedTaskContext(
+                  appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
+                  isRouter,
+                  node.role,
+                  canWrite,
+                ),
+                canWrite,
+              ),
+              reachableGraphs,
+              wantsDispatch,
+              wantsGraphManagement,
             ),
-            canWrite,
+            wantsRemoteCommand ? node.sshTarget!.allowedCommands : [],
           ),
-          reachableGraphs,
-          wantsDispatch,
-          wantsGraphManagement,
+          metricsSources,
         ),
-        wantsRemoteCommand ? node.sshTarget!.allowedCommands : [],
-      ),
-      metricsSources,
-    ),
-    effectiveFileRoot,
-    canRead,
-  );
+        effectiveFileRoot,
+        canRead,
+      );
 
   let lastError: unknown;
   for (let i = 0; i < targets.length; i++) {

@@ -1312,6 +1312,44 @@ Verified end-to-end with a real run through the full API/worker stack:
 cost. Next step: an e2e tier that runs the routing/auth/CRUD cases on
 `mock` so PRs get free CI coverage.
 
+## Dogfood round 2: transform nodes, retry backoff, sentinel display (2026-09-12)
+
+All three changes below were written by the app's own agents (same
+dogfood graph as above) with human validation per branch; two were
+prompted by a real incident in the user's live Loudest chat.
+
+- **`transform` provider — the first non-agent node type** (n8n gap #5
+  v1): no model call, zero cost, deterministic. The model id selects the
+  operation (`template` / `uppercase` / `extract-json`), the systemPrompt
+  carries the operation's config. Implemented as a `MockLanguageModelV3`
+  like `mock`, so zero engine/schema changes. Covered by 3 new mock-tier
+  e2e cases (14/14). Two real bugs found in validation: the agent's
+  `.test()` on a `/g` regex (stateful `lastIndex` — fixed to
+  `.includes`), and — the important one — **engine context injection
+  polluted transform output**: `appendAssignedTaskContext`'s worker
+  guidance got appended to a rendered template, because every
+  `appendXContext` treats systemPrompt as LLM instructions. `callAgent`
+  now skips all context injection for non-LLM providers.
+- **Retry backoff fix**: a real hop failed with `AI_APICallError: Cannot
+  connect to API` after all 3 attempts — the old 500ms/1000ms spacing
+  can't outlive a brief network blip. Now ~1s/~4s + jitter. Root cause
+  on this host was also fixed separately: ULA-only IPv6 with AAAA-first
+  DNS intermittently blackholes provider connects; the (gitignored)
+  worker override now sets `NODE_OPTIONS=--dns-result-order=ipv4first`.
+- **Sentinel leak in chat display**: a real answer rendered starting
+  with the literal text `DONE`. New display-only
+  `stripRoutingSentinel()` (`apps/web/lib/textDisplay.ts`) strips a
+  leading `DONE`/`UNKNOWN`/`ALL` token wherever run *output* renders as
+  answer text; stored data untouched; a bare-sentinel output still
+  displays rather than going blank.
+
+**Known quirk documented while testing** (predates this work):
+`runs.output` is jsonb, so a string output that happens to be valid
+JSON text round-trips back as a parsed document (type change +
+whitespace normalization). `useBotChat` already defends; the mock-tier
+extract-json case now deep-compares for the same reason. A proper fix
+(preserving string-ness) is a small schema/driver change, deferred.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

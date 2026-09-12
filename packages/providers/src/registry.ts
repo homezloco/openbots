@@ -114,7 +114,11 @@ type TransformOperation = (typeof TRANSFORM_OPERATIONS)[number];
 function runTransform(operation: TransformOperation, template: string, input: string): string {
   switch (operation) {
     case "template":
-      return TEMPLATE_INPUT_PLACEHOLDER.test(template)
+      // .includes, NOT TEMPLATE_INPUT_PLACEHOLDER.test(): calling .test()
+      // on a /g regex advances its shared lastIndex, so a second call can
+      // silently start mid-string and miss a real placeholder — the
+      // stateful-global-regex footgun.
+      return template.includes("{{input}}")
         ? template.replace(TEMPLATE_INPUT_PLACEHOLDER, input)
         : `${template}\n${input}`;
     case "uppercase":

@@ -2287,6 +2287,148 @@ async function main() {
     await api(`/graphs/${scheduleGraphId}/schedules/${scheduleId}`, { method: "DELETE" });
   });
 
+  // --- Webhook triggers ---
+  let webhookGraphId = "";
+
+  await test("webhook CRUD: create returns a token once; list/patch never include it", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E webhooks" }) });
+    webhookGraphId = g.body.id;
+
+    const created = await api(`/graphs/${webhookGraphId}/webhooks`, {
+      method: "POST",
+      body: JSON.stringify({ name: "Stripe checkout" }),
+    });
+    assert(created.status === 201, `create failed: ${JSON.stringify(created.body)}`);
+    assert(typeof created.body.token === "string" && created.body.token.length > 20, `expected a real token, got: ${JSON.stringify(created.body)}`);
+    const webhookId = created.body.id;
+
+    const list = await api(`/graphs/${webhookGraphId}/webhooks`);
+    assert(list.status === 200 && list.body.length === 1, `expected exactly one webhook, got: ${JSON.stringify(list.body)}`);
+    assert(!("token" in list.body[0]) && !("tokenHash" in list.body[0]), `list response must never include the token: ${JSON.stringify(list.body[0])}`);
+
+    const patched = await api(`/graphs/${webhookGraphId}/webhooks/${webhookId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert(patched.status === 200 && patched.body.enabled === false, `patch failed: ${JSON.stringify(patched.body)}`);
+    assert(!("token" in patched.body), `patch response must never include the token: ${JSON.stringify(patched.body)}`);
+    assert(patched.body.name === "Stripe checkout", "an unrelated field must survive a partial patch unchanged");
+
+    // Re-enable — later tests in this graph create their own fresh webhooks.
+    await api(`/graphs/${webhookGraphId}/webhooks/${webhookId}`, { method: "PATCH", body: JSON.stringify({ enabled: true }) });
+  });
+
+  await test("security: webhook routes reject a mismatched graphId (IDOR)", async () => {
+    const created = await api(`/graphs/${webhookGraphId}/webhooks`, {
+      method: "POST",
+      body: JSON.stringify({ name: "IDOR target" }),
+    });
+    const webhookId = created.body.id;
+
+    const otherGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E webhooks (other)" }) });
+
+    const patch = await api(`/graphs/${otherGraph.body.id}/webhooks/${webhookId}`, { method: "PATCH", body: JSON.stringify({ enabled: false }) });
+    assert(patch.status === 404, `expected 404 for a webhook id under the wrong graphId, got ${patch.status}`);
+
+    const rotate = await api(`/graphs/${otherGraph.body.id}/webhooks/${webhookId}/rotate`, { method: "POST" });
+    assert(rotate.status === 404, `expected 404 rotating a webhook id under the wrong graphId, got ${rotate.status}`);
+
+    const del = await api(`/graphs/${otherGraph.body.id}/webhooks/${webhookId}`, { method: "DELETE" });
+    assert(del.status === 404, `expected 404 for a webhook id under the wrong graphId, got ${del.status}`);
+
+    await api(`/graphs/${webhookGraphId}/webhooks/${webhookId}`, { method: "DELETE" });
+  });
+
+  await test("webhook fires a real run — no session required, and the posted body becomes the run's input", async () => {
+    const node = await api(`/graphs/${webhookGraphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Hook",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "You'll be given a JSON object as input. Reply with exactly the value of its 'event' field, nothing else.",
+        tools: [],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${webhookGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const created = await api(`/graphs/${webhookGraphId}/webhooks`, { method: "POST", body: JSON.stringify({ name: "Fire test" }) });
+    const token = created.body.token;
+
+    const ownerCookie = sessionCookie;
+    sessionCookie = ""; // the firing endpoint takes no session at all
+    const fired = await api(`/webhooks/${token}`, { method: "POST", body: JSON.stringify({ event: "checkout.completed" }) });
+    sessionCookie = ownerCookie;
+    assert(fired.status === 202, `expected 202, got ${fired.status}: ${JSON.stringify(fired.body)}`);
+    assert(typeof fired.body.runId === "string", `expected a runId, got: ${JSON.stringify(fired.body)}`);
+
+    const run = await waitForRun(fired.body.runId);
+    assert(run.status === "completed", `webhook-fired run did not complete: ${JSON.stringify(run.events)}`);
+    assert(String(run.output).toLowerCase().includes("checkout.completed"), `expected the posted body reflected in output, got: ${run.output}`);
+
+    const history = await api(`/graphs/${webhookGraphId}/webhooks/${created.body.id}/runs`);
+    assert(
+      history.body.some((r: any) => r.id === fired.body.runId && r.status === "completed"),
+      `expected the fired run in the webhook's own history, got: ${JSON.stringify(history.body)}`,
+    );
+  });
+
+  await test("security: an unknown token is 404, and a disabled webhook's real token is also 404", async () => {
+    const garbage = await api("/webhooks/not-a-real-token", { method: "POST", body: JSON.stringify({}) });
+    assert(garbage.status === 404, `expected 404 for an unknown token, got ${garbage.status}`);
+
+    const created = await api(`/graphs/${webhookGraphId}/webhooks`, { method: "POST", body: JSON.stringify({ name: "Disabled test" }) });
+    const token = created.body.token;
+    await api(`/graphs/${webhookGraphId}/webhooks/${created.body.id}`, { method: "PATCH", body: JSON.stringify({ enabled: false }) });
+
+    const disabled = await api(`/webhooks/${token}`, { method: "POST", body: JSON.stringify({}) });
+    assert(disabled.status === 404, `expected 404 for a disabled webhook's real token, got ${disabled.status}: ${JSON.stringify(disabled.body)}`);
+  });
+
+  await test("webhook rotate invalidates the old token; the new one works", async () => {
+    // A fresh, entry-node-less graph — firing succeeds through token/rate-limit
+    // checks and fails fast on the entry-node check, with no real model call.
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E webhook rotate target" }) });
+    const created = await api(`/graphs/${g.body.id}/webhooks`, { method: "POST", body: JSON.stringify({ name: "Rotate test" }) });
+    const oldToken = created.body.token;
+
+    const rotated = await api(`/graphs/${g.body.id}/webhooks/${created.body.id}/rotate`, { method: "POST" });
+    assert(rotated.status === 200, `rotate failed: ${JSON.stringify(rotated.body)}`);
+    const newToken = rotated.body.token;
+    assert(newToken && newToken !== oldToken, "expected rotate to return a genuinely different token");
+
+    const withOld = await api(`/webhooks/${oldToken}`, { method: "POST", body: JSON.stringify({}) });
+    assert(withOld.status === 404, `expected the old token to stop working after rotate, got ${withOld.status}`);
+
+    const withNew = await api(`/webhooks/${newToken}`, { method: "POST", body: JSON.stringify({}) });
+    assert(withNew.status === 400, `expected the new token to be recognized and reach the entry-node check, got ${withNew.status}: ${JSON.stringify(withNew.body)}`);
+  });
+
+  await test("webhook rate limit: fires past the per-minute cap are 429, and don't affect a different trigger's own counter", async () => {
+    // Points at a graph with no entryNodeId — every call fails fast with
+    // 400 after clearing the rate-limit check, so this exercises the
+    // limiter without making any real model calls.
+    const emptyGraph = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E webhook rate limit target" }) });
+    const created = await api(`/graphs/${emptyGraph.body.id}/webhooks`, { method: "POST", body: JSON.stringify({ name: "Rate limited" }) });
+    const token = created.body.token;
+
+    const otherCreated = await api(`/graphs/${emptyGraph.body.id}/webhooks`, { method: "POST", body: JSON.stringify({ name: "Untouched" }) });
+    const otherToken = otherCreated.body.token;
+
+    let sawRateLimited = false;
+    for (let i = 0; i < 35 && !sawRateLimited; i++) {
+      const res = await api(`/webhooks/${token}`, { method: "POST", body: JSON.stringify({}) });
+      if (res.status === 429) sawRateLimited = true;
+      else assert(res.status === 400, `expected 400 (no entry node) before the cap, got ${res.status}: ${JSON.stringify(res.body)}`);
+    }
+    assert(sawRateLimited, "expected to hit 429 within 35 rapid fires of a 30/minute cap");
+
+    const otherStill = await api(`/webhooks/${otherToken}`, { method: "POST", body: JSON.stringify({}) });
+    assert(otherStill.status === 400, `expected a different trigger's own counter to be unaffected, got ${otherStill.status}: ${JSON.stringify(otherStill.body)}`);
+  });
+
   await test("agent commits: GET /graphs/:graphId/commits reflects push status and node name", async () => {
     const list = await api(`/graphs/${writeGraphId}/commits`);
     assert(list.status === 200, `expected 200, got ${list.status}: ${JSON.stringify(list.body)}`);

@@ -20,6 +20,7 @@ export async function createRun(
   scheduledTriggerId?: string,
   dispatchDepth = 0,
   dispatchSourceGraphId?: string,
+  webhookTriggerId?: string,
 ) {
   const graph = await loadLiveGraph(graphRow.id);
 
@@ -35,6 +36,7 @@ export async function createRun(
       scheduledTriggerId: scheduledTriggerId ?? null,
       dispatchDepth,
       dispatchSourceGraphId: dispatchSourceGraphId ?? null,
+      webhookTriggerId: webhookTriggerId ?? null,
     })
     .returning();
 

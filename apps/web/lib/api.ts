@@ -262,6 +262,47 @@ export const updateSchedule = (graphId: string, id: string, body: Partial<Pick<S
 export const deleteSchedule = (graphId: string, id: string) =>
   request<void>(`/graphs/${graphId}/schedules/${id}`, { method: "DELETE" });
 
+// --- Webhook triggers (run a graph when an external HTTP event arrives).
+// `token` is present ONLY in the create/rotate response — it's the plaintext
+// firing secret, shown to the operator exactly once and never retrievable
+// again. Every other response (list/update) never includes it. ---
+
+export interface WebhookTrigger {
+  id: string;
+  graphId: string;
+  name: string;
+  mode: "pinned" | "live";
+  enabled: boolean;
+  lastRunId: string | null;
+  lastTriggeredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebhookRunSummary {
+  id: string;
+  status: string;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export const listWebhooks = (graphId: string) => request<WebhookTrigger[]>(`/graphs/${graphId}/webhooks`);
+
+export const listWebhookRuns = (graphId: string, webhookId: string) =>
+  request<WebhookRunSummary[]>(`/graphs/${graphId}/webhooks/${webhookId}/runs`);
+
+export const createWebhook = (graphId: string, body: { name: string; mode?: "pinned" | "live" }) =>
+  request<WebhookTrigger & { token: string }>(`/graphs/${graphId}/webhooks`, { method: "POST", body: JSON.stringify(body) });
+
+export const updateWebhook = (graphId: string, id: string, body: Partial<Pick<WebhookTrigger, "name" | "mode" | "enabled">>) =>
+  request<WebhookTrigger>(`/graphs/${graphId}/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+
+export const rotateWebhook = (graphId: string, id: string) =>
+  request<WebhookTrigger & { token: string }>(`/graphs/${graphId}/webhooks/${id}/rotate`, { method: "POST" });
+
+export const deleteWebhook = (graphId: string, id: string) =>
+  request<void>(`/graphs/${graphId}/webhooks/${id}`, { method: "DELETE" });
+
 // --- Agent commits (writes made via write_file/edit_file, pushed with /push) ---
 
 export interface AgentCommitSummary {

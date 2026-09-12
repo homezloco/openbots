@@ -107,6 +107,10 @@ export const runs = pgTable("runs", {
   // trigger delete so the run's own history survives the schedule that
   // created it being removed later.
   scheduledTriggerId: uuid("scheduled_trigger_id").references(() => scheduledTriggers.id, { onDelete: "set null" }),
+  // Set iff this run was created by a webhook firing (routes/webhookTriggers.ts)
+  // rather than a manual/scheduled one — same "survive the thing that
+  // created it" shape as scheduledTriggerId.
+  webhookTriggerId: uuid("webhook_trigger_id").references(() => webhookTriggers.id, { onDelete: "set null" }),
   // How many dispatch_to_graph hops led to this run (0 = started manually or
   // by schedule, never by dispatch). Caps cross-graph dispatch cycles — see
   // orchestrator/dispatchTool.ts's MAX_DISPATCH_DEPTH.
@@ -268,6 +272,34 @@ export const scheduledTriggers = pgTable("scheduled_triggers", {
   input: jsonb("input").notNull(),
   mode: text("mode").notNull().default("pinned"), // "pinned" | "live"
   cronExpression: text("cron_expression").notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  lastRunId: uuid("last_run_id"),
+  lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * The first row in this schema reachable by an anonymous HTTP caller —
+ * a firing POST to /webhooks/:token (routes/webhookTriggers.ts) carries
+ * no session, so the token IS the entire trust boundary. `id` is a plain
+ * randomUUID() used only by the authenticated CRUD routes
+ * (/graphs/:graphId/webhooks/:id); `tokenHash` is a SHA-256 digest of a
+ * separate, unrelated high-entropy secret — the plaintext is returned
+ * to the operator exactly once (on create or rotate) and never stored.
+ * No fixed `input` column, unlike scheduledTriggers: a webhook's input
+ * IS its request body, which varies per firing rather than being set
+ * once at registration time.
+ */
+export const webhookTriggers = pgTable("webhook_triggers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  graphId: uuid("graph_id")
+    .notNull()
+    .references(() => agentGraphs.id, { onDelete: "cascade" }),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  name: text("name").notNull(),
+  mode: text("mode").notNull().default("pinned"), // "pinned" | "live"
+  tokenHash: text("token_hash").notNull().unique(),
   enabled: boolean("enabled").notNull().default(true),
   lastRunId: uuid("last_run_id"),
   lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),

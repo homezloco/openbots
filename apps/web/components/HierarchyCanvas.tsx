@@ -35,6 +35,7 @@ import {
 import { useRunEventsSocket } from "../lib/useRunEventsSocket";
 import { AgentConversationPanel } from "./AgentConversationPanel";
 import { SchedulesPanel } from "./SchedulesPanel";
+import { WebhooksPanel } from "./WebhooksPanel";
 import { GitHubPanel } from "./GitHubPanel";
 import { SignalEdge, type EdgePulse } from "./SignalEdge";
 import { useTheme } from "./ThemeProvider";
@@ -544,6 +545,7 @@ export function HierarchyCanvas({
   }
 
   const [showSchedules, setShowSchedules] = useState(false);
+  const [showWebhooks, setShowWebhooks] = useState(false);
   const [showGitHub, setShowGitHub] = useState(false);
   const [runInputOpen, setRunInputOpen] = useState(false);
   const [runInput, setRunInput] = useState("");
@@ -686,6 +688,7 @@ export function HierarchyCanvas({
           onClick={() => {
             setOpenAgentPanel(null);
             setShowGitHub(false);
+            setShowWebhooks(false);
             setShowSchedules((s) => !s);
           }}
         >
@@ -694,7 +697,18 @@ export function HierarchyCanvas({
         <button
           onClick={() => {
             setOpenAgentPanel(null);
+            setShowGitHub(false);
             setShowSchedules(false);
+            setShowWebhooks((s) => !s);
+          }}
+        >
+          🪝 Webhooks
+        </button>
+        <button
+          onClick={() => {
+            setOpenAgentPanel(null);
+            setShowSchedules(false);
+            setShowWebhooks(false);
             setShowGitHub((s) => !s);
           }}
         >
@@ -899,6 +913,7 @@ export function HierarchyCanvas({
               return;
             }
             setShowSchedules(false);
+            setShowWebhooks(false);
             setShowGitHub(false);
             setOpenAgentPanel(node.id);
           }}
@@ -936,6 +951,7 @@ export function HierarchyCanvas({
           />
         )}
         {showSchedules && <SchedulesPanel graphId={graph.id} onClose={() => setShowSchedules(false)} />}
+        {showWebhooks && <WebhooksPanel graphId={graph.id} onClose={() => setShowWebhooks(false)} />}
         {showGitHub && <GitHubPanel graphId={graph.id} onClose={() => setShowGitHub(false)} />}
       </div>
     </div>

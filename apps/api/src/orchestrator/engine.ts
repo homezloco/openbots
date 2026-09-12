@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { generateText, stepCountIs, type Tool } from "ai";
+import { generateText, stepCountIs, type ModelMessage, type Tool } from "ai";
 import { eq, desc, and } from "drizzle-orm";
 import {
   commitWorktreeChanges,
@@ -8,6 +8,7 @@ import {
   estimateCostUsd,
   getCommitDiff,
   getModel,
+  getProviderAdapter,
   isWithinAllowedWriteRoot,
   resolveTools,
 } from "@openbots/providers";
@@ -58,6 +59,8 @@ interface AgentCallResult {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 /**
@@ -70,6 +73,48 @@ interface AgentCallResult {
  */
 function hopTimeoutMsFor(node: AgentNode): number {
   return node.tools.includes("dispatch_to_graph") ? DISPATCH_HOP_TIMEOUT_MS : DEFAULT_NODE_TIMEOUT_MS;
+}
+
+/**
+ * Off by default (see ANTHROPIC_PROMPT_CACHING in .env.example) — a
+ * 5-minute cache write costs 1.25x normal input price and only pays off
+ * if the SAME node is called again within that window (chat sessions,
+ * consensus fan-out, dispatch-revision loops), a real if small loss for
+ * a node only ever invoked once. When on, only affects providers that
+ * declare promptCaching (currently just anthropic) — every other
+ * provider keeps the exact system/prompt shorthand path untouched.
+ */
+function promptCachingEnabled(): boolean {
+  return Boolean(process.env.ANTHROPIC_PROMPT_CACHING);
+}
+
+/**
+ * generateText's system/prompt shorthand strings have no way to carry
+ * providerOptions — Anthropic's cache_control has to sit on a message
+ * object (confirmed against the AI SDK's own documented examples, not
+ * assumed), so opting in means switching to the messages array form
+ * for this one call only. Returns the exact same {system, prompt} shape
+ * as before when caching isn't active for this provider, so nothing
+ * about the untouched path changes.
+ */
+function buildPromptOptions(
+  provider: ProviderId,
+  hopPrompt: string,
+  prompt: string,
+): { system: string; prompt: string } | { messages: ModelMessage[] } {
+  if (!promptCachingEnabled() || !getProviderAdapter(provider).capabilities.promptCaching) {
+    return { system: hopPrompt, prompt };
+  }
+  return {
+    messages: [
+      {
+        role: "system",
+        content: hopPrompt,
+        providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+      },
+      { role: "user", content: prompt },
+    ],
+  };
 }
 
 /**
@@ -474,7 +519,16 @@ async function recordUsage(runId: string, nodeId: string, result: AgentCallResul
     model: result.model,
     inputTokens: result.inputTokens,
     outputTokens: result.outputTokens,
-    estimatedCostUsd: estimateCostUsd(result.provider, result.model, result.inputTokens, result.outputTokens),
+    cacheReadTokens: result.cacheReadTokens,
+    cacheWriteTokens: result.cacheWriteTokens,
+    estimatedCostUsd: estimateCostUsd(
+      result.provider,
+      result.model,
+      result.inputTokens,
+      result.outputTokens,
+      result.cacheReadTokens,
+      result.cacheWriteTokens,
+    ),
   });
 }
 
@@ -813,8 +867,7 @@ async function callAgent(
       const result = await withRetry(() =>
         generateText({
           model,
-          system: hopPrompt,
-          prompt,
+          ...buildPromptOptions(target.provider, hopPrompt, prompt),
           // 20, not 8: a write-capable investigative specialist doing real
           // work (read CLAUDE.md, read a schema file, read the actual
           // routes file, cross-reference a couple of helpers, THEN write a
@@ -891,6 +944,12 @@ async function callAgent(
         model: target.model,
         inputTokens: result.usage.inputTokens ?? 0,
         outputTokens: result.usage.outputTokens ?? 0,
+        // Normalized cross-provider by the AI SDK itself
+        // (LanguageModelUsage.inputTokenDetails) — 0/0 for a provider
+        // that doesn't report a cache breakdown at all (xai, openrouter,
+        // openai-compatible today), which is exactly today's behavior.
+        cacheReadTokens: result.usage.inputTokenDetails?.cacheReadTokens ?? 0,
+        cacheWriteTokens: result.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
       };
     } catch (err) {
       lastError = err;

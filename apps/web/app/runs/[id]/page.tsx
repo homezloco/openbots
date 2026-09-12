@@ -79,8 +79,11 @@ export default function RunDetailPage() {
         </p>
       )}
       <p>
-        Usage: {run.usageTotal.inputTokens} in / {run.usageTotal.outputTokens} out tokens · est. $
-        {run.usageTotal.estimatedCostUsd.toFixed(4)}
+        Usage: {run.usageTotal.inputTokens} in
+        {run.usageTotal.cacheReadTokens + run.usageTotal.cacheWriteTokens > 0 && (
+          <> ({run.usageTotal.cacheReadTokens} cached, {run.usageTotal.cacheWriteTokens} cache write)</>
+        )}{" "}
+        / {run.usageTotal.outputTokens} out tokens · est. ${run.usageTotal.estimatedCostUsd.toFixed(4)}
       </p>
 
       {run.output != null && (

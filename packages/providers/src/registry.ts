@@ -14,24 +14,32 @@ import type { ProviderAdapter, ProviderCredentials } from "./types.js";
 const adapters: Record<ProviderId, ProviderAdapter> = {
   anthropic: {
     id: "anthropic",
-    capabilities: { streaming: true, toolCalling: true, vision: true },
+    // The only provider with an explicit cache_control opt-in this
+    // codebase implements — see engine.ts::callAgent and
+    // ANTHROPIC_PROMPT_CACHING.
+    capabilities: { streaming: true, toolCalling: true, vision: true, promptCaching: true },
     getModel: (modelId, creds) => createAnthropic({ apiKey: creds.apiKey })(modelId),
   },
   openai: {
     id: "openai",
-    capabilities: { streaming: true, toolCalling: true, vision: true },
+    // promptCaching: false here means "no explicit opt-in mechanism in
+    // this codebase" — OpenAI's own caching is automatic and free
+    // server-side (no code needed), and pricing.ts::estimateCostUsd
+    // already accounts for it via the AI SDK's normalized
+    // inputTokenDetails regardless of this flag.
+    capabilities: { streaming: true, toolCalling: true, vision: true, promptCaching: false },
     getModel: (modelId, creds) => createOpenAI({ apiKey: creds.apiKey })(modelId),
   },
   xai: {
     id: "xai",
-    capabilities: { streaming: true, toolCalling: true, vision: true },
+    capabilities: { streaming: true, toolCalling: true, vision: true, promptCaching: false },
     getModel: (modelId, creds) => createXai({ apiKey: creds.apiKey })(modelId),
   },
   openrouter: {
     id: "openrouter",
     // Routed through the generic OpenAI-compatible adapter — OpenRouter
     // speaks the OpenAI wire format, so no dedicated client is needed.
-    capabilities: { streaming: true, toolCalling: true, vision: false },
+    capabilities: { streaming: true, toolCalling: true, vision: false, promptCaching: false },
     getModel: (modelId, creds) =>
       createOpenAICompatible({
         name: "openrouter",
@@ -41,7 +49,7 @@ const adapters: Record<ProviderId, ProviderAdapter> = {
   },
   "openai-compatible": {
     id: "openai-compatible",
-    capabilities: { streaming: true, toolCalling: false, vision: false },
+    capabilities: { streaming: true, toolCalling: false, vision: false, promptCaching: false },
     getModel: (modelId, creds) => {
       if (!creds.baseURL) {
         throw new Error("openai-compatible provider requires baseURL");

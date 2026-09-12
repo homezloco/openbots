@@ -1221,6 +1221,47 @@ engine+AI-SDK stack with a genuinely free local model remains
 shipped, and one only a funded Anthropic key or a longer timeout budget
 against faster hardware will close cleanly.
 
+## Prompt caching for OpenBots' own outbound LLM calls (2026-09-12)
+
+Triggered by an Anthropic billing email about a low cache-hit-rate on
+the account's own unrelated direct API usage — irrelevant to OpenBots
+itself, but it surfaced a real, unclaimed opportunity: `engine.ts::callAgent`
+resends `node.systemPrompt` (plus everything `appendXContext` injects)
+byte-identical on every hop dispatched to the same node, exactly the
+shape Anthropic's `cache_control` is for, and exactly the repeat-call
+pattern multi-turn chat (`useBotChat`), consensus fan-out, and
+`dispatch_to_graph` revision rounds already produce.
+
+Researching it surfaced a second, more consequential finding:
+**OpenAI's prompt caching is automatic and free (no code, no opt-in),
+and as of a May 2026 update caches for up to 24 hours** — meaning it's
+already happening today on every OpenAI node with a long-enough prompt,
+and `pricing.ts::estimateCostUsd` had no idea, silently *overestimating*
+cost for anyone using it. Confirmed via the AI SDK's own types
+(`ai@7.0.93`'s `LanguageModelUsage.inputTokenDetails` already normalizes
+`noCacheTokens`/`cacheReadTokens`/`cacheWriteTokens` across providers)
+that this was fixable with zero new API surface, not something to
+build.
+
+Shipped as two tracks: an always-on cost-accounting fix (every
+provider, zero behavior change — `estimateCostUsd` now prices the three
+buckets separately instead of flat-rating every input token), and an
+Anthropic-specific opt-in (`ANTHROPIC_PROMPT_CACHING`, off by default)
+that switches `callAgent`'s `generateText()` call from the `system`/
+`prompt` shorthand strings to a `messages` array with `cache_control` on
+the system message — confirmed against the AI SDK's own documented
+examples that `providerOptions` can only attach to a message object,
+never as a flat call-level option, before writing any code. `ProviderCapabilities`
+gained a fourth flag, `promptCaching`, following the same "declared
+per-provider, not assumed uniform" reasoning `streaming`/`toolCalling`/
+`vision` already established.
+
+**Known gap**: not yet verified against a real, funded Anthropic
+account (still blocked on the same credit exhaustion noted in the
+`run_code` entry above) — the cache-write-then-cache-read sequence and
+the resulting cost delta need a real two-call test to confirm, not just
+a clean typecheck.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

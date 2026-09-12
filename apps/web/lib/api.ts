@@ -389,6 +389,8 @@ export interface RunEventRow {
 export interface UsageTotal {
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   estimatedCostUsd: number;
 }
 

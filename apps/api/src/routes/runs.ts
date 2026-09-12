@@ -282,9 +282,11 @@ export async function runRoutes(app: FastifyInstance) {
       (acc, u) => ({
         inputTokens: acc.inputTokens + u.inputTokens,
         outputTokens: acc.outputTokens + u.outputTokens,
+        cacheReadTokens: acc.cacheReadTokens + u.cacheReadTokens,
+        cacheWriteTokens: acc.cacheWriteTokens + u.cacheWriteTokens,
         estimatedCostUsd: acc.estimatedCostUsd + u.estimatedCostUsd,
       }),
-      { inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 },
+      { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCostUsd: 0 },
     );
 
     return { ...run, events, usage, usageTotal };

@@ -11,6 +11,15 @@ export interface ProviderCapabilities {
   streaming: boolean;
   toolCalling: boolean;
   vision: boolean;
+  /**
+   * Whether this codebase has an explicit cache-breakpoint mechanism for
+   * this provider (engine.ts::callAgent, gated behind
+   * ANTHROPIC_PROMPT_CACHING). False does not mean "no caching at all" —
+   * OpenAI's own caching is automatic server-side and needs no opt-in
+   * here; this flag is specifically about whether there's a
+   * cache_control-style knob this codebase knows how to pull.
+   */
+  promptCaching: boolean;
 }
 
 export interface ProviderCredentials {

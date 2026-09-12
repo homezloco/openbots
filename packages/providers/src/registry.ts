@@ -39,13 +39,15 @@ const MOCK_ROUTE_TO = /ROUTE_TO\s+(\S+)/;
  * <name>, so a future routing test can steer auto-routing deterministically
  * (resolve.ts matches an auto edge's target name against the output text).
  */
-// Derived from MockLanguageModelV3's own constructor type rather than a
+// Derived from MockLanguageModelV3's own instance method rather than a
 // hand-typed guess — this stays correct if the class's doGenerate
 // signature ever shifts again (e.g. a future MockLanguageModelV4) without
-// needing another manual edit here.
-type MockLanguageModelV3Config = ConstructorParameters<typeof MockLanguageModelV3>[0];
-type MockDoGenerate = NonNullable<MockLanguageModelV3Config["doGenerate"]>;
+// needing another manual edit here. (The constructor-config route fails:
+// the config parameter is optional and its doGenerate field is a
+// function-or-fixture union, so Parameters<> can't be applied to it.)
+type MockDoGenerate = MockLanguageModelV3["doGenerate"];
 type MockDoGenerateOptions = Parameters<MockDoGenerate>[0];
+type MockDoGenerateResult = Awaited<ReturnType<MockDoGenerate>>;
 
 const mockAdapter: ProviderAdapter = {
   id: "mock",
@@ -66,12 +68,16 @@ const mockAdapter: ProviderAdapter = {
         const routeMatch = systemText.match(MOCK_ROUTE_TO);
         const text = routeMatch ? routeMatch[1] : `MOCK: ${userText.slice(-200)}`;
 
-        return {
-          finishReason: "stop",
-          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        const result: MockDoGenerateResult = {
+          finishReason: { unified: "stop", raw: "stop" },
+          usage: {
+            inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 0, text: 0, reasoning: 0 },
+          },
           content: [{ type: "text", text }],
           warnings: [],
         };
+        return result;
       },
     }),
 };

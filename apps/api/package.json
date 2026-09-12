@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "test:e2e": "node e2e/setup-writable-fixture.mjs && tsx e2e/run.ts"
+    "test:e2e": "node e2e/setup-writable-fixture.mjs && tsx e2e/run.ts",
+    "test:e2e:mock": "tsx e2e/run-mock.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.0",

@@ -1,0 +1,343 @@
+/**
+ * Free PR-tier e2e suite: exercises the real running stack (Postgres,
+ * Redis, api, worker) over HTTP exactly like run.ts does — but every
+ * node uses `provider: "mock"` (packages/providers/src/registry.ts), so
+ * it makes ZERO billed model calls and needs ZERO provider API keys.
+ * This is what lets CI run it on every pull request, including from
+ * forks, with no repo secrets (.github/workflows/e2e-mock.yml).
+ *
+ * What belongs here: routing/orchestration mechanics that are
+ * deterministic under the mock adapter (explicit chaining, ROUTE_TO-
+ * steered auto routing, the UNKNOWN sentinel, consensus fan-out/join,
+ * the cycle guard) plus auth/ownership/IDOR cases that never involve a
+ * model at all. What does NOT belong here: anything that depends on real
+ * model judgment or a real timing race (mid-run rerouting — the mock
+ * answers instantly, so the race is unwinnable by construction), real
+ * provider fallback classification, tool calling. Those stay in run.ts,
+ * the billed tier that runs on pushes to main.
+ *
+ * Run with: pnpm --filter @openbots/api test:e2e:mock
+ * against a stack already up via docker compose (api + worker).
+ */
+
+const BASE_URL = process.env.E2E_BASE_URL ?? "http://localhost:4000";
+
+let sessionCookie = "";
+
+async function api(path: string, init: RequestInit = {}): Promise<{ status: number; body: any }> {
+  const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) };
+  if (init.body !== undefined) headers["content-type"] = "application/json";
+  if (sessionCookie) headers.cookie = sessionCookie;
+
+  const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
+  const setCookie = res.headers.get("set-cookie");
+  if (setCookie) sessionCookie = setCookie.split(";")[0];
+
+  const text = await res.text();
+  let body: any = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  return { status: res.status, body };
+}
+
+function assert(cond: unknown, message: string): asserts cond {
+  if (!cond) throw new Error(message);
+}
+
+/** Mock hops are near-instant; 30s covers queue latency on a cold CI runner. */
+async function waitForRun(runId: string, timeoutMs = 30_000): Promise<any> {
+  if (!runId) throw new Error("waitForRun called with no run id — the preceding run-creation call likely failed");
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const { body } = await api(`/runs/${runId}`);
+    if (body.status === "completed" || body.status === "error") return body;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`Run ${runId} did not finish within ${timeoutMs}ms`);
+}
+
+interface TestResult {
+  name: string;
+  passed: boolean;
+  error?: string;
+  durationMs: number;
+}
+const results: TestResult[] = [];
+
+async function test(name: string, fn: () => Promise<void>) {
+  const start = Date.now();
+  try {
+    await fn();
+    const durationMs = Date.now() - start;
+    results.push({ name, passed: true, durationMs });
+    console.log(`✅ ${name} (${durationMs}ms)`);
+  } catch (err) {
+    const durationMs = Date.now() - start;
+    const message = err instanceof Error ? err.message : String(err);
+    results.push({ name, passed: false, error: message, durationMs });
+    console.log(`❌ ${name} (${durationMs}ms): ${message}`);
+  }
+}
+
+/** Every node in this suite is a mock node; only name/prompt/description vary. */
+function mockNode(overrides: {
+  name: string;
+  role?: string;
+  systemPrompt?: string;
+  description?: string;
+  position?: { x: number; y: number };
+}) {
+  return {
+    role: "worker",
+    systemPrompt: "deterministic mock node",
+    description: overrides.name,
+    position: { x: 0, y: 0 },
+    provider: "mock",
+    model: "mock-model",
+    ...overrides,
+  };
+}
+
+async function createGraph(name: string): Promise<any> {
+  const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name }) });
+  assert(g.status === 201, `graph create failed: ${g.status} ${JSON.stringify(g.body)}`);
+  return g.body;
+}
+
+async function createNode(graphId: string, node: ReturnType<typeof mockNode>): Promise<any> {
+  const n = await api(`/graphs/${graphId}/nodes`, { method: "POST", body: JSON.stringify(node) });
+  assert(n.status === 201, `node create failed: ${n.status} ${JSON.stringify(n.body)}`);
+  return n.body;
+}
+
+async function createEdge(graphId: string, sourceNodeId: string, targetNodeId: string, kind: string): Promise<any> {
+  const e = await api(`/graphs/${graphId}/edges`, {
+    method: "POST",
+    body: JSON.stringify({ sourceNodeId, targetNodeId, kind }),
+  });
+  assert(e.status === 201, `edge create failed: ${e.status} ${JSON.stringify(e.body)}`);
+  return e.body;
+}
+
+async function setEntry(graphId: string, entryNodeId: string): Promise<void> {
+  const p = await api(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId }) });
+  assert(p.status === 200, `set entry failed: ${p.status} ${JSON.stringify(p.body)}`);
+}
+
+async function startRun(graphId: string, input: string): Promise<string> {
+  const r = await api("/runs", { method: "POST", body: JSON.stringify({ graphId, input }) });
+  assert(r.status === 201, `run create failed: ${r.status} ${JSON.stringify(r.body)}`);
+  return r.body.id;
+}
+
+function succeededEvents(run: any): any[] {
+  return (run.events as any[]).filter((e) => e.status === "succeeded");
+}
+
+async function main() {
+  const email = `e2e-mock-${Date.now()}@openbots.dev`;
+  const password = "e2e-mock-password-123";
+
+  await test("health check", async () => {
+    const { status, body } = await api("/health");
+    assert(status === 200 && body.status === "ok", `unexpected: ${status} ${JSON.stringify(body)}`);
+  });
+
+  await test("signup + session cookie works", async () => {
+    const signup = await api("/auth/signup", { method: "POST", body: JSON.stringify({ email, password }) });
+    assert(signup.status === 201, `signup failed: ${signup.status} ${JSON.stringify(signup.body)}`);
+    const me = await api("/auth/me");
+    assert(me.status === 200 && me.body.email === email, `auth/me failed: ${JSON.stringify(me.body)}`);
+  });
+
+  await test("mock node create returns the hydrated shape (position object, provider echo)", async () => {
+    const g = await createGraph("Mock: node shape");
+    const n = await createNode(g.id, mockNode({ name: "Shape Check", position: { x: 12, y: 34 } }));
+    assert(n.provider === "mock" && n.model === "mock-model", `provider/model echo wrong: ${JSON.stringify(n)}`);
+    assert(n.position && n.position.x === 12 && n.position.y === 34, `position shape wrong: ${JSON.stringify(n.position)}`);
+  });
+
+  await test("explicit pipeline chains output hop-to-hop, no credentials configured anywhere", async () => {
+    const g = await createGraph("Mock: explicit chain");
+    const a = await createNode(g.id, mockNode({ name: "Alpha" }));
+    const b = await createNode(g.id, mockNode({ name: "Beta" }));
+    await createEdge(g.id, a.id, b.id, "explicit");
+    await setEntry(g.id, a.id);
+
+    const runId = await startRun(g.id, "hello mock");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    // Hop 1 echoes the input; an explicit edge feeds that output to hop 2,
+    // which echoes it again — deterministic double prefix.
+    assert(run.output === "MOCK: MOCK: hello mock", `expected chained echo, got: ${JSON.stringify(run.output)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 2, `expected 2 hops, got ${hops.length}`);
+    assert(hops[0].nodeId === a.id && hops[1].nodeId === b.id, "hops in wrong order");
+  });
+
+  await test("ROUTE_TO steers auto routing deterministically; specialist gets the ORIGINAL input", async () => {
+    const g = await createGraph("Mock: auto routing");
+    const router = await createNode(
+      g.id,
+      mockNode({ name: "Router", role: "router", systemPrompt: "ROUTE_TO Billing" }),
+    );
+    const support = await createNode(g.id, mockNode({ name: "Support", description: "support things" }));
+    const billing = await createNode(g.id, mockNode({ name: "Billing", description: "billing things" }));
+    await createEdge(g.id, router.id, support.id, "auto");
+    await createEdge(g.id, router.id, billing.id, "auto");
+    await setEntry(g.id, router.id);
+
+    const runId = await startRun(g.id, "please refund my order");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 2, `expected 2 hops, got ${hops.length}`);
+    assert(hops[1].nodeId === billing.id, `expected Billing to run, got node ${hops[1].nodeId}`);
+    // Auto handoff passes the user's original request, not the router's output.
+    assert(run.output === "MOCK: please refund my order", `expected original-input echo, got: ${JSON.stringify(run.output)}`);
+  });
+
+  await test("UNKNOWN sentinel completes the run with the router's own output instead of guessing", async () => {
+    const g = await createGraph("Mock: UNKNOWN");
+    const router = await createNode(
+      g.id,
+      mockNode({ name: "Router", role: "router", systemPrompt: "ROUTE_TO UNKNOWN" }),
+    );
+    const s1 = await createNode(g.id, mockNode({ name: "SpecialistOne", description: "one" }));
+    const s2 = await createNode(g.id, mockNode({ name: "SpecialistTwo", description: "two" }));
+    await createEdge(g.id, router.id, s1.id, "auto");
+    await createEdge(g.id, router.id, s2.id, "auto");
+    await setEntry(g.id, router.id);
+
+    const runId = await startRun(g.id, "totally ambiguous request");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 1, `expected only the router hop, got ${hops.length}`);
+    assert(run.output === "UNKNOWN", `expected UNKNOWN as the answer, got: ${JSON.stringify(run.output)}`);
+  });
+
+  await test("consensus fan-out joins both branches into the aggregator", async () => {
+    const g = await createGraph("Mock: consensus");
+    const source = await createNode(g.id, mockNode({ name: "FanoutSource" }));
+    const b1 = await createNode(g.id, mockNode({ name: "BranchOne" }));
+    const b2 = await createNode(g.id, mockNode({ name: "BranchTwo" }));
+    const agg = await createNode(g.id, mockNode({ name: "Aggregator" }));
+    const e1 = await createEdge(g.id, source.id, b1.id, "consensus");
+    const e2 = await createEdge(g.id, source.id, b2.id, "consensus");
+    const patch = await api(`/graphs/${g.id}/nodes/${source.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ consensusGroup: { edgeIds: [e1.id, e2.id], aggregatorNodeId: agg.id } }),
+    });
+    assert(patch.status === 200, `consensusGroup patch failed: ${patch.status} ${JSON.stringify(patch.body)}`);
+    await setEntry(g.id, source.id);
+
+    const runId = await startRun(g.id, "fan this out");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    const hopNodeIds = hops.map((h) => h.nodeId);
+    assert(hopNodeIds.includes(b1.id) && hopNodeIds.includes(b2.id), `both branches should run: ${JSON.stringify(hopNodeIds)}`);
+    assert(hopNodeIds[hopNodeIds.length - 1] === agg.id, "aggregator should be the final hop");
+    const branchHops = hops.filter((h) => h.nodeId === b1.id || h.nodeId === b2.id);
+    assert(branchHops.every((h) => h.fanoutBatchId), "branch hops should carry a fanoutBatchId");
+    assert(typeof run.output === "string" && run.output.startsWith("MOCK: "), `aggregator output missing: ${JSON.stringify(run.output)}`);
+  });
+
+  await test("cycle guard: an explicit A→B→A loop completes instead of spinning forever", async () => {
+    const g = await createGraph("Mock: cycle guard");
+    const a = await createNode(g.id, mockNode({ name: "LoopA" }));
+    const b = await createNode(g.id, mockNode({ name: "LoopB" }));
+    await createEdge(g.id, a.id, b.id, "explicit");
+    await createEdge(g.id, b.id, a.id, "explicit");
+    await setEntry(g.id, a.id);
+
+    const runId = await startRun(g.id, "around we go");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 2, `expected the revisit to end the run after 2 hops, got ${hops.length}`);
+  });
+
+  // --- auth/ownership cases: no model involved at all ---
+  await test("security: second user cannot read or mutate the first user's graph/runs", async () => {
+    const g = await createGraph("Mock: ownership");
+    const n = await createNode(g.id, mockNode({ name: "Private" }));
+    await setEntry(g.id, n.id);
+    const runId = await startRun(g.id, "owner only");
+    await waitForRun(runId);
+
+    const ownerCookie = sessionCookie;
+    sessionCookie = "";
+    const attacker = await api("/auth/signup", {
+      method: "POST",
+      body: JSON.stringify({ email: `e2e-mock-attacker-${Date.now()}@openbots.dev`, password: "attacker-pass-123" }),
+    });
+    assert(attacker.status === 201, `attacker signup failed: ${JSON.stringify(attacker.body)}`);
+
+    const readGraph = await api(`/graphs/${g.id}`);
+    assert(readGraph.status === 403, `expected 403 reading foreign graph, got ${readGraph.status}`);
+    const readRun = await api(`/runs/${runId}`);
+    // 404 rather than 403 is fine here — not revealing whether a foreign
+    // run id exists at all is a valid (arguably stronger) denial.
+    assert(readRun.status === 403 || readRun.status === 404, `expected 403/404 reading foreign run, got ${readRun.status}`);
+    const patchNode = await api(`/graphs/${g.id}/nodes/${n.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Hijacked" }),
+    });
+    assert(patchNode.status === 403 || patchNode.status === 404, `expected 403/404 mutating foreign node, got ${patchNode.status}`);
+
+    sessionCookie = ownerCookie;
+    const stillOurs = await api(`/graphs/${g.id}`);
+    assert(stillOurs.status === 200 && stillOurs.body.nodes[0].name === "Private", "owner state should be untouched");
+  });
+
+  await test("security: routing-changes audit trail requires auth and ownership", async () => {
+    const g = await createGraph("Mock: audit trail");
+    const ownerCookie = sessionCookie;
+
+    sessionCookie = "";
+    const unauth = await api(`/graphs/${g.id}/routing-changes`);
+    assert(unauth.status === 401, `expected 401 unauthenticated, got ${unauth.status}`);
+
+    await api("/auth/signup", {
+      method: "POST",
+      body: JSON.stringify({ email: `e2e-mock-outsider-${Date.now()}@openbots.dev`, password: "outsider-pass-123" }),
+    });
+    const wrongOwner = await api(`/graphs/${g.id}/routing-changes`);
+    assert(wrongOwner.status === 403, `expected 403 wrong owner, got ${wrongOwner.status}`);
+
+    sessionCookie = ownerCookie;
+    const owner = await api(`/graphs/${g.id}/routing-changes`);
+    assert(owner.status === 200, `expected 200 for owner, got ${owner.status}`);
+  });
+
+  await test("graph delete cascades cleanly", async () => {
+    const g = await createGraph("Mock: delete me");
+    const n = await createNode(g.id, mockNode({ name: "Doomed" }));
+    await setEntry(g.id, n.id);
+    const del = await api(`/graphs/${g.id}`, { method: "DELETE" });
+    assert(del.status === 204, `delete failed: ${del.status}`);
+    const gone = await api(`/graphs/${g.id}`);
+    assert(gone.status === 404, `expected 404 after delete, got ${gone.status}`);
+  });
+
+  // --- summary ---
+  const passed = results.filter((r) => r.passed).length;
+  const failed = results.length - passed;
+  console.log(`\n${passed}/${results.length} passed${failed ? `, ${failed} FAILED` : ""}`);
+  if (failed > 0) {
+    for (const r of results.filter((x) => !x.passed)) console.log(`   ❌ ${r.name}: ${r.error}`);
+    process.exit(1);
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

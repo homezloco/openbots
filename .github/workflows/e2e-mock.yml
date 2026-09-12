@@ -1,0 +1,95 @@
+name: e2e-mock
+
+# The free tier: runs the mock-provider e2e suite (apps/api/e2e/run-mock.ts)
+# on every pull request. Zero billed model calls, zero repo secrets — the
+# session/encryption secrets are generated fresh per run, so this also works
+# for PRs from forks. The billed, no-mocks suite (e2e.yml) still runs on
+# every push to main.
+on:
+  pull_request: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: e2e-mock-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-mock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # No provider key and no repo secrets on purpose: every node in the
+      # mock suite uses provider "mock" (no credential resolution at all),
+      # and the two app secrets just need to exist and be stable within a
+      # run — generated fresh here so fork PRs can run this too.
+      - name: Write .env for docker compose
+        run: |
+          cat > .env <<EOF
+          ANTHROPIC_API_KEY=
+          OPENAI_API_KEY=
+          XAI_API_KEY=
+          OPENROUTER_API_KEY=
+          OPENAI_COMPATIBLE_API_KEY=
+          OPENAI_COMPATIBLE_BASE_URL=
+          DATABASE_URL=postgres://openbots:openbots@postgres:5432/openbots
+          REDIS_URL=redis://redis:6379
+          SESSION_SECRET=$(openssl rand -hex 32)
+          CREDENTIALS_ENCRYPTION_KEY=$(openssl rand -hex 32)
+          WEB_ORIGIN=http://localhost:3000
+          ALLOWED_FILE_ACCESS_ROOTS=
+          ALLOWED_FILE_WRITE_ROOTS=
+          ALLOWED_SSH_HOSTS=
+          ALLOWED_MCP_SERVERS=
+          SSH_KNOWN_HOSTS=
+          COOKIE_SECURE=false
+          EOF
+
+      - name: Start postgres + redis
+        run: docker compose up postgres redis -d --wait
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgres://openbots:openbots@localhost:5432/openbots
+        run: pnpm --filter @openbots/api db:migrate
+
+      - name: Build api image
+        run: docker compose build api
+
+      - name: Start api + worker
+        run: docker compose up api worker -d
+
+      - name: Wait for api to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4000/health > /dev/null; then
+              echo "api is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "api never became healthy"
+          docker compose logs api worker
+          exit 1
+
+      - name: Run mock e2e suite
+        run: pnpm --filter @openbots/api test:e2e:mock
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

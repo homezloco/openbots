@@ -1262,6 +1262,56 @@ account (still blocked on the same credit exhaustion noted in the
 the resulting cost delta need a real two-call test to confirm, not just
 a clean typecheck.
 
+## Dogfood session: OpenBots agents working on OpenBots (2026-09-12)
+
+With the Anthropic key funded again, a dedicated dogfood account
+("OpenBots Dogfood Team" graph: Engineering Lead → Docs Engineer /
+Platform Engineer on `auto` edges, both write-scoped to this repo) was
+used to do real Phase 1/3 work through the product itself — the point
+being to find friction, not just to produce the artifacts. Artifacts
+produced by agents and merged after review: the CONTRIBUTING.md
+honesty pass (no-unit-suite note, why PRs skip e2e), the README
+landing-page rewrite (positioning line, Why OpenBots, Safety, both new
+GIF embeds — the landscape reroute GIF and the gateway click-through
+GIF were recorded this session via scripted Chromium), and
+`docs/quickstart.md`. The Lead's auto-routing picked the right
+specialist unprompted on every run.
+
+**Real findings, in order of severity:**
+
+1. **The 180s hop timeout was a hard-coded constant** — a write-capable
+   node doing a genuine multi-file code task (read several files, write
+   several) hit `exceeded 180000ms timeout` twice while still well under
+   the step cap, and there was no way to grant more time short of
+   editing `circuitBreaker.ts` and rebuilding. Fixed: `NODE_TIMEOUT_MS`
+   env var, default unchanged. The deeper fix is still the "external
+   CLI coding agent as a node kind" roadmap item above — this session
+   is its strongest evidence yet.
+2. **A timed-out hop can leave fully-committed, correct work behind
+   while the run reports `error`.** Both timeout failures had already
+   committed useful work to their worktree branches (68 and 26 lines);
+   the run status gives no hint the branch is worth salvaging. UX gap:
+   the run error surface should mention commits that landed before the
+   timeout.
+3. **Agents can't validate their own code changes** — no typecheck/test
+   capability inside a hop, so the loop was: agent writes → human runs
+   `tsc` → feed exact errors back as a follow-up run. Workable but
+   asymmetric; strengthens both the `run_code`-adjacent "let a node run
+   the repo's own check commands" idea and the CLI-agent node kind.
+4. **Type-level nits took the agent two rounds** (AI SDK `ai/test` mock
+   class version and V3 result shapes) — the final 2-line typing fix
+   was faster done by hand. Splitting "agent does the substantive
+   work, human does the type-system finish" was the efficient division.
+
+**Mock provider shipped through this loop** (Phase 3 item #1 from the
+go-forward plan): `provider: "mock"` — `MockLanguageModelV3`-backed, no
+network, no credentials, deterministic (`MOCK: <last 200 chars>` echo,
+or `ROUTE_TO <name>` in the system prompt to steer auto-routing tests).
+Verified end-to-end with a real run through the full API/worker stack:
+`status=completed output=MOCK: hello deterministic world`, zero API
+cost. Next step: an e2e tier that runs the routing/auth/CRUD cases on
+`mock` so PRs get free CI coverage.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

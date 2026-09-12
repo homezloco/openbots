@@ -30,17 +30,27 @@ interface McpServerDraft {
   url: string;
   allowedTools: string[];
   credentialProvider: string;
+  // "" = unset (Authorization: Bearer <token>, the default). Set = the
+  // raw token is sent under this header name instead, no Bearer prefix.
+  headerName: string;
   discovered: DiscoveredMcpTool[];
   discovering: boolean;
   discoverError: string | null;
 }
 
-function toDraft(server: { slug: string; url: string; allowedTools?: string[]; credentialProvider?: string }): McpServerDraft {
+function toDraft(server: {
+  slug: string;
+  url: string;
+  allowedTools?: string[];
+  credentialProvider?: string;
+  headerName?: string | null;
+}): McpServerDraft {
   return {
     slug: server.slug,
     url: server.url,
     allowedTools: server.allowedTools ?? [],
     credentialProvider: server.credentialProvider ?? "",
+    headerName: server.headerName ?? "",
     discovered: (server.allowedTools ?? []).map((name) => ({ name, description: "" })),
     discovering: false,
     discoverError: null,
@@ -151,6 +161,7 @@ export function AgentSettingsForm({
       const result = await discoverMcp({
         url: row.url.trim(),
         ...(row.credentialProvider.trim() ? { credentialProvider: row.credentialProvider.trim() } : {}),
+        ...(row.headerName.trim() ? { headerName: row.headerName.trim() } : {}),
       });
       const known = new Set(result.tools.map((t) => t.name));
       patchMcpServer(index, {
@@ -225,11 +236,12 @@ export function AgentSettingsForm({
       // row here since the patchMcpServer state update hasn't been
       // applied/re-rendered yet by the time this line runs.
       const credentialProvider = mcpServers[index]?.credentialProvider.trim() || undefined;
+      const headerName = mcpServers[index]?.headerName.trim() || undefined;
       patchMcpServer(index, { slug, url, discovering: true, discoverError: null });
       setPickerOpenIndex(null);
       setPickerQuery("");
       try {
-        const result = await discoverMcp({ url, ...(credentialProvider ? { credentialProvider } : {}) });
+        const result = await discoverMcp({ url, ...(credentialProvider ? { credentialProvider } : {}), ...(headerName ? { headerName } : {}) });
         patchMcpServer(index, { discovering: false, discovered: result.tools, allowedTools: [], discoverError: null });
       } catch (discoverErr) {
         patchMcpServer(index, {
@@ -311,6 +323,7 @@ export function AgentSettingsForm({
                 url: s.url.trim(),
                 allowedTools: s.allowedTools,
                 ...(s.credentialProvider.trim() ? { credentialProvider: s.credentialProvider.trim() } : {}),
+                ...(s.headerName.trim() ? { headerName: s.headerName.trim() } : {}),
               }))
           : [],
         consensusGroup: fanoutEnabled ? { aggregatorNodeId: aggregatorId, edgeIds: fanoutEdgeIds } : null,
@@ -581,6 +594,19 @@ export function AgentSettingsForm({
                     </option>
                   ))}
                 </select>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                Header name (optional)
+                <input
+                  placeholder="Authorization (default)"
+                  value={server.headerName}
+                  onChange={(e) => patchMcpServer(i, { headerName: e.target.value })}
+                />
+                <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+                  Leave blank to send <code>Authorization: Bearer &lt;token&gt;</code>. Set this for servers that
+                  expect a custom header instead (e.g. <code>X-API-Key</code>) — the raw token is sent under this
+                  name with no &quot;Bearer &quot; prefix.
+                </span>
               </label>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <button type="button" onClick={() => void discoverRow(i)} disabled={server.discovering}>

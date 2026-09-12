@@ -109,6 +109,20 @@ export const McpServer = z.object({
   url: z.string().url(),
   allowedTools: z.array(z.string().min(1)).default([]),
   credentialProvider: z.string().min(1).optional(),
+  // Unset = Authorization: Bearer <token> (the original/default behavior).
+  // Set = the raw token is sent under this header name instead, no
+  // "Bearer " prefix — covers the dominant non-OAuth vendor pattern
+  // (X-API-Key, api-key, etc.). .nullable() so PATCH can clear a
+  // previously-set header back to the default, same reason
+  // consensusGroup/sshTarget need .nullable().optional() rather than
+  // .optional() alone.
+  headerName: z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, "must be a valid HTTP header name")
+    .nullable()
+    .optional(),
 });
 export type McpServer = z.infer<typeof McpServer>;
 

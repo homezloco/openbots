@@ -36,6 +36,13 @@ const TOOLS = [
     description: "A secret ping that e2e agents must never be granted.",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "echo_headers",
+    description:
+      "Returns the exact incoming authorization and x-e2e-test-key request header values (or null if absent) — " +
+      "e2e-only, used to verify custom MCP auth headers actually arrive as configured.",
+    inputSchema: { type: "object", properties: {} },
+  },
 ];
 
 function result(id, value) {
@@ -49,7 +56,7 @@ function error(id, code, message) {
 const MAX_DELAY_MS = 30_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function handleMessage(msg) {
+async function handleMessage(msg, reqHeaders) {
   if (!msg || typeof msg !== "object") return null;
   const { id, method, params } = msg;
   if (typeof method !== "string") return id === undefined ? null : error(id, -32600, "Invalid request");
@@ -77,6 +84,13 @@ async function handleMessage(msg) {
     }
     if (name === "secret_ping") {
       return result(id, { content: [{ type: "text", text: "PONG_SECRET" }] });
+    }
+    if (name === "echo_headers") {
+      const seen = {
+        authorization: reqHeaders?.authorization ?? null,
+        "x-e2e-test-key": reqHeaders?.["x-e2e-test-key"] ?? null,
+      };
+      return result(id, { content: [{ type: "text", text: JSON.stringify(seen) }] });
     }
     return result(id, {
       isError: true,
@@ -134,7 +148,7 @@ createServer(async (req, res) => {
   }
 
   const messages = Array.isArray(body) ? body : [body];
-  const responses = (await Promise.all(messages.map(handleMessage))).filter(Boolean);
+  const responses = (await Promise.all(messages.map((msg) => handleMessage(msg, req.headers)))).filter(Boolean);
   const sessionId = req.headers["mcp-session-id"] || randomUUID();
   const headers = {
     "mcp-session-id": String(sessionId),

@@ -20,6 +20,24 @@ export function getAllowedMcpServerPrefixes(): string[] {
     .filter(Boolean);
 }
 
+// Exact param-name match (case-insensitive), not substring — so a
+// legitimate param merely containing one of these words (e.g. "monkey")
+// isn't caught. Same "a credential doesn't belong in a URL" reasoning
+// as the userinfo check below it: this is exactly the shape some
+// hosted MCP servers' own URLs use (e.g. Smithery's ?api_key=...),
+// which would otherwise sit in plaintext in node config, logs, and
+// browser history.
+const CREDENTIAL_SHAPED_QUERY_PARAMS = new Set([
+  "api_key",
+  "apikey",
+  "key",
+  "token",
+  "access_token",
+  "secret",
+  "client_secret",
+  "password",
+]);
+
 function parseHttpUrl(raw: string): URL | null {
   let url: URL;
   try {
@@ -29,6 +47,9 @@ function parseHttpUrl(raw: string): URL | null {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   if (url.username || url.password) return null;
+  for (const key of url.searchParams.keys()) {
+    if (CREDENTIAL_SHAPED_QUERY_PARAMS.has(key.toLowerCase())) return null;
+  }
   return url;
 }
 

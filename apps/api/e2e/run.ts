@@ -1101,6 +1101,23 @@ async function main() {
     assert(created.status === 400, `expected 400 rejecting embedded credentials, got ${created.status}: ${JSON.stringify(created.body)}`);
   });
 
+  await test("security: mcpServers with a credential-shaped query param is rejected", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E security mcp query cred" }) });
+    const created = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "LeakQuery",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "echo", url: "http://127.0.0.1:3930/mcp?api_key=shouldnotbehere", allowedTools: ["echo"] }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(created.status === 400, `expected 400 rejecting a credential-shaped query param, got ${created.status}: ${JSON.stringify(created.body)}`);
+  });
+
   await test("mcpServers with a duplicate slug is rejected; an allowlisted url without tools:mcp still saves", async () => {
     const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp save gates" }) });
     const graphId = g.body.id;
@@ -1282,6 +1299,126 @@ async function main() {
       /mcp_echo|not configured|credential/i.test(String(run.output)),
       `expected the missing-credential skip in output, got: ${run.output}`,
     );
+  });
+
+  await testWithRetries("mcp custom header auth: headerName sends the raw token under that header, not Authorization", async () => {
+    const credValue = `e2e-header-test-${Date.now()}`;
+    const cred = await api("/me/credentials", {
+      method: "POST",
+      body: JSON.stringify({ provider: "mcp_echo_headertest", apiKey: credValue }),
+    });
+    assert(cred.status === 201, `credential create failed: ${JSON.stringify(cred.body)}`);
+
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp custom header" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "HeaderAuth",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Call mcp_echo_echo_headers and quote its exact JSON result back to me, verbatim.",
+        tools: ["mcp"],
+        mcpServers: [
+          {
+            slug: "echo",
+            url: MCP_ECHO_URL,
+            allowedTools: ["echo_headers"],
+            credentialProvider: "mcp_echo_headertest",
+            headerName: "X-E2E-Test-Key",
+          },
+        ],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `node create failed: ${JSON.stringify(node.body)}`);
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const created = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: g.body.id, input: "go" }) });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    const out = String(run.output);
+    assert(out.includes(credValue), `expected the credential value under x-e2e-test-key, got: ${out}`);
+    assert(!/"authorization":\s*"/i.test(out), `expected no Authorization header when headerName is set, got: ${out}`);
+
+    await api(`/me/credentials/${cred.body.id}`, { method: "DELETE" });
+  });
+
+  await testWithRetries("mcp custom header auth: unset headerName still sends Authorization: Bearer (default unchanged)", async () => {
+    const credValue = `e2e-bearer-test-${Date.now()}`;
+    const cred = await api("/me/credentials", {
+      method: "POST",
+      body: JSON.stringify({ provider: "mcp_echo_beartest", apiKey: credValue }),
+    });
+    assert(cred.status === 201, `credential create failed: ${JSON.stringify(cred.body)}`);
+
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp default bearer" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "BearerAuth",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Call mcp_echo_echo_headers and quote its exact JSON result back to me, verbatim.",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo_headers"], credentialProvider: "mcp_echo_beartest" }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `node create failed: ${JSON.stringify(node.body)}`);
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const created = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: g.body.id, input: "go" }) });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    const out = String(run.output);
+    assert(out.includes(`Bearer ${credValue}`), `expected Authorization: Bearer ${credValue}, got: ${out}`);
+    assert(!/"x-e2e-test-key":\s*"/i.test(out), `expected no custom header when headerName is unset, got: ${out}`);
+
+    await api(`/me/credentials/${cred.body.id}`, { method: "DELETE" });
+  });
+
+  await test("PATCH mcpServers: headerName null clears a previously-set custom header", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp header clear" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "ClearHeader",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"], headerName: "X-Something" }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `node create failed: ${JSON.stringify(node.body)}`);
+    assert(node.body.mcpServers[0].headerName === "X-Something", `expected headerName to be set, got: ${JSON.stringify(node.body.mcpServers)}`);
+
+    const patched = await api(`/graphs/${g.body.id}/nodes/${node.body.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"], headerName: null }] }),
+    });
+    assert(patched.status === 200, `patch failed: ${JSON.stringify(patched.body)}`);
+    assert(!patched.body.mcpServers[0].headerName, `expected headerName to be cleared, got: ${JSON.stringify(patched.body.mcpServers)}`);
+  });
+
+  await test("security: a malformed MCP header name is rejected at save time", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mcp bad header name" }) });
+    const created = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "BadHeader",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        tools: ["mcp"],
+        mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"], headerName: "not a valid header" }],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(created.status === 400, `expected 400 rejecting a malformed header name, got ${created.status}: ${JSON.stringify(created.body)}`);
   });
 
   // Discover runs in the API process (compose DNS), not the worker.

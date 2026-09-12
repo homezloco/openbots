@@ -8,6 +8,7 @@ import { getSmitheryServerUrl, searchSmitheryServers, smitheryConfigured } from 
 const discoverBody = z.object({
   url: z.string().url(),
   credentialProvider: z.string().min(1).optional(),
+  headerName: z.string().min(1).optional(),
 });
 
 const registrySearchQuery = z.object({
@@ -33,7 +34,7 @@ export async function mcpRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "url must be within an operator-configured prefix (see ALLOWED_MCP_SERVERS)" });
     }
     try {
-      const discovered = await discoverMcpServer(body.url, req.userId, body.credentialProvider);
+      const discovered = await discoverMcpServer(body.url, req.userId, body.credentialProvider, body.headerName);
       return discovered;
     } catch (err) {
       const message = err instanceof Error ? err.message : "MCP discover failed";

@@ -116,7 +116,7 @@ async function resolveOneServer(
 
   let connected: { client: Client; close: () => Promise<void> };
   try {
-    connected = await connectMcp(new URL(server.url), token);
+    connected = await connectMcp(new URL(server.url), token, server.headerName);
   } catch (err) {
     const reason = redact(err instanceof Error ? err.message : String(err));
     skipped.push(`MCP server ${server.slug}: skipped (${reason})`);
@@ -174,15 +174,30 @@ async function resolveOneServer(
   }
 }
 
-async function connectMcp(url: URL, token: string | undefined): Promise<{ client: Client; close: () => Promise<void> }> {
-  const authProvider = token ? { token: async () => token } : undefined;
-  const requestInit: RequestInit = { redirect: "error" };
+/**
+ * No `authProvider` (the SDK's OAuth-shaped, `Authorization: Bearer`-only
+ * mechanism) — everything here is a single static token, so a header
+ * computed once and merged via `requestInit` is functionally identical
+ * and covers non-Bearer servers too. `headerName` unset (or explicitly
+ * "Authorization") keeps today's exact behavior; any other name sends
+ * the raw token with no "Bearer " prefix, the dominant pattern for
+ * vendor-hosted MCP servers that skip full OAuth (X-API-Key, etc.).
+ */
+async function connectMcp(
+  url: URL,
+  token: string | undefined,
+  headerName?: string | null,
+): Promise<{ client: Client; close: () => Promise<void> }> {
+  const resolvedHeaderName = headerName || "Authorization";
+  const headers = token
+    ? { [resolvedHeaderName]: resolvedHeaderName === "Authorization" ? `Bearer ${token}` : token }
+    : undefined;
+  const requestInit: RequestInit = { redirect: "error", ...(headers ? { headers } : {}) };
   const fetchNoRedirect: typeof fetch = (input, init) => fetch(input, { ...init, redirect: "error" });
 
   const streamable = new StreamableHTTPClientTransport(url, {
     requestInit,
     fetch: fetchNoRedirect,
-    authProvider,
     reconnectionOptions: {
       initialReconnectionDelay: 250,
       maxReconnectionDelay: 250,
@@ -218,7 +233,7 @@ async function connectMcp(url: URL, token: string | undefined): Promise<{ client
     }
   }
 
-  const sse = new SSEClientTransport(url, { requestInit, fetch: fetchNoRedirect, authProvider });
+  const sse = new SSEClientTransport(url, { requestInit, fetch: fetchNoRedirect });
   const sseClient = new Client({ name: "openbots", version: "0.1.0" });
   try {
     await sseClient.connect(sse, { timeout: CONNECT_TIMEOUT_MS });
@@ -255,6 +270,7 @@ export async function discoverMcpServer(
   url: string,
   ownerId: string,
   credentialProvider?: string,
+  headerName?: string,
 ): Promise<{ name: string; tools: DiscoveredMcpTool[] }> {
   let token: string | undefined;
   if (credentialProvider) {
@@ -267,7 +283,7 @@ export async function discoverMcpServer(
     token = decryptCredential(cred.encryptedKey);
   }
 
-  const connected = await connectMcp(new URL(url), token);
+  const connected = await connectMcp(new URL(url), token, headerName);
   try {
     const listed = await connected.client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS });
     const info = connected.client.getServerVersion();

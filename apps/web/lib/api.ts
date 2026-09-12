@@ -193,7 +193,7 @@ export interface DiscoveredMcpTool {
   description: string;
 }
 
-export const discoverMcp = (body: { url: string; credentialProvider?: string }) =>
+export const discoverMcp = (body: { url: string; credentialProvider?: string; headerName?: string }) =>
   request<{ name: string; tools: DiscoveredMcpTool[] }>("/mcp/discover", {
     method: "POST",
     body: JSON.stringify(body),

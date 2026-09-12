@@ -2,8 +2,71 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createXai } from "@ai-sdk/xai";
+import { MockLanguageModelV2 } from "ai/test";
 import type { ProviderId } from "@openbots/graph-schema";
 import type { ProviderAdapter, ProviderCredentials } from "./types.js";
+
+/**
+ * Pulls plain text out of a LanguageModelV2 prompt message's `content`,
+ * which is either the plain-string shorthand (system messages) or the
+ * structured `{type: "text", text}[]` array form (user/assistant messages)
+ * — defensive about which shape shows up here, same as engine.ts's own
+ * handling of AI SDK step results it doesn't control the shape of.
+ */
+function extractPromptText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        part && typeof part === "object" && (part as { type?: string }).type === "text"
+          ? ((part as { text?: string }).text ?? "")
+          : "",
+      )
+      .join("");
+  }
+  return "";
+}
+
+/** Matches "ROUTE_TO <name>" anywhere in a node's (already auto-routing-context-appended) system prompt. */
+const MOCK_ROUTE_TO = /ROUTE_TO\s+(\S+)/;
+
+/**
+ * No network call, no credentials required (see credentials.ts's "mock"
+ * cases) — exists purely so tests can exercise routing/orchestration
+ * deterministically without billed API calls. Two fixed behaviors, no
+ * randomness: echo "MOCK: " + the last 200 chars of the user prompt, or
+ * — if the system prompt contains "ROUTE_TO <name>" — reply with exactly
+ * <name>, so a future routing test can steer auto-routing deterministically
+ * (resolve.ts matches an auto edge's target name against the output text).
+ */
+const mockAdapter: ProviderAdapter = {
+  id: "mock",
+  capabilities: { streaming: false, toolCalling: false, vision: false, promptCaching: false },
+  getModel: () =>
+    new MockLanguageModelV2({
+      doGenerate: async (options) => {
+        const messages = (options.prompt ?? []) as { role: string; content: unknown }[];
+        const systemText = messages
+          .filter((m) => m.role === "system")
+          .map((m) => extractPromptText(m.content))
+          .join("\n");
+        const userText = messages
+          .filter((m) => m.role === "user")
+          .map((m) => extractPromptText(m.content))
+          .join("\n");
+
+        const routeMatch = systemText.match(MOCK_ROUTE_TO);
+        const text = routeMatch ? routeMatch[1] : `MOCK: ${userText.slice(-200)}`;
+
+        return {
+          finishReason: "stop",
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          content: [{ type: "text", text }],
+          warnings: [],
+        };
+      },
+    }),
+};
 
 /**
  * Every provider is normalized behind the Vercel AI SDK rather than
@@ -61,6 +124,7 @@ const adapters: Record<ProviderId, ProviderAdapter> = {
       }).chatModel(modelId);
     },
   },
+  mock: mockAdapter,
 };
 
 export function getProviderAdapter(id: ProviderId): ProviderAdapter {

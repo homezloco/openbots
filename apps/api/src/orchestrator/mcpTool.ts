@@ -2,6 +2,7 @@ import { jsonSchema, tool, type Tool } from "ai";
 import { Client, SSEClientTransport, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { and, eq } from "drizzle-orm";
 import type { AgentNode, McpServer } from "@openbots/graph-schema";
+import { redactDeep, redactSecrets } from "@openbots/providers";
 import { db } from "../db/client.js";
 import { userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
@@ -32,10 +33,6 @@ const emptyResolution = (): McpResolution => ({
 /** Model-facing name: `mcp_<slug>_<toolName>`. Slug cannot contain `_`. */
 export function mcpSdkName(slug: string, toolName: string): string {
   return `mcp_${slug}_${toolName}`;
-}
-
-function redact(message: string): string {
-  return message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/(Authorization:\s*)\S+/gi, "$1[redacted]");
 }
 
 function contentText(content: unknown): string {
@@ -118,7 +115,7 @@ async function resolveOneServer(
   try {
     connected = await connectMcp(new URL(server.url), token, server.headerName);
   } catch (err) {
-    const reason = redact(err instanceof Error ? err.message : String(err));
+    const reason = redactSecrets(err instanceof Error ? err.message : String(err));
     skipped.push(`MCP server ${server.slug}: skipped (${reason})`);
     console.warn(`[mcp] ${server.slug}: connect failed: ${reason}`);
     return;
@@ -130,7 +127,7 @@ async function resolveOneServer(
     const listed = await connected.client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS });
     advertised = listed.tools;
   } catch (err) {
-    const reason = redact(err instanceof Error ? err.message : String(err));
+    const reason = redactSecrets(err instanceof Error ? err.message : String(err));
     skipped.push(`MCP server ${server.slug}: skipped (listTools: ${reason})`);
     console.warn(`[mcp] ${server.slug}: listTools failed: ${reason}`);
     return;
@@ -162,11 +159,13 @@ async function resolveOneServer(
         const arguments_ =
           args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
         const result = await client.callTool({ name, arguments: arguments_ }, { timeout: CALL_TIMEOUT_MS });
+        // Content from a remote MCP server the operator doesn't control the
+        // code of — redact before it ever becomes part of the model's context.
         if (result.isError) {
-          return { error: contentText(result.content) };
+          return { error: redactSecrets(contentText(result.content)) };
         }
-        if (result.structuredContent !== undefined) return result.structuredContent;
-        return { content: contentText(result.content) };
+        if (result.structuredContent !== undefined) return redactDeep(result.structuredContent);
+        return { content: redactSecrets(contentText(result.content)) };
       },
     });
     granted.push({ sdkName, description });

@@ -1,6 +1,7 @@
 import { tool, type Tool } from "ai";
 import { z } from "zod";
 import { and, eq, like } from "drizzle-orm";
+import { redactDeep } from "@openbots/providers";
 import { db } from "../db/client.js";
 import { userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
@@ -78,7 +79,9 @@ async function fetchDashboardStyle(baseUrl: string, creds: StoredLogin, days?: n
     getJson(`${baseUrl}/api/admin/dashboard`, token),
     getJson(`${baseUrl}/api/analytics/summary${days ? `?days=${days}` : ""}`, token),
   ]);
-  return { dashboard, analyticsSummary: summary };
+  // Real external API JSON, shape not controlled by OpenBots — redact
+  // before it becomes part of the model's context.
+  return redactDeep({ dashboard, analyticsSummary: summary });
 }
 
 /**
@@ -89,10 +92,10 @@ async function fetchDashboardStyle(baseUrl: string, creds: StoredLogin, days?: n
 async function fetchLoginStyleSummary(baseUrl: string, creds: StoredLogin) {
   const token = await loginJwt(baseUrl, "/api/auth/login", creds, "token");
   const body = await getJson(`${baseUrl}/api/analytics/summary`, token);
-  return {
+  return redactDeep({
     usageAndTraffic: body?.data ?? body,
     note: "This source has no revenue/MRR endpoint configured — usage/traffic only.",
-  };
+  });
 }
 
 function parseStoredLogin(raw: unknown): StoredLogin | { error: string; kind: "config" } {

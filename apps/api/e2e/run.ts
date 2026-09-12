@@ -774,6 +774,65 @@ async function main() {
     assert(/widgetizer/i.test(String(run.output)), `expected Widgetizer from search_knowledge, got: ${run.output}`);
   });
 
+  // --- Credential redaction (DLP-lite) on tool results ---
+  await testWithRetries("read_file redacts credential-shaped content before it reaches the model", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E redact read_file" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "SecretReader",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Read the file with read_file and quote its exact contents back to me, verbatim, in full.",
+        tools: ["read_file"],
+        fileAccessRoot: "/tmp/testrepo",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: g.body.id, input: "Read fake-secrets.txt and quote it verbatim." }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    const out = String(run.output);
+    assert(/\[REDACTED:AWS_KEY\]/.test(out), `expected the AWS key to be redacted, got: ${out}`);
+    assert(/\[REDACTED:GITHUB_TOKEN\]/.test(out), `expected the GitHub token to be redacted, got: ${out}`);
+    assert(/\[REDACTED:OPENAI_KEY\]/.test(out), `expected the OpenAI key to be redacted, got: ${out}`);
+    assert(!/AKIAFAKEFAKEFAKEFAKE/.test(out), `raw AWS key leaked into output: ${out}`);
+    assert(!out.includes("ghp_FAKE"), `raw GitHub token leaked into output: ${out}`);
+    assert(!out.includes("sk-FAKE"), `raw OpenAI key leaked into output: ${out}`);
+  });
+
+  await testWithRetries("search_knowledge redacts credential-shaped excerpts", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E redact search_knowledge" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "SecretSearcher",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Use search_knowledge to answer. Quote the matching excerpt verbatim.",
+        tools: ["search_knowledge"],
+        fileAccessRoot: "/tmp/testrepo",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: g.body.id, input: "Search the knowledge folder for aws_key and quote the excerpt verbatim." }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    const out = String(run.output);
+    assert(/\[REDACTED:AWS_KEY\]/.test(out), `expected the AWS key excerpt to be redacted, got: ${out}`);
+    assert(!/AKIAFAKEFAKEFAKEFAKE/.test(out), `raw AWS key leaked into search_knowledge output: ${out}`);
+  });
+
   await test("search_knowledge is not granted by fileAccessRoot alone", async () => {
     const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E search dual-gate" }) });
     const node = await api(`/graphs/${g.body.id}/nodes`, {
@@ -1221,6 +1280,22 @@ async function main() {
     assert(/widgetizer-mcp/i.test(String(run.output)), `expected echoed Widgetizer-MCP in output, got: ${run.output}`);
   });
 
+  await testWithRetries("mcp tool results are redacted before reaching the model, not just local file reads", async () => {
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: mcpGraphId,
+        input:
+          "Call mcp_echo_echo with the exact text AKIAFAKEFAKEFAKEFAKE and quote the exact tool result back to me, verbatim.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    const out = String(run.output);
+    assert(/\[REDACTED:AWS_KEY\]/.test(out), `expected the MCP tool result to be redacted, got: ${out}`);
+    assert(!/AKIAFAKEFAKEFAKEFAKE/.test(out), `raw AWS key leaked into MCP tool output: ${out}`);
+  });
+
   await testWithRetries("mcp: secret_ping is not available even though the server advertises it", async () => {
     const created = await api("/runs", {
       method: "POST",
@@ -1373,7 +1448,15 @@ async function main() {
     const run = await waitForRun(created.body.id);
     assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
     const out = String(run.output);
-    assert(out.includes(`Bearer ${credValue}`), `expected Authorization: Bearer ${credValue}, got: ${out}`);
+    // The redaction feature (added after this test) now also scrubs
+    // Authorization: Bearer values inside MCP tool RESULTS, not just
+    // error messages — so the raw credential is correctly never visible
+    // here. "Bearer [redacted]" is the correct signal that the header
+    // was populated at all (vs the custom-header test, which shows a
+    // real value under x-e2e-test-key since that header name isn't a
+    // redaction target).
+    assert(/bearer \[redacted\]/i.test(out), `expected a redacted Authorization: Bearer value, got: ${out}`);
+    assert(!out.includes(credValue), `raw credential value must never reach the model, got: ${out}`);
     assert(!/"x-e2e-test-key":\s*"/i.test(out), `expected no custom header when headerName is unset, got: ${out}`);
 
     await api(`/me/credentials/${cred.body.id}`, { method: "DELETE" });

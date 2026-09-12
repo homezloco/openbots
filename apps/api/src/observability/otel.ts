@@ -11,6 +11,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BasicTracerProvider, BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
+import { redactSecrets } from "@openbots/providers";
 
 /**
  * Optional OTLP export of run/hop spans. Unset OTEL_EXPORTER_OTLP_ENDPOINT
@@ -116,16 +117,11 @@ export function finishHopSpan(
     if (result.outputChars !== undefined) span.setAttribute("openbots.output_chars", result.outputChars);
     span.setStatus({ code: SpanStatusCode.OK });
   } else {
-    const error = redact(result.error).slice(0, 200);
+    const error = redactSecrets(result.error).slice(0, 200);
     span.setAttribute("openbots.error", error);
     span.setStatus({ code: SpanStatusCode.ERROR, message: error });
   }
   span.end();
-}
-
-/** Same pattern as orchestrator/mcpTool.ts's redact: spans can leave the process via OTLP, so a raw provider/tool error must not carry a bearer token or Authorization header. */
-function redact(message: string): string {
-  return message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/(Authorization:\s*)\S+/gi, "$1[redacted]");
 }
 
 export function recordRunFinished(args: {

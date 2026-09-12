@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { redactSecrets } from "@openbots/providers";
 import { requireAuth } from "../auth/middleware.js";
 import { discoverMcpServer } from "../orchestrator/mcpTool.js";
 import { isMcpServerUrlAllowed } from "../validation/mcpServer.js";
@@ -39,7 +40,7 @@ export async function mcpRoutes(app: FastifyInstance) {
     } catch (err) {
       const message = err instanceof Error ? err.message : "MCP discover failed";
       const status = /not configured/i.test(message) ? 400 : 502;
-      return reply.code(status).send({ error: message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]") });
+      return reply.code(status).send({ error: redactSecrets(message) });
     }
   });
 
@@ -68,7 +69,7 @@ export async function mcpRoutes(app: FastifyInstance) {
       return { configured: true, ...result };
     } catch (err) {
       const message = err instanceof Error ? err.message : "MCP registry search failed";
-      return reply.code(502).send({ error: message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]") });
+      return reply.code(502).send({ error: redactSecrets(message) });
     }
   });
 
@@ -93,7 +94,7 @@ export async function mcpRoutes(app: FastifyInstance) {
       return { url };
     } catch (err) {
       const message = err instanceof Error ? err.message : "MCP registry server lookup failed";
-      return reply.code(502).send({ error: message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]") });
+      return reply.code(502).send({ error: redactSecrets(message) });
     }
   });
 }

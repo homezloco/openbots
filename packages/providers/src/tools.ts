@@ -3,6 +3,7 @@ import type { Dirent } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { tool, type Tool } from "ai";
 import { z } from "zod";
+import { redactSecrets } from "./redact.js";
 
 export type ToolName = "current_time" | "calculator" | "pc_telemetry";
 export const FILE_TOOL_NAMES = ["read_file", "list_directory", "search_knowledge"] as const;
@@ -284,7 +285,10 @@ async function searchKnowledge(root: string, query: string, subpath: string): Pr
     for (const chunk of chunkContent(file.content)) {
       const score = overlapScore(qTokens, chunk);
       if (score <= 0) continue;
-      hits.push({ path: file.rel, score, excerpt: chunk.trim() });
+      // Redacted before embedRerank ever sees it too — closes the same
+      // "content reaching a third-party provider" gap for the optional
+      // OpenAI embedding rerank step, not just the final tool result.
+      hits.push({ path: file.rel, score, excerpt: redactSecrets(chunk.trim()) });
     }
   }
   hits.sort((a, b) => b.score - a.score);
@@ -312,7 +316,11 @@ function createFileTools(root: string): Record<(typeof FILE_TOOL_NAMES)[number],
         const info = await stat(target);
         if (!info.isFile()) throw new Error(`${path} is not a file`);
         const content = await readFile(target, "utf8");
-        return { content: content.slice(0, MAX_FILE_READ_BYTES), truncated: content.length > MAX_FILE_READ_BYTES };
+        // Redact before truncating — a secret that happens to straddle the
+        // truncation boundary must be fully matched and replaced first, or
+        // slicing mid-pattern could leave a partial raw value exposed.
+        const truncated = content.length > MAX_FILE_READ_BYTES;
+        return { content: redactSecrets(content).slice(0, MAX_FILE_READ_BYTES), truncated };
       },
     }),
     search_knowledge: tool({

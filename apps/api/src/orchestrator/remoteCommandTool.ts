@@ -2,7 +2,7 @@ import { tool, type Tool } from "ai";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import type { SshTarget } from "@openbots/graph-schema";
-import { runSshCommand } from "@openbots/providers";
+import { redactSecrets, runSshCommand } from "@openbots/providers";
 import { db } from "../db/client.js";
 import { remoteCommandRuns, userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
@@ -108,7 +108,9 @@ export function createRunRemoteCommandTool(
         finishedAt: new Date(),
       });
 
-      return { commandLabel: match.label, exitCode, output };
+      // Raw command stdout/stderr — content the operator's own machine
+      // produced, not code OpenBots controls the shape of.
+      return { commandLabel: match.label, exitCode, output: redactSecrets(output) };
     },
   });
 }

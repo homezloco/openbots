@@ -23,6 +23,7 @@ const WRITE_TOOLS = ["write_file", "edit_file"];
 const DISPATCH_TOOL = "dispatch_to_graph";
 const MANAGE_TOOL = "manage_target_graphs";
 const REMOTE_TOOL = "run_remote_command";
+const RUN_CODE_TOOL = "run_code";
 const MCP_TOOL = "mcp";
 
 interface McpServerDraft {
@@ -100,6 +101,7 @@ export function AgentSettingsForm({
   const [sshHost, setSshHost] = useState(node.sshTarget?.host ?? "");
   const [sshUsername, setSshUsername] = useState(node.sshTarget?.username ?? "");
   const [allowedCommands, setAllowedCommands] = useState(node.sshTarget?.allowedCommands ?? []);
+  const [runCodeEnabled, setRunCodeEnabled] = useState(node.tools.includes(RUN_CODE_TOOL));
   const [mcpEnabled, setMcpEnabled] = useState(node.tools.includes(MCP_TOOL));
   const [mcpServers, setMcpServers] = useState<McpServerDraft[]>(
     (node.mcpServers ?? []).length > 0 ? (node.mcpServers ?? []).map(toDraft) : [toDraft({ slug: "", url: "", allowedTools: [] })],
@@ -286,6 +288,7 @@ export function AgentSettingsForm({
           t !== DISPATCH_TOOL &&
           t !== MANAGE_TOOL &&
           t !== REMOTE_TOOL &&
+          t !== RUN_CODE_TOOL &&
           t !== MCP_TOOL,
       );
       const tools = [
@@ -294,6 +297,7 @@ export function AgentSettingsForm({
         ...(dispatchEnabled ? [DISPATCH_TOOL] : []),
         ...(manageEnabled ? [MANAGE_TOOL] : []),
         ...(remoteCommandEnabled ? [REMOTE_TOOL] : []),
+        ...(runCodeEnabled ? [RUN_CODE_TOOL] : []),
         ...(mcpEnabled ? [MCP_TOOL] : []),
       ];
       const updated = await updateNode(graphId, node.id, {
@@ -536,6 +540,17 @@ export function AgentSettingsForm({
           </button>
         </div>
       )}
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="checkbox" checked={runCodeEnabled} onChange={(e) => setRunCodeEnabled(e.target.checked)} />
+        <span>
+          Allow code execution{" "}
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            (run_code — runs short Python/JavaScript in an isolated sandbox with no network access; requires the operator to
+            have enabled a sandbox backend and, unless self-hosted, your own API key at /settings)
+          </span>
+        </span>
+      </label>
 
       <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <input type="checkbox" checked={mcpEnabled} onChange={(e) => setMcpEnabled(e.target.checked)} />

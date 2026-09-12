@@ -18,6 +18,7 @@ import { templateRoutes } from "./routes/templates.js";
 import { routingChangeRoutes } from "./routes/routingChanges.js";
 import { wsRoutes } from "./ws/hub.js";
 import { mcpRoutes } from "./routes/mcp.js";
+import { configRoutes } from "./routes/config.js";
 import { applyMigrations } from "./db/migrate.js";
 import { initOtel } from "./observability/otel.js";
 
@@ -69,6 +70,7 @@ await app.register(templateRoutes);
 await app.register(routingChangeRoutes);
 await app.register(wsRoutes);
 await app.register(mcpRoutes);
+await app.register(configRoutes);
 
 app.get("/health", async () => ({ status: "ok" }));
 

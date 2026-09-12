@@ -45,6 +45,7 @@ import {
 } from "./graphManagementTools.js";
 import { createBusinessMetricsTool, getMetricsSources, type MetricsSource } from "./businessMetricsTool.js";
 import { createRunRemoteCommandTool } from "./remoteCommandTool.js";
+import { createRunCodeTool } from "./codeSandboxTool.js";
 import { appendMcpContext, resolveMcpTools, type McpResolution } from "./mcpTool.js";
 import { computeWarnings } from "./warnings.js";
 import { enqueueHop } from "../queue/runQueue.js";
@@ -693,6 +694,14 @@ async function callAgent(
   // dispatchTargets already follow (re-checked fresh inside the tool
   // itself against ALLOWED_SSH_HOSTS on every call, not just here).
   const wantsRemoteCommand = node.tools.includes("run_remote_command") && Boolean(node.sshTarget);
+  // Dual-gate: the "run_code" tool name AND a non-empty operator env var
+  // SANDBOX_PROVIDER — no per-node config field, since there's nothing
+  // per-node to vary (unlike sshTarget/dispatchTargets/fileAccessRoot).
+  // Empty-deny default: an operator who never sets SANDBOX_PROVIDER
+  // means no node, however configured, can ever get this tool. Checked
+  // fresh here, not just at node-save time, matching every other
+  // operator-allowlist pattern in this file.
+  const wantsRunCode = node.tools.includes("run_code") && Boolean(process.env.SANDBOX_PROVIDER);
   // Dual-gate: the "mcp" tool name AND a non-empty mcpServers list.
   // URL allowlist is re-checked inside resolveMcpTools on every hop.
   const wantsMcp = node.tools.includes("mcp") && Boolean(node.mcpServers?.length);
@@ -788,6 +797,9 @@ async function callAgent(
           ...(tools ?? {}),
           run_remote_command: createRunRemoteCommandTool(ownerId, node.sshTarget, node.id, node.graphId, runId),
         };
+      }
+      if (wantsRunCode) {
+        tools = { ...(tools ?? {}), run_code: createRunCodeTool(ownerId, node.id, node.graphId, runId) };
       }
       if (wantsMcp) {
         // Fresh connect per fallback-chain attempt (same as touchedFiles):

@@ -1114,6 +1114,113 @@ step would be a small `POST /mcp/marketplace/search` proxy route (server-
 side, so the aggregator's API key never reaches the browser) rather than
 calling a third-party API directly from `apps/web`.
 
+## `run_code`: sandboxed code execution, pluggable across E2B/Daytona/local Piston (2026-09-12)
+
+Closes n8n gap #1 (arbitrary code execution as a first-class step) — but
+it's a fundamentally different risk class than anything shipped before
+it: every existing tool reads/writes bytes or calls a pre-authorized
+endpoint, none of them execute attacker-influenceable code. Researched
+three backends before building anything, same due-diligence discipline
+established for Smithery (see the credential security review entry
+above):
+
+- **E2B** — Apache-2.0, Firecracker microVMs, clean 2026 security track
+  record. Full self-hosting needs a Nomad+Consul cluster (2,500GB
+  SSD/24-CPU floor) disproportionate to this project — realistic use is
+  BYOK against E2B's hosted cloud.
+- **Daytona** — a real 2026 CVE history (a sandbox escape,
+  CVE-2026-54319; a disabled-TLS bug, CVE-2026-54323) was going to make
+  E2B the safer pick, until a decisive finding while researching self-
+  hosting logistics: **as of June 2026, Daytona's core platform moved to
+  a closed, private codebase** — confirmed by fetching the repo's own
+  notice, not assumed from a blog post. The public repo is frozen, no
+  further fixes ship to it, and full self-hosting is no longer possible
+  (only a hybrid mode remains — runner on your own Kubernetes cluster,
+  control plane still on Daytona's infra — which doesn't fit this
+  project's docker-compose deployment model). This collapsed Daytona
+  into the same shape as E2B: BYOK against a hosted cloud, no
+  self-hosting story left worth building for.
+- **Piston** (`engineer-man/piston`, MIT) — added mid-plan after
+  discussing the self-hosting gap directly: already running in
+  production behind the real `emkc.org` API and 4,100+ Discord bots,
+  isolates via `isolate` (the same sandbox competitive-programming
+  judges use), single Docker image, no BYOK key. The one real cost:
+  Piston's own official `docker-compose.yaml` requires `privileged: true`
+  (`isolate` needs to manage cgroups/namespaces itself) — a genuinely
+  different risk shape than an HTTPS call to a third party. Mitigated by
+  scoping it to one brand-new, dedicated container (the existing
+  `worker` container's zero-privilege posture is unchanged) and gating
+  it behind a Compose profile (`sandbox-local`) that never starts unless
+  the operator opts in.
+
+Considered and rejected: a standalone wrapper microservice sitting in
+front of Piston (validate input, clamp timeout, cap output, expose a
+narrow `POST /run`) rather than calling Piston directly from
+`codeSandboxTool.ts`. It's sound engineering and the right shape *if*
+you don't trust the docker-compose internal network to keep Piston's
+unauthenticated API away from anything untrusted — but on this
+project's network only `api`/`worker` (already-trusted code) can reach
+it, so the marginal security gain didn't justify a second container
+image to build, version, and keep in sync with upstream Piston. Would
+be a good standalone open-source artifact on its own merits, just not
+folded into this feature.
+
+Shipped as a pluggable interface (`packages/providers/src/sandboxTypes.ts`'s
+`CodeSandboxProvider`, `sandboxRegistry.ts`'s `e2b`/`daytona`/`local`
+adapters) mirroring `ProviderAdapter`'s existing "one interface per LLM
+provider" shape, operator-selected via `SANDBOX_PROVIDER` — not a forced
+single vendor, per explicit direction. See CLAUDE.md's `run_code`
+section for the dual-gate/credential/redaction/audit-trail design.
+
+**Known gap**: real end-to-end execution against a live E2B/Daytona
+account or a running local Piston container was not independently
+verified this session — the e2e suite's dual-gate test (`SANDBOX_PROVIDER`
+unset → the tool is never exposed) is real and passes the same way
+every other operator-allowlist test does, but the real-execution tier
+(gated behind `E2E_SANDBOX_PROVIDER`/`E2E_SANDBOX_API_KEY`, skipped
+when unset) needs a one-time live verification pass, the same
+already-accepted limit as SSH-push-over-a-real-remote and
+`run_remote_command`'s live host. Separately, this same e2e run
+surfaced that the configured `ANTHROPIC_API_KEY` has run out of credit
+("Your credit balance is too low to access the Anthropic API"),
+failing the majority of the *entire* suite (64/120), not just anything
+sandbox-related — a billing issue, not a code regression; needs a
+funded key before the next full verification pass.
+
+**Update (2026-09-12) — live `local` verification against Ollama, with
+a real bug found and fixed.** With the Anthropic key still out of
+credit, verified the `local` (Piston) path directly instead of waiting:
+brought up the `sandbox-local` profile, installed python 3.12.0/node
+20.11.1 via Piston's package API (its bundled `cli/index.js` isn't
+actually present in the published server image — installed straight
+against `POST /api/v2/packages` instead), and drove a real run through
+a node using the `openai-compatible` provider pointed at a local
+Ollama (`gemma4:e4b`) — `worker` already runs `network_mode: host` for
+`pc_telemetry`, so reaching Ollama needed no new networking, only
+publishing Piston's port in the local (gitignored) compose override
+since host networking can't resolve compose service-name DNS.
+
+Found and fixed a real bug this surfaced: Piston uses **two different
+name schemes for the same runtime** — package install
+(`POST /api/v2/packages`) wants `"node"`, but `GET /api/v2/runtimes`
+and `POST /api/v2/execute` both want `"javascript"` (confirmed live:
+execute with `"node"` fails with "node-* runtime is unknown"). The
+`PISTON_LANGUAGE` map in `sandboxRegistry.ts` briefly had this backwards
+mid-session — caught by testing both values directly against a running
+container before shipping, not by assumption.
+
+A real, correct end-to-end call happened: the model called `run_code`,
+Piston executed real Python, `42` came back correctly. But a *second*
+verification run — deliberately asking for something uncomputable
+without real execution (a random number), specifically to rule out the
+first result being the model just answering trivial arithmetic from
+memory — hit the default 180-second hop timeout on this CPU-only local
+model before finishing. So `run_code`'s reliability through the full
+engine+AI-SDK stack with a genuinely free local model remains
+**unconfirmed, not passing** — a real gap, not a regression in what
+shipped, and one only a funded Anthropic key or a longer timeout budget
+against faster hardware will close cleanly.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

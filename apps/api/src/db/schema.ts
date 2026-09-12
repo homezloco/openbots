@@ -233,6 +233,24 @@ export const remoteCommandRuns = pgTable("remote_command_runs", {
   finishedAt: timestamp("finished_at", { withTimezone: true }),
 });
 
+export const sandboxRuns = pgTable("sandbox_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  runId: uuid("run_id")
+    .notNull()
+    .references(() => runs.id, { onDelete: "cascade" }),
+  nodeId: uuid("node_id").notNull(),
+  graphId: uuid("graph_id")
+    .notNull()
+    .references(() => agentGraphs.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull(),
+  language: text("language").notNull(),
+  code: text("code").notNull(),
+  exitCode: integer("exit_code"),
+  output: text("output").notNull().default(""),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+});
+
 export const userCredentials = pgTable(
   "user_credentials",
   {

@@ -5,3 +5,5 @@ export * from "./tools.js";
 export * from "./gitWorktree.js";
 export * from "./sshExec.js";
 export * from "./redact.js";
+export * from "./sandboxTypes.js";
+export * from "./sandboxRegistry.js";

@@ -538,6 +538,11 @@ export function listAvailableTools(): { name: string; description: string; requi
       description: "Run one of your pre-approved commands on a configured SSH host, by label only.",
       requiresFileAccessRoot: false,
     },
+    {
+      name: "run_code",
+      description: "Run a short Python or JavaScript snippet in an isolated sandbox with no network access.",
+      requiresFileAccessRoot: false,
+    },
   ];
   return [...staticTools, ...fileTools, ...writeTools, ...crossServiceTools];
 }

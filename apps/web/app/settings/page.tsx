@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { createUserCredential, deleteUserCredential, listUserCredentials, type UserCredentialSummary } from "../../lib/api";
+import {
+  createUserCredential,
+  deleteUserCredential,
+  getSandboxProviderConfig,
+  listUserCredentials,
+  type SandboxProviderConfig,
+  type UserCredentialSummary,
+} from "../../lib/api";
 import { useAuth } from "../../components/AuthProvider";
 
 /**
@@ -16,6 +23,7 @@ export default function SettingsPage() {
   const [credentials, setCredentials] = useState<UserCredentialSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [sandboxProvider, setSandboxProvider] = useState<SandboxProviderConfig["provider"]>(null);
 
   function refresh() {
     return listUserCredentials()
@@ -26,6 +34,9 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!user) return;
     refresh().finally(() => setLoading(false));
+    getSandboxProviderConfig()
+      .then((config) => setSandboxProvider(config.provider))
+      .catch(() => setSandboxProvider(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
@@ -92,6 +103,41 @@ export default function SettingsPage() {
       </p>
 
       <MetricsSourcesSection credentials={credentials} loading={loading} onError={setError} onSaved={refresh} />
+
+      <h2 style={{ marginTop: 32, marginBottom: 4 }}>Sandboxed code execution</h2>
+      <p style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 0 }}>
+        Lets an agent with the <code>run_code</code> tool run short Python/JavaScript snippets in an isolated sandbox with no
+        network access.
+      </p>
+      {sandboxProvider === null && (
+        <p style={{ color: "var(--text-faint)", fontSize: 13 }}>
+          Not enabled by the operator — <code>run_code</code> isn&apos;t available on this server (see{" "}
+          <code>SANDBOX_PROVIDER</code>).
+        </p>
+      )}
+      {sandboxProvider === "local" && (
+        <p style={{ color: "var(--text-faint)", fontSize: 13 }}>
+          Your operator has enabled local, self-hosted execution — no credential needed.
+        </p>
+      )}
+      {(sandboxProvider === "e2b" || sandboxProvider === "daytona") && (
+        <CredentialSection
+          title={sandboxProvider === "e2b" ? "E2B API key" : "Daytona API key"}
+          description={
+            <>
+              Your operator enabled <code>{sandboxProvider}</code> as the <code>run_code</code> backend. Add your own API key
+              below — usage is billed to this key&apos;s account, not shared across users.
+            </>
+          }
+          provider={`sandbox_${sandboxProvider}`}
+          placeholder={sandboxProvider === "e2b" ? "e2b_…" : "dtn_…"}
+          multiline={false}
+          credentials={credentials}
+          loading={loading}
+          onError={setError}
+          onSaved={refresh}
+        />
+      )}
     </div>
   );
 }

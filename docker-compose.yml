@@ -101,6 +101,39 @@ services:
       mcp-echo:
         condition: service_healthy
 
+  # Self-hosted "local" run_code backend (Piston). Opt-in only — never
+  # starts unless the operator runs `docker compose --profile
+  # sandbox-local up`. Its own docker-compose.yaml upstream requires
+  # `privileged: true` for its isolate-based sandboxing to manage
+  # cgroups/namespaces itself; that's a property of the isolation
+  # primitive, not something this wrapper controls. No `ports:` —
+  # reachable only over the compose network by service name (see
+  # PISTON_API_URL in .env.example), never published to the host.
+  # One-time setup after first start: install the language runtimes with
+  # `docker compose --profile sandbox-local exec sandbox cli/index.js ppman install python`
+  # (and `node` for javascript) — see .env.example.
+  sandbox:
+    image: ghcr.io/engineer-man/piston
+    profiles: ["sandbox-local"]
+    privileged: true
+    volumes:
+      - piston-packages:/piston/packages
+    healthcheck:
+      # Piston's own image ships Node 15 — no global fetch() — so this
+      # uses the http module instead, unlike this file's other
+      # node-based healthchecks.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:2000/api/v2/runtimes',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
   web:
     build:
       context: .
@@ -114,3 +147,4 @@ services:
 
 volumes:
   postgres-data:
+  piston-packages:

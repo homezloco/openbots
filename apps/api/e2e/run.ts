@@ -3377,6 +3377,121 @@ async function main() {
     );
   });
 
+  // --- run_code: sandboxed Python/JavaScript execution (E2B/Daytona/local Piston) ---
+  // SANDBOX_PROVIDER is unset by default (both locally and in CI, see
+  // .env.example) — secure by default, same reasoning as
+  // ALLOWED_FILE_ACCESS_ROOTS. That means the dual-gate itself (tool
+  // name in tools[] AND the operator's env var) is what's e2e-testable
+  // here without any external dependency: with the env var unset, the
+  // tool is never merged into a hop's tools at all, however a node is
+  // configured. Real execution against a live E2B/Daytona account or a
+  // running local Piston container has the same real-world limit
+  // already accepted for run_remote_command's live SSH host and the
+  // SSH-push-over-a-real-remote case: there's no way to provision one of
+  // those in CI, so that path is gated behind E2E_SANDBOX_PROVIDER (and
+  // E2E_SANDBOX_API_KEY for the BYOK backends) and skipped with a clear
+  // log line when unset, rather than failing the suite.
+
+  await testWithRetries("security: run_code is not exposed when SANDBOX_PROVIDER is unset, even with the tool name in tools[]", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E no sandbox provider" }) });
+    const node = await api(`/graphs/${g.body.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Coder",
+        role: "worker",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        systemPrompt: "Answer honestly about what tools you actually have available; don't guess.",
+        tools: ["run_code"],
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(node.status === 201, `node create failed: ${JSON.stringify(node.body)}`);
+    await api(`/graphs/${g.body.id}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        graphId: g.body.id,
+        input: "Without guessing, tell me every exact tool name you have available to you right now.",
+      }),
+    });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+    assert(
+      !/run_code/i.test(String(run.output)),
+      `expected the model to have no run_code tool when SANDBOX_PROVIDER is unset, got: ${run.output}`,
+    );
+  });
+
+  let runCodeGraphId: string;
+  const E2E_SANDBOX_PROVIDER = process.env.E2E_SANDBOX_PROVIDER;
+  if (!E2E_SANDBOX_PROVIDER) {
+    console.log(
+      "Skipping real run_code execution tests — E2E_SANDBOX_PROVIDER not set. " +
+        "This requires the *containers'* own SANDBOX_PROVIDER to already be set to the same backend " +
+        "(and, for local, the sandbox-local compose profile already running with runtimes installed) — " +
+        "a one-time manual/live verification step, not something CI provisions.",
+    );
+  } else {
+    await test(`run_code setup (${E2E_SANDBOX_PROVIDER}): a node with the tool enabled`, async () => {
+      if (E2E_SANDBOX_PROVIDER !== "local") {
+        const apiKey = process.env.E2E_SANDBOX_API_KEY;
+        assert(apiKey, "E2E_SANDBOX_API_KEY must be set alongside a non-local E2E_SANDBOX_PROVIDER");
+        const cred = await api("/me/credentials", {
+          method: "POST",
+          body: JSON.stringify({ provider: `sandbox_${E2E_SANDBOX_PROVIDER}`, apiKey }),
+        });
+        assert(cred.status === 201, `credential create failed: ${JSON.stringify(cred.body)}`);
+      }
+      const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E run_code" }) });
+      runCodeGraphId = g.body.id;
+      const node = await api(`/graphs/${runCodeGraphId}/nodes`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: "Coder",
+          role: "worker",
+          provider: "anthropic",
+          model: "claude-sonnet-5",
+          systemPrompt: "Run code with run_code when asked, and report the exact output back.",
+          tools: ["run_code"],
+          position: { x: 0, y: 0 },
+        }),
+      });
+      assert(node.status === 201, `node create failed: ${JSON.stringify(node.body)}`);
+      await api(`/graphs/${runCodeGraphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+    });
+
+    await testWithRetries(`run_code (${E2E_SANDBOX_PROVIDER}): executes real code and returns real stdout`, async () => {
+      const created = await api("/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          graphId: runCodeGraphId,
+          input: "Use run_code to run Python code that prints the result of 21 * 2, then tell me exactly what it printed.",
+        }),
+      });
+      const run = await waitForRun(created.body.id, 120_000);
+      assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+      assert(/42/.test(String(run.output)), `expected real sandbox stdout (42) in the model's answer, got: ${run.output}`);
+    });
+
+    await testWithRetries(`run_code (${E2E_SANDBOX_PROVIDER}): output reaching the model is redacted`, async () => {
+      const created = await api("/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          graphId: runCodeGraphId,
+          input:
+            'Use run_code to run Python code that prints exactly this string: "AKIAFAKEFAKEFAKEFAKE" — then quote the tool\'s exact output back to me, verbatim.',
+        }),
+      });
+      const run = await waitForRun(created.body.id, 120_000);
+      assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+      const out = String(run.output);
+      assert(/\[REDACTED:AWS_KEY\]/.test(out), `expected the AWS key to be redacted, got: ${out}`);
+      assert(!/AKIAFAKEFAKEFAKEFAKE/.test(out), `raw AWS key leaked into run_code output: ${out}`);
+    });
+  }
+
   // --- Summary ---
   console.log("\n--- Summary ---");
   const passed = results.filter((r) => r.passed).length;

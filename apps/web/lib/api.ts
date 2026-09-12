@@ -188,6 +188,14 @@ export const createUserCredential = (body: { provider: string; apiKey: string; l
 
 export const deleteUserCredential = (id: string) => request<void>(`/me/credentials/${id}`, { method: "DELETE" });
 
+// --- run_code sandbox config (which backend, if any, the operator picked) ---
+
+export interface SandboxProviderConfig {
+  provider: "e2b" | "daytona" | "local" | null;
+}
+
+export const getSandboxProviderConfig = () => request<SandboxProviderConfig>("/config/sandbox-provider");
+
 export interface DiscoveredMcpTool {
   name: string;
   description: string;

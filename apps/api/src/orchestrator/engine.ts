@@ -692,6 +692,19 @@ function appendProjectContext(systemPrompt: string, fileRoot: string | undefined
 }
 
 /**
+ * Stopping between tool steps ~15s before the hard deadline lets the loop
+ * end cleanly — the engine can then commit writes, append the commit
+ * note, and complete the hop normally, instead of withNodeTimeout killing
+ * the hop while an orphaned tool loop keeps running (and committing) in
+ * the background with nothing surfacing that work. Promise.race (which is
+ * how withNodeTimeout works) never cancels the losing promise, so without
+ * this a generateText tool loop that outlives the hop timeout becomes a
+ * zombie: the hop errors, but the loop — and any writes it makes — keeps
+ * going unseen by the run result.
+ */
+const GRACEFUL_STOP_MARGIN_MS = 15_000;
+
+/**
  * Tries node.provider/node.model first, then each entry in
  * node.fallbackChain in order — but only on a classified auth or
  * model-not-found error (classifyProviderError). Any other error (e.g. a
@@ -873,6 +886,12 @@ async function callAgent(
         }
       }
       const hopPrompt = appendMcpContext(systemPrompt, mcp);
+      // Set by the deadline stop condition below when IT is what ended the
+      // loop, so the empty-text fallback further down can say "ran out of
+      // time" instead of "hit my step limit" — the hard withNodeTimeout in
+      // dispatchHop stays as the backstop for a single call/tool call that
+      // hangs, this is just what lets a healthy-but-slow loop end itself.
+      let deadlineStopped = false;
       const result = await withRetry(() =>
         generateText({
           model,
@@ -887,7 +906,25 @@ async function callAgent(
           // since it ran out of budget before it could. Still bounded, not
           // unlimited — this stops runaway loops, it just stops giving up
           // on genuine, in-progress multi-file work quite this early.
-          ...(tools ? { tools, stopWhen: stepCountIs(20) } : {}),
+          //
+          // A second stop condition alongside it: stop between steps once
+          // we're within GRACEFUL_STOP_MARGIN_MS of this hop's own
+          // deadline, so the loop ends itself instead of getting killed
+          // mid-flight by withNodeTimeout while still running (see the
+          // constant's own comment for why this matters).
+          ...(tools
+            ? {
+                tools,
+                stopWhen: [
+                  stepCountIs(20),
+                  (_options: { steps: unknown[] }) => {
+                    const hit = Date.now() >= hopDeadlineEpochMs - GRACEFUL_STOP_MARGIN_MS;
+                    if (hit) deadlineStopped = true;
+                    return hit;
+                  },
+                ],
+              }
+            : {}),
         }),
       );
 
@@ -904,8 +941,9 @@ async function callAgent(
       // real (if terse) answer, with nothing surfacing that anything went
       // wrong.
       if (!text.trim() && tools) {
-        text =
-          "(No final answer — I used tools to investigate but didn't reach a text response within my step limit. Try asking again, or narrow the question.)";
+        text = deadlineStopped
+          ? "(No final answer — I ran out of time mid-investigation and had to stop before reaching a text response. Try asking again, or narrow the question.)"
+          : "(No final answer — I used tools to investigate but didn't reach a text response within my step limit. Try asking again, or narrow the question.)";
       }
       if (worktree) {
         const sha = await commitWorktreeChanges(worktree, node.name, touchedFiles);

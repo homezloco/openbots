@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentGraph } from "@openbots/graph-schema";
 import { fetchGraph, type GraphSummary } from "../lib/api";
 import { extractLatestUserMessage, useBotChat } from "../lib/useBotChat";
+import { stripRoutingSentinel } from "../lib/textDisplay";
 import { HierarchyCanvas } from "./HierarchyCanvas";
 
 /**
@@ -89,7 +90,7 @@ export function HierarchyChat({ graph }: { graph: GraphSummary }) {
                   whiteSpace: "pre-wrap",
                 }}
               >
-                {typeof r.output === "string" ? r.output : JSON.stringify(r.output)}
+                {typeof r.output === "string" ? stripRoutingSentinel(r.output) : JSON.stringify(r.output)}
               </div>
             </div>
           ))}

@@ -1,4 +1,5 @@
 import type { RunEventRow } from "../lib/api";
+import { stripRoutingSentinel } from "../lib/textDisplay";
 
 /**
  * The ordered hop-card rendering shared by the run detail page and the
@@ -63,7 +64,7 @@ export function RunEventTrail({
           </div>
           {event.output != null && (
             <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0" }}>
-              {typeof event.output === "string" ? event.output : JSON.stringify(event.output, null, 2)}
+              {typeof event.output === "string" ? stripRoutingSentinel(event.output) : JSON.stringify(event.output, null, 2)}
             </pre>
           )}
           {event.error && <p style={{ color: "var(--danger)", margin: "8px 0 0" }}>{event.error}</p>}

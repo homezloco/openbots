@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createAgencyExample, createGraph, createLiveRerouteExample, deleteGraph, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
 import { extractLatestUserMessage, useBotChat } from "../../lib/useBotChat";
+import { stripRoutingSentinel } from "../../lib/textDisplay";
 import { useAuth } from "../../components/AuthProvider";
 import { HierarchyChat } from "../../components/HierarchyChat";
 
@@ -259,7 +260,7 @@ function BotChat({ graph }: { graph: GraphSummary }) {
               })()}
             </div>
             <div style={{ alignSelf: "flex-start", maxWidth: "70%", background: "var(--bg-hover)", color: "var(--text)", borderRadius: 8, padding: "8px 12px", whiteSpace: "pre-wrap" }}>
-              {typeof r.output === "string" ? r.output : JSON.stringify(r.output)}
+              {typeof r.output === "string" ? stripRoutingSentinel(r.output) : JSON.stringify(r.output)}
             </div>
           </div>
         ))}

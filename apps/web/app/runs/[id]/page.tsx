@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { fetchGraph, fetchRun, forkRun, type Run, type RunEventRow, type UsageTotal } from "../../../lib/api";
 import { useRunEventsSocket } from "../../../lib/useRunEventsSocket";
+import { stripRoutingSentinel } from "../../../lib/textDisplay";
 import { useAuth } from "../../../components/AuthProvider";
 import { RunEventTrail } from "../../../components/RunEventTrail";
 
@@ -90,7 +91,7 @@ export default function RunDetailPage() {
         <>
           <h2>Final output</h2>
           <pre style={{ whiteSpace: "pre-wrap", background: "var(--bg-elevated)", padding: 12, borderRadius: 6 }}>
-            {typeof run.output === "string" ? run.output : JSON.stringify(run.output, null, 2)}
+            {typeof run.output === "string" ? stripRoutingSentinel(run.output) : JSON.stringify(run.output, null, 2)}
           </pre>
         </>
       )}

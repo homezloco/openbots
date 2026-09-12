@@ -2,13 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { fetchGraph, fetchRun, forkRun, type Run, type RunEventRow, type UsageTotal } from "../../../lib/api";
+import { fetchGraph, fetchRun, forkRun, type Run, type RunCommitSummary, type RunEventRow, type UsageTotal } from "../../../lib/api";
 import { useRunEventsSocket } from "../../../lib/useRunEventsSocket";
 import { stripRoutingSentinel } from "../../../lib/textDisplay";
 import { useAuth } from "../../../components/AuthProvider";
 import { RunEventTrail } from "../../../components/RunEventTrail";
 
-type RunDetail = Run & { events: RunEventRow[]; usageTotal: UsageTotal };
+type RunDetail = Run & { events: RunEventRow[]; usageTotal: UsageTotal; commits: RunCommitSummary[] };
 
 /**
  * The run replay/audit view: the full ordered hop trail for a run, built
@@ -86,6 +86,34 @@ export default function RunDetailPage() {
         )}{" "}
         / {run.usageTotal.outputTokens} out tokens · est. ${run.usageTotal.estimatedCostUsd.toFixed(4)}
       </p>
+
+      {run.commits && run.commits.length > 0 && (
+        <div
+          style={{
+            background: run.status === "error" ? "var(--danger-bg, #3a1f1f)" : "var(--bg-elevated)",
+            border: run.status === "error" ? "1px solid var(--danger)" : "1px solid var(--border)",
+            borderRadius: 6,
+            padding: 12,
+            marginBottom: 16,
+          }}
+        >
+          <h2 style={{ marginTop: 0 }}>Committed work</h2>
+          {run.status === "error" && (
+            <p>
+              This run failed, but the work below survives on its branch — nothing was lost. Push it (or open a PR)
+              from the GitHub panel on the Hierarchy canvas.
+            </p>
+          )}
+          <ul style={{ paddingLeft: 20, margin: 0 }}>
+            {run.commits.map((c) => (
+              <li key={c.id}>
+                <code>{c.branch}</code> @ <code>{c.commitSha.slice(0, 7)}</code> —{" "}
+                {c.pushedAt ? "pushed" : "not yet pushed"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {run.output != null && (
         <>

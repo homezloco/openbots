@@ -119,10 +119,20 @@ export function useBotChat(graph: GraphSummary) {
         setPending({ message, status: final.status });
       }
       if (final.status !== "completed") {
+        // A write-capable node can time out/exhaust its step budget AFTER
+        // already committing real work to its isolated worktree branch
+        // (agent_commits) — don't let that get silently lost behind a
+        // generic error message.
+        const branches = [...new Set((final.commits ?? []).map((c) => c.branch))];
+        const commitNote =
+          branches.length > 0
+            ? ` Note: the agent committed work to branch${branches.length > 1 ? "es" : ""} ${branches.join(", ")} before failing — see the run page or GitHub panel.`
+            : "";
         throw new Error(
-          final.status === "error"
+          (final.status === "error"
             ? "The bot failed to respond — check its Hierarchy/Runs view for details"
-            : "Still running after a long wait — check the graph's Runs page; it may complete in the background.",
+            : "Still running after a long wait — check the graph's Runs page; it may complete in the background.") +
+            commitNote,
         );
       }
       // fetchRun (GET /runs/:id) doesn't compute originalInput the way

@@ -43,6 +43,7 @@ const DEFAULT_MODELS: Record<ProviderId, string> = {
   openrouter: "anthropic/claude-sonnet-4",
   "openai-compatible": "llama3.2",
   mock: "mock-model",
+  transform: "template",
 };
 
 export function defaultModelFor(providerId: ProviderId): string {
@@ -62,6 +63,9 @@ function envConfigured(providerId: ProviderId): boolean {
     case "openai-compatible":
       return Boolean(process.env.OPENAI_COMPATIBLE_BASE_URL);
     case "mock":
+      // No network call, no credentials required — see registry.ts.
+      return true;
+    case "transform":
       // No network call, no credentials required — see registry.ts.
       return true;
   }
@@ -100,6 +104,9 @@ export function getCredentialsFromEnv(providerId: ProviderId): ProviderCredentia
     case "mock":
       // No real credential exists or is needed — see registry.ts's mockAdapter.
       return { apiKey: "mock" };
+    case "transform":
+      // No real credential exists or is needed — see registry.ts's transformAdapter.
+      return { apiKey: "transform" };
   }
 }
 

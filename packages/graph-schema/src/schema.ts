@@ -7,6 +7,10 @@ import { z } from "zod";
  * "mock" makes no network call and needs no credentials at all — a
  * deterministic stand-in so tests can exercise routing/orchestration
  * without billed API calls (see packages/providers/src/registry.ts).
+ * "transform" is likewise a deterministic non-LLM node — no model call,
+ * zero cost: the model id selects the operation (e.g. "template",
+ * "uppercase", "extract-json") and the systemPrompt carries that
+ * operation's config (see packages/providers/src/registry.ts).
  */
 export const ProviderId = z.enum([
   "anthropic",
@@ -15,6 +19,7 @@ export const ProviderId = z.enum([
   "openrouter",
   "openai-compatible",
   "mock",
+  "transform",
 ]);
 export type ProviderId = z.infer<typeof ProviderId>;
 

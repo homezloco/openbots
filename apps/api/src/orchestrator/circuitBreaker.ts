@@ -19,7 +19,17 @@ export class NodeTimeoutError extends Error {
 // real consensus fan-out ran the full 90s and still got cut off before
 // finishing, worse than before (a total wipeout instead of a partial
 // success). The two caps have to move together.
-export const DEFAULT_NODE_TIMEOUT_MS = 180_000;
+//
+// Operator-overridable via NODE_TIMEOUT_MS: found by dogfooding — a
+// write-capable node doing a real multi-file code task (read several
+// files, then write several) can legitimately need more than 180s of
+// wall clock even well under the step cap, and there was previously no
+// way to grant it short of editing this constant and rebuilding.
+function envTimeoutMs(): number {
+  const raw = Number(process.env.NODE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 180_000;
+}
+export const DEFAULT_NODE_TIMEOUT_MS = envTimeoutMs();
 
 export async function withNodeTimeout<T>(
   nodeId: string,

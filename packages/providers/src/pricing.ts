@@ -21,6 +21,11 @@ const PRICES_PER_MILLION_TOKENS: Partial<Record<ProviderId, Record<string, { inp
   xai: {
     "grok-4": { input: 3, output: 15 },
   },
+  // No network call, no real tokens billed — always zero cost regardless
+  // of model id (see registry.ts's mockAdapter).
+  mock: {
+    "mock-model": { input: 0, output: 0 },
+  },
 };
 
 const FALLBACK_ESTIMATE = { input: 3, output: 15 };

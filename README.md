@@ -1,13 +1,16 @@
 # OpenBots
 
-Open-source, self-hosted, model-agnostic multi-agent orchestration.
-Connect any provider — Anthropic, OpenAI, xAI, OpenRouter, or any
-OpenAI-compatible endpoint (including local models via Ollama) — and
-design agent hierarchies on a live canvas with drag-and-drop routing,
-instead of a black-box "just describe your bot" flow.
+Watch your agents think on a live canvas, steer them mid-run by dragging
+an edge, and trust them with real write access.
+
+OpenBots is open-source, self-hosted, and model-agnostic: connect any
+provider — Anthropic, OpenAI, xAI, OpenRouter, or any OpenAI-compatible
+endpoint (including local models via Ollama) — and design agent
+hierarchies on a live canvas with drag-and-drop routing, instead of a
+black-box "just describe your bot" flow.
 
 <p align="center">
-  <img src="docs/assets/openbots-reroute.gif" width="400" alt="Dragging an edge on the Hierarchy canvas mid-run so the next hop goes to Billing instead of Support">
+  <img src="docs/assets/openbots-reroute.gif" width="720" alt="Dragging an edge on the Hierarchy canvas mid-run so the next hop goes to Billing instead of Support">
 </p>
 
 Mid-run reroute: drag an edge while a hop is still generating, and the
@@ -28,11 +31,62 @@ granted full read/edit access to restructure it outright — so a single
 actually read and write real code, push it, and open a PR, all visible
 as one live hierarchy.
 
+<p align="center">
+  <img src="docs/assets/openbots-gateway-clickthrough.gif" width="720" alt="Clicking a dashed gateway node on the Hierarchy canvas to open that team's own canvas">
+</p>
+
+That cross-graph reach renders as dashed "gateway" nodes right on the
+canvas — click one and you're on that team's own canvas, not a modal or
+a config panel. Graphs nest instead of sprawling: a portfolio of teams
+stays readable as separate, clickable hierarchies rather than one
+unreadable mega-graph. On the Dashboard, **Try the agency demo** button
+sets up a fictional portfolio with exactly this shape so you can click
+through it yourself before wiring up your own.
+
 See [`PLAN.md`](./PLAN.md) for scope, phase status, and an honest running
 list of what's verified vs. still untested; [`CLAUDE.md`](./CLAUDE.md)
 for architecture notes aimed at an AI pair programmer; and
 [`docs/`](./docs) for how the orchestration engine and provider adapters
 work in depth.
+
+## Why OpenBots
+
+- **n8n** lets you watch a workflow run, but you can't steer it mid-run —
+  edits apply to the next execution, not the one in flight.
+- **CrewAI / LangGraph** are code libraries: you write Python, you don't
+  get a live canvas to watch or drag edges on while agents are running.
+- **Closed bot platforms** lock you to one hosted vendor and one model.
+
+OpenBots is self-hosted (your Postgres, your Redis, your containers) and
+model-agnostic BYOK — bring your own key for any supported provider, or
+run fully local via Ollama with no API key and no data leaving your
+machine. The live canvas and mid-run rerouting aren't a bolt-on view;
+they're how the orchestration engine actually works — see
+`docs/orchestration.md`.
+
+## Safety
+
+Giving agents real write access is the point, so it's worth being
+specific about what's actually enforced:
+
+- **Writes are isolated.** The first write in a run creates a fresh git
+  worktree on its own branch — never your real checkout. Commits happen
+  automatically per hop, on that isolated branch only.
+- **Pushes and PRs require a literal command.** `/push` and `/pr` are
+  matched against the raw text you type by exact regex, *before* any
+  model or orchestration involvement — never an LLM's judgment call, and
+  never triggerable by anything an agent read (a file, a tool result).
+- **File access is dual-gated.** A node's configured read or write root
+  must also fall inside a separate, operator-controlled allowlist
+  (`ALLOWED_FILE_ACCESS_ROOTS` / `ALLOWED_FILE_WRITE_ROOTS`) — one alone
+  never grants access. Empty allowlists mean no agent can touch the
+  filesystem at all, however it's configured.
+- **Credentials are encrypted and never returned.** Stored provider keys
+  and account secrets (GitHub PAT/SSH key, metrics logins) are AES-256-GCM
+  encrypted at rest; no API response ever includes the plaintext.
+
+None of this is a promise that agents are infallible — it's what limits
+the blast radius when they're wrong.
 
 ## What's here
 

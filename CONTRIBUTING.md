@@ -19,16 +19,24 @@ place to find things that need help.
 
 ## Before you send a PR
 
+Keep changes small and focused — one concern per PR. It's much easier
+to review (and to revert if something's wrong) than a bundle of
+unrelated fixes.
+
 ```bash
 pnpm typecheck
 pnpm lint
 pnpm build
 ```
 
-If your change touches routing, credentials, providers, or the
-write/push/schedule paths, add a case to `apps/api/e2e/run.ts` — the
-real end-to-end suite. It needs a running stack and a real
-`ANTHROPIC_API_KEY` (it makes real, billed API calls):
+There's no unit test suite yet — `pnpm test` at the root is a no-op.
+The only test suite is the real end-to-end one in `apps/api/e2e/run.ts`
+(no mocks). If your change touches routing, credentials, providers, or
+the write/push/schedule paths, add a case there. It needs a running
+stack and a real `ANTHROPIC_API_KEY`, and it makes real, billed
+Anthropic API calls — which is also why CI runs it only on pushes to
+`main` and manual dispatch, never on pull requests. Run it yourself
+locally if your change is in one of those areas:
 
 ```bash
 docker compose up postgres redis api worker -d --build

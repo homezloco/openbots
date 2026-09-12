@@ -4,6 +4,9 @@ import { z } from "zod";
  * Providers are adapted behind one interface in @openbots/providers.
  * "openai-compatible" covers any self-hosted or third-party endpoint that
  * speaks the OpenAI chat-completions wire format (Ollama, Groq, Together, etc).
+ * "mock" makes no network call and needs no credentials at all — a
+ * deterministic stand-in so tests can exercise routing/orchestration
+ * without billed API calls (see packages/providers/src/registry.ts).
  */
 export const ProviderId = z.enum([
   "anthropic",
@@ -11,6 +14,7 @@ export const ProviderId = z.enum([
   "xai",
   "openrouter",
   "openai-compatible",
+  "mock",
 ]);
 export type ProviderId = z.infer<typeof ProviderId>;
 

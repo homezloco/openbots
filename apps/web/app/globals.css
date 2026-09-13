@@ -88,6 +88,10 @@ button:disabled {
 .react-flow__node-default {
   white-space: pre-line;
   text-align: center;
+  /* nodeLabel() puts "provider:model" on its own line with no spaces
+     (e.g. "openrouter:anthropic/claude-sonnet-4") — long enough to
+     overflow the node's fixed width with nothing to break on otherwise. */
+  overflow-wrap: anywhere;
 }
 
 @keyframes ob-pulse {

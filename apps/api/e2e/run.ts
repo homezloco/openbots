@@ -512,7 +512,18 @@ async function main() {
       body: JSON.stringify({ sourceNodeId: lead.body.id, targetNodeId: backend.body.id, kind: "auto" }),
     });
     await api(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: lead.body.id }) });
-    const created = await api("/runs", { method: "POST", body: JSON.stringify({ graphId, input: "Fix the analytics JSON." }) });
+    // The input names the owner explicitly. "Fix the analytics JSON." was
+    // too terse: appendAutoRoutingContext's guidance (appended AFTER the
+    // node's own systemPrompt, so it wins ties) tells a router to answer
+    // UNKNOWN when nothing identifies an owner — which is the CORRECT
+    // engine behavior for an ambiguous request, and exactly what
+    // claude-sonnet-4 did. This case is about matchAutoEdge resolving on
+    // a target's NAME rather than only its description, so the request
+    // should not be ambiguous in the first place.
+    const created = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId, input: "The Backend Specialist needs to fix the analytics JSON endpoint." }),
+    });
     const run = await waitForRun(created.body.id);
     assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
     assert(run.events[1]?.nodeId === backend.body.id, `expected Backend Specialist, got ${JSON.stringify(run.events)}`);

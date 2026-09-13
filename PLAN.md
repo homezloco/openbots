@@ -1461,6 +1461,49 @@ Re-verified on a fresh node: hop 1 now records 5,531 cache-write tokens
 at $0.02189 (correctly *higher* than the previous under-estimate), hop 2
 records 5,519 cache-read tokens at $0.00306.
 
+### e2e suite ported to a configurable provider; CI runs on OpenRouter (2026-09-13)
+
+With the direct Anthropic key exhausted, the billed suite (`run.ts`,
+120 cases) was blocked entirely. Ported it to read `E2E_PROVIDER` /
+`E2E_MODEL` / `E2E_SECONDARY_MODEL` instead of 79 hardcoded
+`anthropic`/`claude-sonnet-5` pairs — defaults unchanged, so the
+Anthropic route still works; CI now sets `openrouter` +
+`anthropic/claude-sonnet-4`, which also exercises the OpenRouter
+prompt-caching path on every run. Three references stay deliberately
+provider-specific because they assert on provider identity rather than
+just needing a model: the stored-credential test (`openai` with
+`OPENAI_API_KEY` unset), the fallback chain's `xai` target, and the
+GitHub credential rows. The invalid-key literal is provider-aware so it
+still forces a real classified auth error rather than a local
+missing-env throw.
+
+**A real product bug fell out of the port.** `credentials.ts` returned
+`baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL` for a STORED
+openrouter credential. That var is an empty string whenever it's
+present-but-blank (any `.env` template, and CI's own heredoc), and
+downstream `??` defaulting can't catch `""` — so `new URL("")` threw a
+bare "Invalid URL" and the node never reached the provider. Any user
+storing a per-node/per-graph OpenRouter key instead of using the env var
+hit this. Fixed at both layers (empty-to-undefined in `credentials.ts`,
+`||` instead of `??` in `registry.ts`). This is the kind of bug only a
+real cross-provider run finds.
+
+**Model-compliance differences are real and worth knowing.**
+claude-sonnet-4 follows engine-injected guidance over a node's literal
+system prompt more often than claude-sonnet-5 did. Two tests failed for
+that reason alone, and both were genuinely fragile rather than wrong:
+the scheduled-trigger case sent input `"ping"` (baiting `"pong"` against
+a "reply exactly: tick" instruction), and the name-routing case sent a
+terse `"Fix the analytics JSON."` — for which answering `UNKNOWN` is the
+*correct* engine behavior, since nothing identified an owner. Both
+inputs were de-baited; the assertions are unchanged.
+
+**Status: 118-119/120 across CI runs**, with the residual failures being
+the same LLM-nondeterminism class already documented above for the
+Anthropic route (a different one or two cases each run, no code
+connection). Don't read a single red run as a regression without
+checking which case failed.
+
 **Known quirk documented while testing** (predates this work):
 `runs.output` is jsonb, so a string output that happens to be valid
 JSON text round-trips back as a parsed document (type change +

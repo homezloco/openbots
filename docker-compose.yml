@@ -116,6 +116,10 @@ services:
     image: ghcr.io/engineer-man/piston
     profiles: ["sandbox-local"]
     privileged: true
+    # If it ever exits while the daemon is up (OOM, crash, host hiccup),
+    # run_code degrades to a connection error on every call with nothing
+    # surfacing why — the profile only controls *first* startup.
+    restart: unless-stopped
     volumes:
       - piston-packages:/piston/packages
     healthcheck:

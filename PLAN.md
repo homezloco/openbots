@@ -1376,6 +1376,39 @@ proved the second alone insufficient:
    deliberately. `withNodeTimeout` remains as the backstop for a hung
    single call.
 
+### Multi-step tool loops resend their entire history uncached (2026-09-13)
+
+Found via a real, expensive incident: a single investigative hop (7
+large-file reads across ~7 tool-calling steps) measured **520K input
+tokens and $1.66 for one hop** — almost entirely already-seen content.
+Root cause: `ANTHROPIC_PROMPT_CACHING`'s existing `cache_control` only
+ever marked the system prompt (a fixed cost paid once per hop);
+`generateText`'s internal multi-step loop resends the ENTIRE
+accumulated tool-result history — every file already read — at full,
+uncached input price on every subsequent step. That's the dominant
+cost driver in any real write-capable investigation, not the system
+prompt.
+
+Fixed with the AI SDK's `prepareStep` hook (confirmed available and
+typed in the installed `ai@7.0.93`, not assumed): a single MOVING
+`cache_control` breakpoint on whichever message is currently last,
+recomputed every step — not one breakpoint added per turn, which would
+exceed Anthropic's 4-breakpoint-per-request limit well before a
+20-step loop finishes. A shorter, previously-cached prefix is still
+found and read even though the current request's own marker sits
+further along, which is Anthropic's documented pattern for multi-turn
+caching. Anthropic-only, only wired when `tools` is present (a
+single-step call has nothing to grow), same opt-in gate
+(`ANTHROPIC_PROMPT_CACHING`) and provider-capability check
+`buildPromptOptions` already uses — zero behavior change for anyone
+not opted in, zero change for every other provider.
+
+**Known gap**: not yet verified against a real funded run measuring the
+actual before/after cost delta on a comparable investigative hop —
+blocked on Anthropic credit at the time this shipped. `pnpm typecheck`
+and the full mock-tier suite (unaffected, feature is off by default)
+are clean.
+
 **Known quirk documented while testing** (predates this work):
 `runs.output` is jsonb, so a string output that happens to be valid
 JSON text round-trips back as a parsed document (type change +

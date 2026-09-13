@@ -118,6 +118,60 @@ function buildPromptOptions(
 }
 
 /**
+ * The FIXED cost every hop pays (the system prompt, cached above) is small
+ * next to the VARIABLE cost a multi-step tool loop racks up: generateText's
+ * internal step loop resends the ENTIRE accumulated history — every file
+ * already read via read_file, every prior tool result — at full, uncached
+ * input price on every single subsequent step. Measured on a real hop (7
+ * large-file reads across ~7 steps, dogfooding this very engine): 520K
+ * input tokens and $1.66 for ONE hop, almost entirely re-sent content the
+ * model had already seen.
+ *
+ * `prepareStep` runs before each step with that step's about-to-be-sent
+ * `messages`, letting us fix this the same way Anthropic's own docs
+ * recommend for multi-turn caching: a single MOVING breakpoint on the
+ * current last message, not one breakpoint per turn (accumulating a fresh
+ * breakpoint every step would blow past Anthropic's 4-per-request limit
+ * well before a 20-step loop finishes, and isn't how the lookup is meant
+ * to be used — a shorter, previously-cached prefix is still found and
+ * read even though this request's own marker sits further along). The
+ * system message (index 0) is left untouched every step — its own
+ * cache_control was set once above and carries forward unchanged.
+ *
+ * Anthropic-only and only meaningful with tools (a single-step call has
+ * nothing to grow); no-op for every other provider/config, identical to
+ * buildPromptOptions' own gating.
+ */
+function withStepCaching(
+  provider: ProviderId,
+  hasTools: boolean,
+): { prepareStep: (opts: { messages: ModelMessage[] }) => { messages: ModelMessage[] } | undefined } | {} {
+  if (!hasTools || !promptCachingEnabled() || !getProviderAdapter(provider).capabilities.promptCaching) return {};
+  return {
+    prepareStep: ({ messages }: { messages: ModelMessage[] }) => {
+      if (messages.length < 2) return undefined; // nothing has grown yet
+      const lastIndex = messages.length - 1;
+      const next = messages.map((m, i) => {
+        if (i === 0) return m; // system message, untouched
+        const providerOptions = { ...(m.providerOptions ?? {}) } as Record<string, unknown>;
+        if (i === lastIndex) {
+          providerOptions.anthropic = { cacheControl: { type: "ephemeral" } };
+        } else if (providerOptions.anthropic) {
+          // Clear a breakpoint this function added on a previous step —
+          // otherwise every step accumulates one more, hitting the
+          // 4-breakpoint request limit long before a 20-step loop ends.
+          const { cacheControl: _drop, ...restAnthropic } = providerOptions.anthropic as Record<string, unknown>;
+          if (Object.keys(restAnthropic).length > 0) providerOptions.anthropic = restAnthropic;
+          else delete providerOptions.anthropic;
+        }
+        return { ...m, providerOptions };
+      });
+      return { messages: next };
+    },
+  };
+}
+
+/**
  * Dispatches exactly one hop for a run, then either enqueues the next hop
  * or completes the run. This is the whole orchestration engine: there is no
  * function that "plans a run" up front. Routing is resolved fresh on every
@@ -954,6 +1008,7 @@ async function callAgent(
                 ],
               }
             : {}),
+          ...withStepCaching(target.provider, Boolean(tools)),
         }),
         );
       } catch (err) {

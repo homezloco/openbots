@@ -80,10 +80,22 @@ export function isHttpEndpointUrlAllowed(candidate: string): boolean {
  */
 export function checkHttpEndpointsAllowed(endpoints: HttpEndpoint[] | null | undefined): string | null {
   if (!endpoints || endpoints.length === 0) return null;
+
+  // Structural validity first, in its own pass, THEN operator policy.
+  // Interleaving them made the error message depend on env config: with
+  // an empty allowlist, a duplicate slug on the second endpoint was
+  // masked by the first endpoint's allowlist rejection, so the user got
+  // told to fix their allowlist when their real mistake was a typo. A
+  // duplicate slug is wrong regardless of what the allowlist says — and
+  // it matters: the tool keys its endpoint lookup by slug, so a duplicate
+  // silently shadows one of the two.
   const slugs = new Set<string>();
   for (const endpoint of endpoints) {
     if (slugs.has(endpoint.slug)) return `httpEndpoints has a duplicate slug: "${endpoint.slug}"`;
     slugs.add(endpoint.slug);
+  }
+
+  for (const endpoint of endpoints) {
     if (!parseHttpUrl(endpoint.baseUrl)) {
       return `httpEndpoints.${endpoint.slug} baseUrl must be http(s) with no embedded credentials`;
     }

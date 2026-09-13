@@ -448,6 +448,73 @@ async function main() {
     );
   });
 
+  // --- http_request operator allowlist (no model involved) ---
+  // ALLOWED_HTTP_ENDPOINTS is unset in the mock CI env, so EVERY baseUrl
+  // is outside the allowlist — which is exactly the empty-deny default
+  // worth asserting: a fresh deployment must not be able to grant HTTP
+  // access to anything at all.
+  async function httpNode(slug: string, baseUrl: string, extra: Record<string, unknown> = {}) {
+    const g = await createGraph(`Mock: http ${slug} ${Date.now()}`);
+    return api(`/graphs/${g.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...mockNode({ name: "HTTP Caller" }),
+        tools: ["http_request"],
+        httpEndpoints: [{ slug, baseUrl, ...extra }],
+      }),
+    });
+  }
+
+  await test("security: an httpEndpoints baseUrl outside ALLOWED_HTTP_ENDPOINTS is rejected", async () => {
+    // The canonical SSRF target: cloud instance metadata.
+    const res = await httpNode("meta", "http://169.254.169.254");
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+    assert(
+      /ALLOWED_HTTP_ENDPOINTS/.test(JSON.stringify(res.body)),
+      `error should name the allowlist, got: ${JSON.stringify(res.body)}`,
+    );
+  });
+
+  await test("security: an httpEndpoints baseUrl with embedded credentials is rejected", async () => {
+    const res = await httpNode("userinfo", "http://user:pass@example.com");
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("security: an httpEndpoints baseUrl with a credential-shaped query param is rejected", async () => {
+    // A token in a URL ends up in node config, logs, and browser history.
+    const res = await httpNode("leaky", "http://example.com/?api_key=secret");
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("security: duplicate httpEndpoints slugs are rejected", async () => {
+    const g = await createGraph("Mock: http duplicate slug");
+    const res = await api(`/graphs/${g.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...mockNode({ name: "Dupe" }),
+        tools: ["http_request"],
+        httpEndpoints: [
+          { slug: "same", baseUrl: "http://a.example.com" },
+          { slug: "same", baseUrl: "http://b.example.com" },
+        ],
+      }),
+    });
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+    assert(/duplicate slug/i.test(JSON.stringify(res.body)), `expected a duplicate-slug error, got: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("PATCH httpEndpoints: null revokes previously-granted endpoints", async () => {
+    // Same .nullable() reason as consensusGroup/sshTarget/mcpServers: a
+    // grant that can't be revoked is a one-way door.
+    const g = await createGraph("Mock: http revoke");
+    const node = await createNode(g.id, mockNode({ name: "Revocable" }));
+    const patch = await api(`/graphs/${g.id}/nodes/${node.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ httpEndpoints: null }),
+    });
+    assert(patch.status === 200, `expected the null clear to be accepted, got ${patch.status}: ${JSON.stringify(patch.body)}`);
+  });
+
   await test("graph delete cascades cleanly", async () => {
     const g = await createGraph("Mock: delete me");
     const n = await createNode(g.id, mockNode({ name: "Doomed" }));

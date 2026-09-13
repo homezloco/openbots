@@ -52,6 +52,15 @@ jobs:
           # dispatch's real latency, comfortably below the mcp-echo delay
           # tool's slow-path duration used to force the fallback.
           DISPATCH_POLL_TIMEOUT_MS=3000
+          # docker-compose.yml runs api/worker as this uid (see "Run
+          # api/worker as the host uid instead of root"), defaulting to
+          # 1000:1000 if unset — which is NOT the actual runner user on
+          # ubuntu-latest. Without this, the writable e2e fixture dirs
+          # (created host-side, below, as the real runner uid) end up
+          # unwritable by the container, e.g. EACCES on
+          # writable-testrepo/.openbots during every write-tool/push test.
+          DOCKER_UID=$(id -u)
+          DOCKER_GID=$(id -g)
           EOF
 
       - name: Start postgres + redis

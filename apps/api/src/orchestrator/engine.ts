@@ -705,6 +705,28 @@ function appendProjectContext(systemPrompt: string, fileRoot: string | undefined
 const GRACEFUL_STOP_MARGIN_MS = 15_000;
 
 /**
+ * The stopWhen deadline predicate above only runs BETWEEN tool steps — a
+ * single long step (big file read + slow generation) can sail straight
+ * through the graceful-stop window and still get hard-killed (observed
+ * live: a 45s-budget hop stayed mid-step from ~10s to past 45s). This
+ * second layer aborts the in-flight call itself shortly before the hard
+ * deadline, leaving enough headroom to commit whatever the tool loop
+ * already wrote and complete the hop with an honest "ran out of time"
+ * answer instead of an error and an orphaned zombie loop.
+ */
+const ABORT_MARGIN_MS = 5_000;
+
+function isAbortError(err: unknown): boolean {
+  const names = new Set(["AbortError", "TimeoutError"]);
+  let cur: unknown = err;
+  for (let depth = 0; cur && depth < 4; depth++) {
+    if (typeof cur === "object" && "name" in cur && names.has(String((cur as { name: unknown }).name))) return true;
+    cur = typeof cur === "object" && "cause" in cur ? (cur as { cause: unknown }).cause : undefined;
+  }
+  return false;
+}
+
+/**
  * Tries node.provider/node.model first, then each entry in
  * node.fallbackChain in order — but only on a classified auth or
  * model-not-found error (classifyProviderError). Any other error (e.g. a
@@ -892,10 +914,17 @@ async function callAgent(
       // dispatchHop stays as the backstop for a single call/tool call that
       // hangs, this is just what lets a healthy-but-slow loop end itself.
       let deadlineStopped = false;
-      const result = await withRetry(() =>
+      let result: Awaited<ReturnType<typeof generateText>> | null = null;
+      try {
+        result = await withRetry(() =>
         generateText({
           model,
           ...buildPromptOptions(target.provider, hopPrompt, prompt),
+          // Third stop layer (see ABORT_MARGIN_MS): abort the in-flight
+          // call itself just before the hard deadline. Recomputed per
+          // retry attempt so a retried call gets only the time actually
+          // remaining, never a fresh full budget.
+          abortSignal: AbortSignal.timeout(Math.max(1_000, hopDeadlineEpochMs - ABORT_MARGIN_MS - Date.now())),
           // 20, not 8: a write-capable investigative specialist doing real
           // work (read CLAUDE.md, read a schema file, read the actual
           // routes file, cross-reference a couple of helpers, THEN write a
@@ -926,13 +955,21 @@ async function callAgent(
               }
             : {}),
         }),
-      );
+        );
+      } catch (err) {
+        // Only a deadline abort on a tool-capable hop is salvageable — the
+        // loop may already have committed real work worth surfacing. Any
+        // other error (or a plain no-tools generation timing out) keeps
+        // the existing failure semantics.
+        if (!tools || !isAbortError(err)) throw err;
+        deadlineStopped = true;
+      }
 
       // One commit per hop (not per tool call — a single step can make
       // several, and per-tool-call commits would race on which "pending
       // commit" belongs to which concurrently-running execute()).
-      let text = result.text;
-      const usedTools = (result.steps ?? []).some(
+      let text = result?.text ?? "";
+      const usedTools = (result?.steps ?? []).some(
         (s) => Array.isArray((s as { toolCalls?: unknown[] }).toolCalls) && ((s as { toolCalls: unknown[] }).toolCalls.length > 0),
       );
       // Defensive fallback for the same failure shape regardless of cause
@@ -977,7 +1014,7 @@ async function callAgent(
           // Loudest-backend case: 60-char "Let me try replacing a smaller
           // section:" after 20 tool steps and no commit looked like a
           // finished answer. Surface the miss.
-          if (looksLikeAbandonedEdit(result.text)) {
+          if (looksLikeAbandonedEdit(result?.text ?? "")) {
             text =
               "(No completed change — I used tools but didn't finish. If this was a /settings credential problem I cannot fix it from the project repo; otherwise try again with a narrower file to edit.)";
           }
@@ -989,14 +1026,17 @@ async function callAgent(
         text,
         provider: target.provider,
         model: target.model,
-        inputTokens: result.usage.inputTokens ?? 0,
-        outputTokens: result.usage.outputTokens ?? 0,
+        // On a deadline abort (result null) the loop's real token spend is
+        // unknown — 0 is the honest floor, matching providers that report
+        // no usage at all.
+        inputTokens: result?.usage.inputTokens ?? 0,
+        outputTokens: result?.usage.outputTokens ?? 0,
         // Normalized cross-provider by the AI SDK itself
         // (LanguageModelUsage.inputTokenDetails) — 0/0 for a provider
         // that doesn't report a cache breakdown at all (xai, openrouter,
         // openai-compatible today), which is exactly today's behavior.
-        cacheReadTokens: result.usage.inputTokenDetails?.cacheReadTokens ?? 0,
-        cacheWriteTokens: result.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+        cacheReadTokens: result?.usage.inputTokenDetails?.cacheReadTokens ?? 0,
+        cacheWriteTokens: result?.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
       };
     } catch (err) {
       lastError = err;

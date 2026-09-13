@@ -1343,6 +1343,39 @@ prompted by a real incident in the user's live Loudest chat.
   answer text; stored data untouched; a bare-sentinel output still
   displays rather than going blank.
 
+### Run results now surface committed work; hops stop gracefully at their deadline (2026-09-13)
+
+Closed the "a failed run silently hides real committed work" gap found
+twice in the dogfood sessions above. Three layers, first two written by
+the dogfood agents, third (in-flight abort) by hand after live testing
+proved the second alone insufficient:
+
+1. **Surface the truth that already existed**: `GET /runs/:id` now
+   includes the run's `agent_commits` rows as `commits[]`; the run page
+   renders a "Committed work" section (danger-styled on error, noting
+   the branch survives), and `useBotChat`'s error message names any
+   committed branch.
+2. **Graceful stop between steps**: a second `stopWhen` condition ends
+   the tool loop `GRACEFUL_STOP_MARGIN_MS` (15s) before the hop
+   deadline, so the engine can commit + append the commit note and
+   complete the hop normally; the empty-text fallback distinguishes
+   "ran out of time" from "hit my step limit."
+3. **In-flight abort**: live testing with a 45s budget showed stopWhen
+   only evaluates BETWEEN steps — one long read+generate step sailed
+   through the graceful window and still got hard-killed (and
+   `Promise.race` never cancels the loser, so the loop kept running as
+   a zombie and committed afterward with nothing surfacing it). Now an
+   `abortSignal` fires `ABORT_MARGIN_MS` (5s) before the hard deadline,
+   recomputed per retry attempt; a deadline abort on a tool-capable hop
+   is caught and routed through the same commit/fallback path — the
+   hop completes with the honest time-out message plus the commit note
+   and real diff. Verified live: a 45s-budget hop that used to end
+   `status=error output=null` now ends `completed` with the fallback
+   text, the committed branch named, the diff shown, and `commits[]`
+   populated. Non-tool hops keep the old hard-timeout semantics
+   deliberately. `withNodeTimeout` remains as the backstop for a hung
+   single call.
+
 **Known quirk documented while testing** (predates this work):
 `runs.output` is jsonb, so a string output that happens to be valid
 JSON text round-trips back as a parsed document (type change +

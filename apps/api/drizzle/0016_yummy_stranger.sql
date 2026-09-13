@@ -1,0 +1,1 @@
+ALTER TABLE "agent_nodes" ADD COLUMN "map_config" jsonb;

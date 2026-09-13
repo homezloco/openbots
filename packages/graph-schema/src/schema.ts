@@ -143,6 +143,34 @@ export type McpServer = z.infer<typeof McpServer>;
  * at save AND at hop time (SSRF protection). Tokens live in user_credentials
  * (credentialProvider), never in this object.
  */
+/**
+ * Dynamic fan-out ("map"): run ONE target node once per item in a list the
+ * previous hop produced at runtime, then hand every result to an
+ * aggregator. The list length is unknown until the hop runs, which is
+ * exactly what `consensusGroup` cannot express — that fans out to a FIXED
+ * set of edge ids decided when the graph was authored.
+ *
+ * The two are deliberately separate rather than one merged concept:
+ * consensus is "ask N DIFFERENT specialists the SAME question", map is
+ * "ask ONE specialist the same question about N DIFFERENT items". They
+ * share the join machinery (`fanout_batches`) and nothing else.
+ *
+ * `maxConcurrency` matters more here than for consensus: N is attacker-
+ * or model-influenced rather than author-chosen, so an unbounded map over
+ * a 500-item list would fire 500 concurrent model calls from a single
+ * worker slot.
+ */
+export const MapConfig = z.object({
+  /** The node run once per item. Receives the item as its whole input. */
+  targetNodeId: z.string().uuid(),
+  /** Receives the array of every branch result, like a consensus aggregator. */
+  aggregatorNodeId: z.string().uuid(),
+  maxConcurrency: z.number().int().min(1).max(20).optional(),
+  /** Refuses to start a map larger than this, rather than melting the worker. */
+  maxItems: z.number().int().min(1).max(500).optional(),
+});
+export type MapConfig = z.infer<typeof MapConfig>;
+
 export const HttpEndpoint = z.object({
   slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/, "slug must be 1-32 lowercase letters, digits, or hyphens"),
   baseUrl: z.string().url(),
@@ -221,6 +249,12 @@ export const AgentNode = z.object({
    * at hop time, not just at save time.
    */
   httpEndpoints: z.array(HttpEndpoint).optional(),
+  /**
+   * Turns this node into a dynamic fan-out source — see MapConfig. Unset
+   * means normal single-target routing. `.nullable()` so PATCH can clear
+   * it, same reason as consensusGroup.
+   */
+  mapConfig: MapConfig.nullable().optional(),
   position: CanvasPosition,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

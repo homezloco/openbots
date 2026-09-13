@@ -55,6 +55,108 @@ defaults to the source run's mode — `live` picks up canvas edits made
 since the original. The run detail page has **Fork from here** on each
 hop.
 
+## Human-in-the-loop approval gate
+
+`AgentNode.approvalConfig` (nullable, PATCH-clearable — same shape as
+`consensusGroup`/`mapConfig`) pauses a run **before** that node executes,
+waiting for a human to approve, edit, or cancel. It exists because the
+git-worktree pattern that makes write access safe (see below) doesn't
+generalize: there is no local fork of someone else's CRM, so a
+`http_request`/`run_remote_command`/MCP call takes effect the instant the
+model makes it. An allowlist answers *which hosts are reachable*, not
+*should this particular message be sent* — this is what answers the
+second question.
+
+**Why pausing needed no new run state.** Lazy hop resolution (above)
+already means the engine never holds anything in memory across hops — the
+run row itself is the only checkpoint, re-read fresh by every dispatch.
+`advanceRun(runId, graph, nextNodeId, nextInput)` is the one place a run
+moves to its next node; it always writes `currentNodeId`/`input`
+unconditionally, then decides whether to also call `enqueueHop`:
+
+```
+advanceRun(runId, graph, nextNodeId, nextInput):
+  runs.currentNodeId, runs.input = nextNodeId, nextInput   // always
+  if resolve(graph, nextNodeId).approvalConfig == null:
+    enqueueHop(runId)                                       // normal path
+  else:
+    runs.status = "awaiting_approval"                       // pause
+    publish(run_awaiting_approval)
+```
+
+Resuming is just the enqueue that didn't happen — `POST /runs/:id/approve`
+sets `status: "pending"` (optionally overwriting `input` with an edited
+value first — approve-with-edit, not just a veto) and calls `enqueueHop`
+itself. No saved continuation is needed because nothing about "where to
+resume" was ever held anywhere but the row. `advanceRun` is called from
+all four places a run advances — `dispatchHop`'s normal routing tail,
+both fan-out aggregator handoffs, and `createRun`'s entry-node dispatch
+(a gated entry node begins the run already paused) — so the gate can
+never be honored on some advance points and silently skipped on others.
+`forkRun` inherits it for free, since re-running a checkpoint hop is
+itself an "advance to this node before it runs."
+
+**The one real constraint**: consensus and map branches run *inline*
+inside a single BullMQ job (see below), with no queue boundary to pause
+a branch at. A gated node can't be a fan-out branch target — rejected at
+save time in both directions (gating an existing target, or pointing a
+new target at an already-gated node) by
+`validation/approvalGate.ts::checkApprovalGateCompatible`. Gating the
+*aggregator* is fine; it dispatches through the queue like any other hop.
+
+**`cancelled` finally has a writer.** It was read in `dispatchHop`'s
+terminal-status guard, `resolve.ts`, and two web files long before
+anything set it — no run could ever be stopped. `POST /runs/:id/cancel`
+is valid from `awaiting_approval` (this is *reject*, with an optional
+`reason`) and from `pending`/`running` (a plain stop). Rejection isn't a
+separate status: it's cancelling with a reason recorded at a gate — one
+conditional transition, not two near-identical ones. Honest limit: this
+stops a run *between* hops. An in-flight hop is inside `generateText` in
+the worker process; there's no cross-process signal to abort it
+mid-flight, so a cancelled run's currently-running hop still finishes —
+its *next* dequeued job simply no-ops against the terminal status.
+
+**Races are closed with a conditional UPDATE, not read-then-write.**
+Both endpoints gate their status transition on `WHERE status = <expected>`
+in the same statement (`awaiting_approval` for approve;
+`awaiting_approval`/`pending`/`running` for cancel) — a double-click or
+two reviewers racing each other means exactly one request's UPDATE
+matches and the loser gets a clear `409`, never a double-enqueued hop.
+
+**Audit trail**: every approve/cancel writes a `run_events` row
+(`status: "approved" | "cancelled"`, `input`: the original proposed
+input, `output: { decision, decidedBy, reason?, editedInput? }`) — the
+same "human intervention in an automated run" class `routing_changes`
+already makes attributable for live reroutes. Without this,
+approve-with-edit would silently destroy the model's original proposal:
+nobody could reconstruct what the agent wanted to send versus what a
+human changed it to, which is exactly the question an audit trail exists
+to answer.
+
+**Graph drift while paused**: a `live`-mode run re-reads the graph on
+every hop, so the gated node can be edited or deleted while a run sits
+paused — a window that was always seconds (a live reroute mid-hop) but a
+gate stretches to days. `POST /runs/:id/approve` re-validates that
+`run.currentNodeId` still exists in whichever graph the run actually uses
+(pinned snapshot or live) and still carries `approvalConfig` *before*
+touching anything, failing with a clear message and leaving the run
+paused — instead of letting `dispatchHop`'s bare `Node ... not found in
+graph` surface as an opaque job failure after the enqueue already
+happened.
+
+**Notification is WebSocket-only** (`run_awaiting_approval`,
+`ws/publish.ts`) — it reaches a browser that's currently open. For the
+scheduled/webhook runs where a gate matters most, nobody is watching, so
+in practice a paused run is discovered by checking the runs list.
+Email/webhook notification is a known gap, not solved by this event.
+
+Scope, stated honestly: this gates **entry to a node**, not individual
+tool calls. The reviewer approves the input about to be handed to a
+sending node, not the exact HTTP payload — that doesn't exist until the
+model composes it mid-hop, and suspending inside `generateText`'s tool
+loop is not something the one-hop-per-job design can express. The
+intended pattern is a node whose only job is to send.
+
 ## `explicit` vs `auto` edges
 
 - `explicit`: hard-wired. Highest-`priority` explicit edge out of a node

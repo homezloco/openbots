@@ -61,6 +61,22 @@ async function waitForRun(runId: string, timeoutMs = 30_000): Promise<any> {
   throw new Error(`Run ${runId} did not finish within ${timeoutMs}ms`);
 }
 
+/**
+ * Same idea as waitForRun, but for approval-gate cases that need to
+ * observe the PAUSE itself, not just wait through it to a terminal
+ * status — "awaiting_approval" never resolves on its own, so waitForRun
+ * would just time out.
+ */
+async function waitForRunStatus(runId: string, statuses: string[], timeoutMs = 30_000): Promise<any> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const { body } = await api(`/runs/${runId}`);
+    if (statuses.includes(body.status)) return body;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`Run ${runId} did not reach status [${statuses.join(",")}] within ${timeoutMs}ms`);
+}
+
 interface TestResult {
   name: string;
   passed: boolean;
@@ -142,6 +158,7 @@ function succeededEvents(run: any): any[] {
 async function main() {
   const email = `e2e-mock-${Date.now()}@openbots.dev`;
   const password = "e2e-mock-password-123";
+  let ownerId = "";
 
   await test("health check", async () => {
     const { status, body } = await api("/health");
@@ -151,6 +168,7 @@ async function main() {
   await test("signup + session cookie works", async () => {
     const signup = await api("/auth/signup", { method: "POST", body: JSON.stringify({ email, password }) });
     assert(signup.status === 201, `signup failed: ${signup.status} ${JSON.stringify(signup.body)}`);
+    ownerId = signup.body.id;
     const me = await api("/auth/me");
     assert(me.status === 200 && me.body.email === email, `auth/me failed: ${JSON.stringify(me.body)}`);
   });
@@ -612,6 +630,169 @@ async function main() {
       failed.some((f) => /above this node's limit/.test(f.error ?? "")),
       `expected a clear over-limit error, got ${JSON.stringify(failed.map((f: any) => f.error))}`,
     );
+  });
+
+  // --- Human-in-the-loop approval gate ---
+  // A single gated node as the entry is the minimal graph an approval
+  // gate needs: it's the run's very first hop, so pausing there is
+  // observable with no routing or fan-out involved.
+  async function gatedGraph(name: string, instructions?: string) {
+    const g = await createGraph(name);
+    const node = await createNode(g.id, {
+      ...mockNode({ name: "Sender" }),
+      approvalConfig: { instructions: instructions ?? "review before sending" },
+    });
+    await setEntry(g.id, node.id);
+    return { g, node };
+  }
+
+  await test("approval gate: a gated node pauses the run and runs no further hop", async () => {
+    const { g, node } = await gatedGraph("Mock: approval gate pauses");
+    const runId = await startRun(g.id, "hello");
+    const run = await waitForRunStatus(runId, ["awaiting_approval", "completed", "error"]);
+    assert(run.status === "awaiting_approval", `expected the run to pause, got ${run.status}`);
+    assert(run.currentNodeId === node.id, `expected the run parked at the gated node, got ${run.currentNodeId}`);
+    assert(succeededEvents(run).length === 0, `expected no hop to have run yet, got ${JSON.stringify(run.events)}`);
+  });
+
+  await test("approve resumes and the run completes", async () => {
+    const { g, node } = await gatedGraph("Mock: approval gate approve");
+    const runId = await startRun(g.id, "hello");
+    await waitForRunStatus(runId, ["awaiting_approval"]);
+    const approve = await api(`/runs/${runId}/approve`, { method: "POST", body: JSON.stringify({}) });
+    assert(approve.status === 200, `approve failed: ${approve.status} ${JSON.stringify(approve.body)}`);
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    assert(run.output === "MOCK: hello", `expected echoed output, got: ${JSON.stringify(run.output)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 1 && hops[0].nodeId === node.id, `expected exactly one hop, the gated node: ${JSON.stringify(hops)}`);
+  });
+
+  await test("approve with an edited input feeds the edited value to the gated node, not the original", async () => {
+    const { g } = await gatedGraph("Mock: approval gate edit");
+    const runId = await startRun(g.id, "original message");
+    await waitForRunStatus(runId, ["awaiting_approval"]);
+    const approve = await api(`/runs/${runId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ input: "edited message" }),
+    });
+    assert(approve.status === 200, `approve failed: ${approve.status} ${JSON.stringify(approve.body)}`);
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    assert(run.output === "MOCK: edited message", `expected the EDITED input echoed, got: ${JSON.stringify(run.output)}`);
+    const hops = succeededEvents(run);
+    assert(
+      hops.length === 1 && hops[0].input === "edited message",
+      `expected the gated hop to receive the edited input, got ${JSON.stringify(hops[0])}`,
+    );
+  });
+
+  await test("cancelling at a gate terminates the run without executing the gated node", async () => {
+    const { g, node } = await gatedGraph("Mock: approval gate cancel");
+    const runId = await startRun(g.id, "hello");
+    await waitForRunStatus(runId, ["awaiting_approval"]);
+    const cancel = await api(`/runs/${runId}/cancel`, { method: "POST", body: JSON.stringify({ reason: "not needed" }) });
+    assert(cancel.status === 200, `cancel failed: ${cancel.status} ${JSON.stringify(cancel.body)}`);
+    const run = await api(`/runs/${runId}`);
+    assert(run.body.status === "cancelled", `expected cancelled, got ${run.body.status}`);
+    assert(succeededEvents(run.body).length === 0, `the gated node should never have run: ${JSON.stringify(run.body.events)}`);
+    const decision = (run.body.events as any[]).find((e) => e.status === "cancelled");
+    assert(decision && decision.nodeId === node.id, "expected a cancellation audit event at the gated node");
+  });
+
+  await test("a second approve on an already-approved run is refused and does not double-enqueue", async () => {
+    const { g, node } = await gatedGraph("Mock: approval gate double approve");
+    const runId = await startRun(g.id, "hello");
+    await waitForRunStatus(runId, ["awaiting_approval"]);
+    // Fired concurrently, not sequentially — this is the actual "double
+    // click" race the conditional single-statement UPDATE exists for.
+    const [first, second] = await Promise.all([
+      api(`/runs/${runId}/approve`, { method: "POST", body: JSON.stringify({}) }),
+      api(`/runs/${runId}/approve`, { method: "POST", body: JSON.stringify({}) }),
+    ]);
+    const statuses = [first.status, second.status].sort();
+    assert(
+      statuses[0] === 200 && statuses[1] === 409,
+      `expected exactly one approve to win (200) and the other refused (409), got ${JSON.stringify(statuses)}`,
+    );
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run).filter((h: any) => h.nodeId === node.id);
+    assert(hops.length === 1, `expected the gated node to run exactly once, not double-enqueued: ${hops.length}`);
+  });
+
+  await test(
+    "approving records an audit event, and an edited approval records both the original and the replacement",
+    async () => {
+      const { g } = await gatedGraph("Mock: approval gate audit");
+      const runId = await startRun(g.id, "orig message");
+      await waitForRunStatus(runId, ["awaiting_approval"]);
+      const approve = await api(`/runs/${runId}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ input: "changed message" }),
+      });
+      assert(approve.status === 200, `approve failed: ${approve.status} ${JSON.stringify(approve.body)}`);
+      await waitForRun(runId);
+      const run = await api(`/runs/${runId}`);
+      const decision = (run.body.events as any[]).find((e) => e.status === "approved");
+      assert(decision, `expected an "approved" audit event, got: ${JSON.stringify(run.body.events)}`);
+      assert(decision.input === "orig message", `expected the audit event to record the ORIGINAL input, got: ${JSON.stringify(decision.input)}`);
+      assert(decision.output.decision === "approved", `expected decision=approved, got: ${JSON.stringify(decision.output)}`);
+      assert(
+        decision.output.decidedBy === ownerId,
+        `expected decidedBy to be the approving user, got: ${JSON.stringify(decision.output)}`,
+      );
+      assert(
+        decision.output.editedInput === "changed message",
+        `expected the audit event to record the REPLACEMENT input, got: ${JSON.stringify(decision.output)}`,
+      );
+    },
+  );
+
+  await test(
+    "approving a run whose gated node was deleted while paused fails with a clear message, not an opaque crash",
+    async () => {
+      // Live mode specifically: a pinned run's graphSnapshot is immutable,
+      // so deleting the node from the live graph could never manifest as
+      // drift for it — this hazard only exists for "live" runs, which
+      // re-read the graph fresh on every hop (see CLAUDE.md's "graph
+      // drift while paused").
+      const { g, node } = await gatedGraph("Mock: approval gate node deleted");
+      const r = await api("/runs", { method: "POST", body: JSON.stringify({ graphId: g.id, input: "hello", mode: "live" }) });
+      assert(r.status === 201, `run create failed: ${r.status} ${JSON.stringify(r.body)}`);
+      const runId = r.body.id;
+      const paused = await waitForRunStatus(runId, ["awaiting_approval", "completed", "error"]);
+      assert(paused.status === "awaiting_approval", `expected the run to pause, got ${paused.status}`);
+
+      const del = await api(`/graphs/${g.id}/nodes/${node.id}`, { method: "DELETE" });
+      assert(del.status === 204, `node delete failed: ${del.status} ${JSON.stringify(del.body)}`);
+
+      const approve = await api(`/runs/${runId}/approve`, { method: "POST", body: JSON.stringify({}) });
+      assert(
+        approve.status >= 400 && approve.status < 500,
+        `expected a clear client error, got ${approve.status} ${JSON.stringify(approve.body)}`,
+      );
+      assert(
+        /no longer exists/.test(approve.body.error ?? ""),
+        `expected a clear message naming the deleted node, got: ${JSON.stringify(approve.body)}`,
+      );
+
+      const stillPaused = await api(`/runs/${runId}`);
+      assert(
+        stillPaused.body.status === "awaiting_approval",
+        `run should remain paused after a failed approval, not silently dropped, got ${stillPaused.body.status}`,
+      );
+    },
+  );
+
+  await test("saving a node with approvalConfig as a map target is rejected at save time", async () => {
+    const { g, worker } = await mapGraph("Mock: approval gate vs map target");
+    const patch = await api(`/graphs/${g.id}/nodes/${worker.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ approvalConfig: { instructions: "review" } }),
+    });
+    assert(patch.status === 400, `expected 400 gating a map target, got ${patch.status} ${JSON.stringify(patch.body)}`);
+    assert(/map target/.test(patch.body.error ?? ""), `expected a clear map-target error, got: ${JSON.stringify(patch.body)}`);
   });
 
   await test("graph delete cascades cleanly", async () => {

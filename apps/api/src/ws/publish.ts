@@ -5,7 +5,17 @@ export const RUN_EVENTS_CHANNEL = "run-events";
 export interface RunEventMessage {
   runId: string;
   graphId: string;
-  type: "hop_dispatched" | "hop_succeeded" | "hop_failed" | "run_completed";
+  type:
+    | "hop_dispatched"
+    | "hop_succeeded"
+    | "hop_failed"
+    | "run_completed"
+    // A run paused at an approval gate. Worth its own event rather than
+    // leaving clients to notice a status change on refresh: the gate is
+    // most useful on scheduled/webhook runs, where the pause happens
+    // while nobody is looking at the canvas.
+    | "run_awaiting_approval"
+    | "run_cancelled";
   nodeId?: string;
   resolvedEdgeId?: string | null;
   payload?: unknown;

@@ -57,6 +57,7 @@ export const agentNodes = pgTable("agent_nodes", {
   mcpServers: jsonb("mcp_servers"), // McpServer[] | null — see orchestrator/mcpTool.ts (PR 2) and validation/mcpServer.ts
   httpEndpoints: jsonb("http_endpoints"), // HttpEndpoint[] | null — see orchestrator/httpRequestTool.ts and validation/httpEndpoint.ts
   mapConfig: jsonb("map_config"), // MapConfig | null — dynamic fan-out over a runtime list; see engine.ts::dispatchMap
+  approvalConfig: jsonb("approval_config"), // ApprovalConfig | null — pauses the run for human approval before this node; see engine.ts::advanceRun
   positionX: real("position_x").notNull().default(0),
   positionY: real("position_y").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

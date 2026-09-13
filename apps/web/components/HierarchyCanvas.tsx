@@ -786,6 +786,11 @@ export function HierarchyCanvas({
     setLastRunId(run.id);
     setRunInput("");
     setRunInputOpen(false);
+    // Opens the entry node's own history panel so the result appears the
+    // moment it lands (via the conversationRefreshKey live-refresh below)
+    // instead of requiring a click into the node after watching it pulse —
+    // the pulse alone tells you something happened, not what it said.
+    setOpenAgentPanel(graph.entryNodeId);
   }
 
   async function saveAsTemplate() {

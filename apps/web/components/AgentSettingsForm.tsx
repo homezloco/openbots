@@ -123,6 +123,7 @@ export function AgentSettingsForm({
   const [error, setError] = useState<string | null>(null);
   const [approvalEnabled, setApprovalEnabled] = useState(Boolean(node.approvalConfig));
   const [approvalInstructions, setApprovalInstructions] = useState(node.approvalConfig?.instructions ?? "");
+  const [approvalWebhookUrl, setApprovalWebhookUrl] = useState(node.approvalConfig?.notifyWebhookUrl ?? "");
   const outgoing = graph.edges.filter((e) => e.sourceNodeId === node.id);
   const [fanoutEnabled, setFanoutEnabled] = useState(Boolean(node.consensusGroup));
   const [aggregatorId, setAggregatorId] = useState(node.consensusGroup?.aggregatorNodeId ?? "");
@@ -333,7 +334,12 @@ export function AgentSettingsForm({
               }))
           : [],
         consensusGroup: fanoutEnabled ? { aggregatorNodeId: aggregatorId, edgeIds: fanoutEdgeIds } : null,
-        approvalConfig: approvalEnabled ? { instructions: approvalInstructions.trim() || undefined } : null,
+        approvalConfig: approvalEnabled
+          ? {
+              instructions: approvalInstructions.trim() || undefined,
+              notifyWebhookUrl: approvalWebhookUrl.trim() || undefined,
+            }
+          : null,
       });
       onSaved(updated);
     } catch (err) {
@@ -437,19 +443,34 @@ export function AgentSettingsForm({
       </label>
 
       {approvalEnabled && (
-        <label style={{ display: "flex", flexDirection: "column", gap: 4, marginLeft: 24 }}>
-          Reviewer instructions <span style={{ color: "var(--text-faint)", fontSize: 12 }}>(shown to whoever approves — explain what to check)</span>
-          <textarea
-            rows={2}
-            placeholder="e.g. Check the recipient and tone before this goes out."
-            value={approvalInstructions}
-            onChange={(e) => setApprovalInstructions(e.target.value)}
-          />
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginLeft: 24 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Reviewer instructions <span style={{ color: "var(--text-faint)", fontSize: 12 }}>(shown to whoever approves — explain what to check)</span>
+            <textarea
+              rows={2}
+              placeholder="e.g. Check the recipient and tone before this goes out."
+              value={approvalInstructions}
+              onChange={(e) => setApprovalInstructions(e.target.value)}
+            />
+          </label>
           <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
             Can&apos;t be combined with being a map or consensus branch target — those fan out inline with no point
             to pause at. Gating the aggregator itself is fine.
           </span>
-        </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Notify a webhook when this gate trips{" "}
+            <span style={{ color: "var(--text-faint)", fontSize: 12 }}>(optional — otherwise this is only visible on the canvas or the runs list)</span>
+            <input
+              placeholder="https://hooks.slack.com/services/…"
+              value={approvalWebhookUrl}
+              onChange={(e) => setApprovalWebhookUrl(e.target.value)}
+            />
+            <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+              URL must be within an operator-configured prefix (ALLOWED_NOTIFICATION_WEBHOOKS) — delivery is
+              best-effort and never affects the run either way.
+            </span>
+          </label>
+        </div>
       )}
 
       <label style={{ display: "flex", gap: 8, alignItems: "center" }}>

@@ -795,6 +795,66 @@ async function main() {
     assert(/map target/.test(patch.body.error ?? ""), `expected a clear map-target error, got: ${JSON.stringify(patch.body)}`);
   });
 
+  // --- Approval gate notification webhook ---
+  // mcp-echo (already running for the MCP-tool cases) doubles as a
+  // capture target: /webhook-capture/<token> records the last POST body
+  // it received under that token, so a test can assert on the exact
+  // payload a real delivery carried. Reachable from the worker container
+  // at http://mcp-echo:3930 (matches ALLOWED_MCP_SERVERS' existing DNS
+  // name) and from this host script at http://localhost:3930 (published
+  // in docker-compose.yml) to read back what was captured.
+  const WEBHOOK_CAPTURE_BASE = "http://localhost:3930";
+
+  await test("security: an approvalConfig.notifyWebhookUrl outside ALLOWED_NOTIFICATION_WEBHOOKS is rejected", async () => {
+    const g = await createGraph("Mock: notification webhook not allowed");
+    const n = await createNode(g.id, mockNode({ name: "Sender" }));
+    const patch = await api(`/graphs/${g.id}/nodes/${n.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ approvalConfig: { instructions: "review", notifyWebhookUrl: "https://evil.example.com/hook" } }),
+    });
+    assert(patch.status === 400, `expected 400 for a disallowed webhook URL, got ${patch.status} ${JSON.stringify(patch.body)}`);
+    assert(
+      /ALLOWED_NOTIFICATION_WEBHOOKS/.test(patch.body.error ?? ""),
+      `expected a clear allowlist error, got: ${JSON.stringify(patch.body)}`,
+    );
+  });
+
+  await test("approval gate: notifies a webhook when a run pauses, with the right payload", async () => {
+    const token = `e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const g = await createGraph("Mock: notification webhook delivery");
+    const node = await createNode(g.id, {
+      ...mockNode({ name: "Sender" }),
+      approvalConfig: {
+        instructions: "check before sending",
+        notifyWebhookUrl: `http://mcp-echo:3930/webhook-capture/${token}`,
+      },
+    });
+    await setEntry(g.id, node.id);
+
+    const runId = await startRun(g.id, "please email the customer");
+    const run = await waitForRunStatus(runId, ["awaiting_approval", "completed", "error"]);
+    assert(run.status === "awaiting_approval", `expected the run to pause, got ${run.status}`);
+
+    let captured: any = null;
+    const start = Date.now();
+    while (Date.now() - start < 10_000) {
+      const res = await fetch(`${WEBHOOK_CAPTURE_BASE}/webhook-capture/${token}`);
+      const body = await res.json();
+      if (body.captured) {
+        captured = body.captured;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    assert(captured, "expected the notification webhook to have delivered within 10s");
+    assert(captured.body.event === "run_awaiting_approval", `expected event=run_awaiting_approval, got: ${JSON.stringify(captured.body)}`);
+    assert(captured.body.runId === runId, `expected the payload to carry this run's id, got: ${JSON.stringify(captured.body)}`);
+    assert(captured.body.nodeId === node.id, `expected the payload to carry the gated node's id, got: ${JSON.stringify(captured.body)}`);
+    assert(captured.body.nodeName === "Sender", `expected the payload to carry the node's name, got: ${JSON.stringify(captured.body)}`);
+    assert(captured.body.instructions === "check before sending", `expected reviewer instructions in the payload, got: ${JSON.stringify(captured.body)}`);
+    assert(captured.body.pendingInput === "please email the customer", `expected the pending input in the payload, got: ${JSON.stringify(captured.body)}`);
+  });
+
   // --- POST /runs/:id/cancel on a PLAIN (non-gated) run ---
   // Everything above exercises /cancel via the approval-gate scenario
   // (awaiting_approval). The endpoint is also documented to work on an

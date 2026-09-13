@@ -11,6 +11,7 @@ import { checkSshTargetAllowed } from "../validation/sshTarget.js";
 import { checkMcpServersAllowed } from "../validation/mcpServer.js";
 import { checkHttpEndpointsAllowed } from "../validation/httpEndpoint.js";
 import { checkApprovalGateCompatible } from "../validation/approvalGate.js";
+import { checkNotificationWebhookAllowed } from "../validation/notificationWebhook.js";
 
 /**
  * The node/edge mutation core, shared by the HTTP routes (routes/graphs.ts)
@@ -147,6 +148,8 @@ export async function insertAgentNodeValidated(
     consensusGroup: body.consensusGroup,
   });
   if (approvalError) return { ok: false, status: 400, error: approvalError };
+  const webhookError = checkNotificationWebhookAllowed(body.approvalConfig);
+  if (webhookError) return { ok: false, status: 400, error: webhookError };
   return { ok: true, value: await insertAgentNode(graphId, body) };
 }
 
@@ -206,6 +209,8 @@ export async function updateAgentNode(
     consensusGroup: effectiveConsensusGroup,
   });
   if (approvalError) return { ok: false, status: 400, error: approvalError };
+  const webhookError = checkNotificationWebhookAllowed(effectiveApprovalConfig);
+  if (webhookError) return { ok: false, status: 400, error: webhookError };
 
   const { position, ...rest } = body;
   const [after] = await db

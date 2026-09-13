@@ -739,12 +739,12 @@ than another cloud provider would be.
 1. ~~The containerized `web` Docker image has never successfully built in this environment~~ — fixed 2026-09-10, see "Pre-launch hardening" below. Local `pnpm --filter @openbots/web build && start` against the dockerized API remains a valid fallback if a build ever hits the same network flakiness again.
 2. **Team/role-based sharing does not exist.** Auth is single-owner only, by design.
 3. The tool registry is a small built-in set, not dynamic npm-package loading — deliberate (arbitrary plugin loading would let anyone who can edit a graph run arbitrary code in the API process).
-4. Consensus fan-out runs branches inline within one BullMQ job (not as separately queued hops) and has no partial-failure tolerance — a v1 simplification, documented in `docs/orchestration.md`.
+4. Consensus and map fan-out run their branches inline within one BullMQ job, not as separately queued hops — a v1 simplification, documented in `docs/orchestration.md`. (Partial-failure tolerance — one bad branch doesn't sink the whole batch — shipped since this was first written; both now join on whatever succeeded, with a placeholder per failed branch, and only fail the run if every branch failed.)
 5. `/push` and `/pr` only support a `github.com` origin over HTTPS or SSH — no GitLab/Bitbucket/self-hosted remotes. See "Agent file-write and confirmed push" above.
 6. `business_metrics` now supports two integration *styles* ("dashboard" and "login" — see "Pre-launch hardening" below) rather than a fixed list of named sites, but only two real sources were ever actually wired up on the live account (the former `leadgen-a`/`leadgen-b`/`saas-b` credentials), and **neither integration style actually returns real data reliably today**: the "login" style's live login endpoint has previously returned an empty body — the stored value had drifted from what's actually deployed on that host — and the "dashboard" style's sources have no credential at all today (would need the user to re-add real staff credentials through the new generic /settings form). No revenue source exists yet for either style (needs new endpoint code in the target app), no Railway hosting cost (needs the user's own API token), no Render hosting cost (hard blocker — Render's API has no billing endpoint, full stop). See "Cross-graph dispatch and business metrics" and "Credential security review and a real external-drift finding" above.
 7. `manage_target_graphs`'s *reach* is now visible on the canvas (gateway nodes, above), but the six tools themselves still have no visual affordance for what an agent actually *did* — no "see what changed in graph X" diff view yet, beyond the existing `GET /graphs/:id/routing-changes` audit trail, which still has no page consuming it.
 8. No breadcrumb/"back to parent" link on a gateway-target graph's own canvas — the browser Back button works (gateway navigation pushes a real history entry), but there's no on-canvas affordance, deliberately: a graph can be a dispatch target of more than one parent, so there's no single "the" parent to hard-code a link to.
-9. The approval-gate's pause notification (`run_awaiting_approval`) is WebSocket-only — it reaches a browser that's open right now. For scheduled/webhook runs, where a gate matters most, nobody is watching when it fires, so a paused run is discovered by checking the runs list rather than being pushed to anyone. Email/webhook notification is the obvious follow-up. See "Human-in-the-loop approval gate" above. Also no canvas affordance yet for a gated node (a lock icon, an "N runs waiting" badge) or web-app approve/cancel buttons — this session shipped the API only.
+9. ~~The approval-gate's pause notification (`run_awaiting_approval`) is WebSocket-only~~ — fixed 2026-09-13, see "Approval-gate webhook notification" below: `ApprovalConfig.notifyWebhookUrl` now POSTs to an operator-allowlisted URL the moment a gate trips, closing the scheduled/webhook-run gap this originally named. No email sending exists in this codebase (no SMTP/nodemailer dependency) — a webhook is the interop primitive; bridging to email/Slack/PagerDuty is on whatever the operator points the URL at, deliberately not something OpenBots picks a vendor for.
 
 ## Depth demo (not the live-reroute GIF — 2026-09-11)
 
@@ -1659,6 +1659,55 @@ the invariant that holds under either outcome (cancel wins → run
 fixed one — 5/5 stress runs after the fix landed cancel-wins every time,
 consistent with mock hops being fast but not literally zero-latency
 against two back-to-back local HTTP calls.
+
+## Approval-gate webhook notification (2026-09-13)
+
+Closes known gap #9 for real this time. `run_awaiting_approval` was
+WebSocket-only — reaches nobody for the exact scheduled/webhook runs a
+gate matters most for, since no browser tab is open to receive it.
+
+`ApprovalConfig.notifyWebhookUrl` (optional, `z.string().url()`) is a
+URL `advanceRun` POSTs to the moment a run pauses at that node — same
+payload shape as the WS event's, plus `event`/`runId`/`graphId`/
+`nodeName`. No new migration needed; `approvalConfig` is already jsonb.
+
+Researched first rather than assumed: **no email-sending infrastructure
+exists anywhere in this codebase** (no nodemailer/SMTP/Resend/SendGrid,
+no `sendEmail` function) and no outbound-webhook mechanism either — the
+only existing "webhook" concept, `webhook_triggers`, is inbound (an
+external POST *starts* a run), structurally nothing to reuse for
+*firing* one. Building real email delivery means picking a
+vendor/SMTP and asking the operator for credentials they'd have to
+supply — a decision that's genuinely the operator's to make, not
+something to default silently. A webhook needs none of that and is the
+correct universal primitive for a self-hosted tool: point it at a Slack
+incoming webhook, Zapier/Make/n8n, PagerDuty, or your own mail-sending
+service, and OpenBots never becomes an email-vendor integration.
+Shipped webhook only; email (if ever wanted) is a real follow-up that
+needs that vendor conversation first, not blocked code.
+
+Followed `httpEndpoints`' exact validation shape rather than inventing
+a new one: `ALLOWED_NOTIFICATION_WEBHOOKS` (`validation/notificationWebhook.ts`)
+is the same scheme+host[+path]-prefix allowlist, empty-deny default,
+rejects embedded credentials or a credential-shaped query param
+(`?api_key=…`), re-checked at delivery time as well as save time — an
+operator tightening the allowlist after a node was configured takes
+effect on the very next gate trip, no re-save needed. Delivery itself
+is deliberately best-effort and bounded (5s timeout): a broken or slow
+notification target logs and is swallowed, never affects the run, which
+is already correctly paused and durable in the DB regardless of whether
+anyone was actually told.
+
+**Real delivery verified in the mock e2e tier, not just mocked.** The
+`mcp-echo` fixture container (already running for the MCP-tool cases)
+gained a `/webhook-capture/:token` route — POST records the last body
+received under that token, GET reads it back — so a test can start a
+gated run, wait for it to pause, and assert on the *exact* JSON payload
+a real HTTP delivery carried (event/runId/nodeId/nodeName/instructions/
+pendingInput), not just that some function was called. 38/38 mock-tier
+cases passing, stable across three consecutive runs. Web UI: a
+"Notify a webhook when this gate trips" field in `AgentSettingsForm`
+alongside the reviewer-instructions field added earlier.
 
 ## License
 

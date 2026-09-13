@@ -50,6 +50,7 @@ import { createRunCodeTool } from "./codeSandboxTool.js";
 import { appendMcpContext, resolveMcpTools, type McpResolution } from "./mcpTool.js";
 import { resolveHttpRequestTools } from "./httpRequestTool.js";
 import { computeWarnings } from "./warnings.js";
+import { isNotificationWebhookUrlAllowed } from "../validation/notificationWebhook.js";
 import { enqueueHop } from "../queue/runQueue.js";
 import { publishRunEvent } from "../ws/publish.js";
 import { finishHopSpan, recordRunFinished, startHopSpan } from "../observability/otel.js";
@@ -184,6 +185,44 @@ export function isTerminalStatus(status: string): boolean {
   return TERMINAL_RUN_STATUSES.has(status);
 }
 
+/** Bounded well under a hop's own timeout — a slow/hanging notification target must never stall the worker. */
+const NOTIFICATION_WEBHOOK_TIMEOUT_MS = 5_000;
+
+/**
+ * Best-effort POST when a run pauses at a gate — see ApprovalConfig's
+ * notifyWebhookUrl. `run_awaiting_approval` is otherwise WebSocket-only,
+ * which reaches nobody for exactly the scheduled/webhook-triggered runs a
+ * gate matters most for. Never throws: the run is already correctly
+ * paused and durable in the DB by the time this is called, and a broken
+ * or slow notification target must not affect that. Re-validates the URL
+ * against the operator allowlist at delivery time, not just save time —
+ * an operator tightening ALLOWED_NOTIFICATION_WEBHOOKS after a node was
+ * configured takes effect on the very next gate trip, same as every
+ * other runtime-re-checked allowlist in this file.
+ */
+async function notifyApprovalWebhook(
+  url: string,
+  payload: { runId: string; graphId: string; nodeId: string; nodeName: string; instructions: string | null; pendingInput: unknown },
+): Promise<void> {
+  if (!isNotificationWebhookUrlAllowed(url)) {
+    console.error(`[approval-webhook] run ${payload.runId}: url no longer allowed, skipping delivery: ${url}`);
+    return;
+  }
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event: "run_awaiting_approval", ...payload }),
+      signal: AbortSignal.timeout(NOTIFICATION_WEBHOOK_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      console.error(`[approval-webhook] run ${payload.runId}: delivery to ${url} returned ${res.status}`);
+    }
+  } catch (err) {
+    console.error(`[approval-webhook] run ${payload.runId}: delivery to ${url} failed: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
 /**
  * The single place a run moves to its next node.
  *
@@ -244,6 +283,16 @@ export async function advanceRun(
       pendingInput: nextInput,
     },
   });
+  if (nextNode.approvalConfig.notifyWebhookUrl) {
+    await notifyApprovalWebhook(nextNode.approvalConfig.notifyWebhookUrl, {
+      runId,
+      graphId: graph.id,
+      nodeId: nextNodeId,
+      nodeName: nextNode.name,
+      instructions: nextNode.approvalConfig.instructions ?? null,
+      pendingInput: nextInput,
+    });
+  }
 }
 
 /**

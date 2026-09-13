@@ -109,11 +109,39 @@ async function readBody(req) {
   return JSON.parse(raw);
 }
 
+// Doubles as a capture target for the approval-gate notification-webhook
+// e2e cases: each test uses its own random token in the path so runs
+// sharing this long-lived container never see each other's deliveries.
+const webhookCaptures = new Map();
+
 createServer(async (req, res) => {
   const path = (req.url ?? "/").split("?")[0];
   if (req.method === "GET" && path === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  if (path.startsWith("/webhook-capture/")) {
+    const token = path.slice("/webhook-capture/".length);
+    if (req.method === "POST") {
+      let body = null;
+      try {
+        body = await readBody(req);
+      } catch {
+        // fall through with body = null — a malformed capture is still worth recording
+      }
+      webhookCaptures.set(token, { body, receivedAt: Date.now() });
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    if (req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ captured: webhookCaptures.get(token) ?? null }));
+      return;
+    }
+    res.writeHead(405, { allow: "POST, GET" });
+    res.end();
     return;
   }
   if (path !== "/mcp") {

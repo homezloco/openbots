@@ -160,11 +160,25 @@ paused — instead of letting `dispatchHop`'s bare `Node ... not found in
 graph` surface as an opaque job failure after the enqueue already
 happened.
 
-**Notification is WebSocket-only** (`run_awaiting_approval`,
-`ws/publish.ts`) — it reaches a browser that's currently open. For the
-scheduled/webhook runs where a gate matters most, nobody is watching, so
-in practice a paused run is discovered by checking the runs list.
-Email/webhook notification is a known gap, not solved by this event.
+**Notification** has two layers now. The WebSocket event
+(`run_awaiting_approval`, `ws/publish.ts`) only ever reaches a browser
+that's currently open, which is exactly the scheduled/webhook runs a
+gate matters most for — nobody is watching. `ApprovalConfig.notifyWebhookUrl`
+closes that: `advanceRun` POSTs `{event: "run_awaiting_approval", runId,
+graphId, nodeId, nodeName, instructions, pendingInput}` to it the moment
+the gate trips, the instant the WS event is published. Same operator-
+allowlist shape as `httpEndpoints` (`ALLOWED_NOTIFICATION_WEBHOOKS`,
+`validation/notificationWebhook.ts` — empty-deny, rejects embedded
+credentials or a credential-shaped query param), re-checked at delivery
+time as well as save time so a tightened allowlist takes effect on the
+very next gate trip without needing every node re-saved. Delivery is
+always best-effort and bounded (`NOTIFICATION_WEBHOOK_TIMEOUT_MS`,
+5s) — a broken or slow target is logged and swallowed, never surfaced
+to the run, since the pause already happened and is durable in the DB
+regardless of whether anyone was told. No email sending exists in this
+codebase (no SMTP/nodemailer/transactional-API dependency) — a webhook
+is the interop primitive; bridging to email, Slack, PagerDuty, etc. is
+on whatever the operator points the URL at.
 
 Scope, stated honestly: this gates **entry to a node**, not individual
 tool calls. The reviewer approves the input about to be handed to a

@@ -207,6 +207,18 @@ export const ApprovalConfig = z.object({
    * graph author explains what is actually about to happen.
    */
   instructions: z.string().max(2000).optional(),
+  /**
+   * Optional: a URL to POST when this gate trips, since `run_awaiting_approval`
+   * is otherwise WebSocket-only and reaches nobody unless a browser tab
+   * happens to be open — exactly the scheduled/webhook-triggered runs a
+   * gate matters most for. Best-effort: delivery failures never affect
+   * the run, which is already correctly paused regardless of whether
+   * anyone was told. Must sit under an operator-configured prefix (see
+   * ALLOWED_NOTIFICATION_WEBHOOKS) — re-checked at save time AND at
+   * delivery time, same "config is a save-time convenience, not the
+   * security boundary" pattern httpEndpoints/mcpServers/sshTarget follow.
+   */
+  notifyWebhookUrl: z.string().url().max(2048).optional(),
 });
 export type ApprovalConfig = z.infer<typeof ApprovalConfig>;
 

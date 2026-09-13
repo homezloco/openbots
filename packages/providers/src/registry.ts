@@ -360,6 +360,18 @@ const adapters: Record<ProviderId, ProviderAdapter> = {
         baseURL: creds.baseURL || "https://openrouter.ai/api/v1",
         fetch: openRouterCachingFetch(modelId),
         convertUsage: convertOpenRouterUsage,
+        // Defaults to false in @ai-sdk/openai-compatible, which makes
+        // generateObject silently drop the JSON schema (response_format:
+        // {type: "json_object"}, no schema attached) instead of requesting
+        // OpenRouter's real structured-outputs mode (response_format:
+        // {type: "json_schema", ...}) — the model then has nothing to
+        // conform to and generateObject fails to parse its output. Found
+        // via quick-add/generateGraph.ts both failing identically against
+        // OpenRouter with "No object generated: could not parse the
+        // response" and an AI SDK warning naming this exact flag.
+        // OpenRouter documents real support for response_format:
+        // json_schema; this was never opted into.
+        supportsStructuredOutputs: true,
       }).chatModel(modelId),
   },
   "openai-compatible": {

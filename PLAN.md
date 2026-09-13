@@ -1156,23 +1156,43 @@ A new `generateStructuredWithFallback()` helper (`generateStructured.ts`)
 closes the "configurable chain for the prompting" half: quick-add and
 `/graphs/generate` now try `pickEnvProvider()`'s pick, then the caller's
 fallback chain, then every other env-configured provider, instead of
-giving up after one hard pick. **Caveat, found live**: this mechanically
-works (confirmed via API logs — it walks candidates in the right order),
-but doesn't fully recover in every environment, because OpenRouter's
-`anthropic/claude-sonnet-4` (the default `DEFAULT_MODELS.openrouter` pick,
-and the model quick-add's own earlier parity test already found doesn't
-support `generateObject`'s `structuredOutputs` mode) fails the SAME way
-regardless of which position it's tried in — it's not a transient/auth
-failure a retry can route around, it's a structural incompatibility with
-this specific generation mechanism. So a chain of [depleted Anthropic key,
-OpenRouter] doesn't actually recover; a chain including a provider/model
-that genuinely supports `generateObject` (e.g. a real OpenAI key, or a
-different OpenRouter model) does. Real follow-up, scoped now rather than
-just flagged: either default `DEFAULT_MODELS.openrouter` to a
-structured-output-capable model, or pass OpenRouter's own
-`structuredOutputs` provider option through `getModel()` — a
-`packages/providers/src/registry.ts` change, not a `generateStructured.ts`
-one, since the retry mechanism itself is already correct.
+giving up after one hard pick. Confirmed mechanically correct via added
+diagnostic logging (`console.warn` per failed candidate, server-side only
+— found this was a real blind spot: without it, only the LAST candidate's
+error ever surfaced, hiding what actually happened to the earlier ones)
+— a real run walks anthropic → openrouter → openai-compatible in order,
+exactly as designed.
+
+**Caveat, investigated further, root cause narrowed but not fully
+closed.** `registry.ts`'s openrouter adapter was missing
+`supportsStructuredOutputs: true` on its `createOpenAICompatible({...})`
+call — it defaults to `false` in `@ai-sdk/openai-compatible`, which
+silently drops the JSON schema entirely (`response_format: {type:
+"json_object"}`, no schema attached) instead of requesting OpenRouter's
+real structured-outputs mode, with only a console warning as a symptom.
+Added the flag. Confirmed via logs this genuinely changes client
+behavior — the warning is gone, and the schema is now actually sent.
+**But it did not fix the failure**: `anthropic/claude-sonnet-4` via
+OpenRouter still returns output `generateObject` can't parse against the
+schema, warning-free. So the client-side bug (real, now fixed) was not
+the whole story — there's a deeper OpenRouter/Anthropic translation-layer
+issue this session didn't have OpenRouter's own documentation in hand to
+fully diagnose (Anthropic's native API has no `response_format` concept
+at all; whether OpenRouter's translation honors a forced JSON schema
+faithfully for Anthropic-family models specifically is the open
+question). The `supportsStructuredOutputs: true` fix is a genuine,
+verified improvement (a real bug, and likely fixes this for OpenRouter
+model choices with more native OpenAI-shaped structured-output support)
+but is not sufficient alone for this specific model. Two remaining paths,
+neither taken yet: default `DEFAULT_MODELS.openrouter` to a model with
+better-verified structured-output support via OpenRouter (a broader
+change — that default is used for every OpenRouter node, not just
+generation), or research OpenRouter's actual structured-outputs
+requirements directly against their docs rather than inferring from
+client-side symptoms alone. In the meantime, the most reliable fix for
+an operator hitting this is what actually unblocked the rest of this
+session: top up the primary provider's real credits so it succeeds
+without ever needing the fallback chain at all.
 
 ### MCP marketplace/registry landscape for the "bet on MCP" plan (researched 2026-09-11)
 

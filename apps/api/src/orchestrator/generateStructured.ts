@@ -47,6 +47,13 @@ export async function generateStructuredWithFallback<S extends z.ZodTypeAny>(
       return { object: result.object, provider: candidate.provider, model: candidate.model };
     } catch (err) {
       lastError = err;
+      // Server-side only — the client still just sees the final error, but
+      // without this an operator has no way to tell WHICH candidate(s)
+      // failed and why, since only the last one ever reaches the response.
+      // Found this blind spot immediately: after fixing one root cause,
+      // the next failure in the chain was invisible until this was added.
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[generateStructuredWithFallback] ${candidate.provider}/${candidate.model} failed: ${message}`);
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Generation failed on every configured provider");

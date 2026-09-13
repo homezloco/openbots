@@ -317,6 +317,72 @@ async function main() {
     assert(owner.status === 200, `expected 200 for owner, got ${owner.status}`);
   });
 
+  // --- Structural ambiguity detection (resolve.ts::matchAutoEdge) ---
+  // The mock provider echoes the input back as the router's output, which
+  // makes the router's exact wording controllable — the only way to test
+  // these paths deterministically. Real-model coverage of the same
+  // behaviour is inherently flaky; this is the point of the mock tier.
+  async function ambiguityGraph(name: string) {
+    const g = await createGraph(name);
+    const router = await createNode(g.id, mockNode({ name: "Router", role: "router" }));
+    const billing = await createNode(
+      g.id,
+      mockNode({ name: "Billing Specialist", description: "invoices, payments, refunds" }),
+    );
+    const tech = await createNode(
+      g.id,
+      mockNode({ name: "Technical Specialist", description: "bugs, crashes, errors" }),
+    );
+    await createEdge(g.id, router.id, billing.id, "auto");
+    await createEdge(g.id, router.id, tech.id, "auto");
+    await setEntry(g.id, router.id);
+    return { g, router, billing, tech };
+  }
+
+  await test("auto-routing: a clarifying question naming two specialists does not silently route", async () => {
+    const { g, router } = await ambiguityGraph("Mock: ambiguity two names");
+    // Mirrors a real Gemma 4 E4B output: correct judgement (it asked),
+    // wrong protocol (no UNKNOWN prefix). Before the structural check this
+    // keyword-matched "Billing Specialist" and threw the question away.
+    const runId = await startRun(
+      g.id,
+      "Is this about your invoice (Billing Specialist) or a crash (Technical Specialist)?",
+    );
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 1, `expected the question to end the run, got ${hops.length} hops`);
+    assert(hops[0].nodeId === router.id, "the router's own question should be the answer");
+  });
+
+  await test("auto-routing: a trailing question naming nobody does not tie-break into a target", async () => {
+    const { g, router } = await ambiguityGraph("Mock: ambiguity no names");
+    // "Specialist" is a token both targets share, so scoring alone would
+    // tie and pick one arbitrarily by priority.
+    const runId = await startRun(g.id, "Which specialist should handle this?");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 1, `expected the question to end the run, got ${hops.length} hops`);
+    assert(hops[0].nodeId === router.id, "the router's own question should be the answer");
+  });
+
+  await test("auto-routing: a decisive answer mentioning a second specialist still routes", async () => {
+    const { g, billing } = await ambiguityGraph("Mock: decisive with contrast");
+    // Names both AND contains a question mark, but the question is not
+    // trailing and the sentence is a decision — the regression this fix
+    // most risked causing.
+    const runId = await startRun(
+      g.id,
+      "Is it a crash? No. This is the Billing Specialist's area, not the Technical Specialist's.",
+    );
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 2, `expected the run to route onward, got ${hops.length} hops`);
+    assert(hops[1].nodeId === billing.id, `expected Billing, got ${hops[1].nodeId}`);
+  });
+
   await test("transform node: template op interpolates {{input}} in an agent→transform pipeline", async () => {
     const g = await createGraph("Mock: transform template");
     const agent = await createNode(g.id, mockNode({ name: "Agent" }));

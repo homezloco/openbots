@@ -1504,6 +1504,54 @@ Anthropic route (a different one or two cases each run, no code
 connection). Don't read a single red run as a regression without
 checking which case failed.
 
+### Auto-routing no longer depends on the model obeying a convention (2026-09-13)
+
+Found by evaluating a local Gemma 4 E4B (4.5B effective, on a LAN box)
+in the ROUTER role, with zero-cost `mock` specialists downstream. It
+routed two clear requests perfectly — "Billing Specialist", "Technical
+Specialist", clean single-name outputs. On a deliberately vague request
+it did the *right* thing and asked a clarifying question naming both
+options — but phrased in plain prose, with no `UNKNOWN` prefix. The
+keyword scorer then matched "Billing" inside the router's own question
+and silently routed there, discarding the question entirely.
+
+That is precisely the bug the `UNKNOWN` sentinel was introduced to fix
+(see the auto-routing entries above) — reached by a different path. The
+sentinel fix assumed the model would *comply* with an injected
+convention. Frontier models mostly do; a 4B model often doesn't. The
+convention was load-bearing and nothing enforced it.
+
+Fixed structurally in `resolve.ts::matchAutoEdge`: **if the router's
+output ends with a question mark, there is no match.** If a router ends
+its turn asking, the question IS the answer the user needs to see;
+routing onward throws it away. This is model-agnostic — it needs no
+cooperation from the model at all.
+
+**The first attempt at this was wrong, and the test caught it.** It
+fired on "names 2+ candidates AND contains a question mark anywhere",
+which sounded reasonable but swallowed a legitimately decisive answer
+using a rhetorical lead-in ("Is it a crash? No. This is the Billing
+Specialist's area, not the Technical Specialist's."). A trailing `?` is
+the honest signal; a contained one is not. All three cases — ambiguous
+question naming two targets, trailing question naming none, and the
+decisive-with-rhetorical-question regression — are now deterministic
+mock-tier cases (17/17), since the mock provider echoes input and makes
+the router's exact wording controllable. Real-model coverage of this
+would be inherently flaky.
+
+**Also corrected while here**: the `openai-compatible` adapter declared
+`toolCalling: false`. Verified false against a real instance — Gemma 4
+E4B returns well-formed OpenAI-shape `tool_calls` over that exact
+route. Nothing reads the flag today, but it would have silently denied
+tools to capable local models once capability validation lands.
+
+**Practical upshot for cost**: small local models are viable for
+routers, aggregators, summarizers, and classification/extraction — the
+high-volume, low-judgement hops. They are not viable for write-capable
+engineering specialists (τ²-bench agentic tool use 57.5% vs 86.4% for
+the 31B) or anything needing long-context recall (MRCR v2 25.4%).
+Providers are per-node, so mixing needs no code change.
+
 **Known quirk documented while testing** (predates this work):
 `runs.output` is jsonb, so a string output that happens to be valid
 JSON text round-trips back as a parsed document (type change +

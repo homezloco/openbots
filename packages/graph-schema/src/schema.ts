@@ -158,7 +158,7 @@ export const HttpEndpoint = z.object({
     .string()
     .min(1)
     .max(100)
-    .regex(/^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+$/, "must be a valid HTTP header name")
+    .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, "must be a valid HTTP header name")
     .nullable()
     .optional(),
 });
@@ -212,6 +212,15 @@ export const AgentNode = z.object({
    * tools[] — see McpServer. Unset/empty means no MCP access.
    */
   mcpServers: z.array(McpServer).optional(),
+  /**
+   * Named REST endpoints this node may call, dual-gated with
+   * `"http_request"` in tools[] — see HttpEndpoint. Unset/empty means no
+   * HTTP access regardless of what's in `tools`. The model only ever
+   * supplies a slug from this list; it can never construct an arbitrary
+   * URL, and every baseUrl is re-checked against ALLOWED_HTTP_ENDPOINTS
+   * at hop time, not just at save time.
+   */
+  httpEndpoints: z.array(HttpEndpoint).optional(),
   position: CanvasPosition,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

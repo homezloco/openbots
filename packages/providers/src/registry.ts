@@ -364,7 +364,17 @@ const adapters: Record<ProviderId, ProviderAdapter> = {
   },
   "openai-compatible": {
     id: "openai-compatible",
-    capabilities: { streaming: true, toolCalling: false, vision: false, promptCaching: false },
+    // toolCalling reflects the PROTOCOL, not a guarantee about whichever
+    // endpoint an operator points this at — this adapter is generic by
+    // design, so no single value is true for every backend. It was
+    // `false`, which is now demonstrably wrong: a local Ollama serving
+    // Gemma 4 E4B returns well-formed OpenAI-shape `tool_calls` over this
+    // exact route (verified against a real instance). Nothing reads this
+    // flag today, but leaving it false would silently deny tools to
+    // capable local models the moment capability validation lands (see
+    // docs/adapters.md). An endpoint that doesn't support tools simply
+    // ignores the field, which is the failure mode this already had.
+    capabilities: { streaming: true, toolCalling: true, vision: false, promptCaching: false },
     getModel: (modelId, creds) => {
       if (!creds.baseURL) {
         throw new Error("openai-compatible provider requires baseURL");

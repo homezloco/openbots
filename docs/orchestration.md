@@ -123,6 +123,22 @@ in the same statement (`awaiting_approval` for approve;
 two reviewers racing each other means exactly one request's UPDATE
 matches and the loser gets a clear `409`, never a double-enqueued hop.
 
+That guard alone wasn't enough, and a mock-tier test caught the gap: a
+hop already in flight when `/cancel` lands finishes independently of the
+cancel request, and its own `runs.status` writes (`running` at hop
+start, `completed`/`error` at hop end, `advanceRun`'s move to the next
+node or to `awaiting_approval`) were unconditional — so a cancel that
+had *already succeeded* could be silently overwritten a moment later by
+the in-flight hop finishing normally, undoing the cancellation with no
+error anywhere. Every one of those writes in `engine.ts` is now itself
+conditioned on `ne(status, "cancelled")`, and skips its own downstream
+`publishRunEvent`/`recordRunFinished` when the row doesn't come back —
+the same "cancelled is sticky" invariant the endpoint's own guard
+already assumed, now actually enforced end to end. `completeRun()`
+factors the three identical "mark completed" call sites in `dispatchHop`
+into one place specifically so this guard can't be missed on a fourth
+one added later.
+
 **Audit trail**: every approve/cancel writes a `run_events` row
 (`status: "approved" | "cancelled"`, `input`: the original proposed
 input, `output: { decision, decidedBy, reason?, editedInput? }`) — the

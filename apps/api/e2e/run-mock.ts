@@ -795,6 +795,77 @@ async function main() {
     assert(/map target/.test(patch.body.error ?? ""), `expected a clear map-target error, got: ${JSON.stringify(patch.body)}`);
   });
 
+  // --- POST /runs/:id/cancel on a PLAIN (non-gated) run ---
+  // Everything above exercises /cancel via the approval-gate scenario
+  // (awaiting_approval). The endpoint is also documented to work on an
+  // ordinary pending/running run — same conditional UPDATE, same
+  // inArray(["awaiting_approval","pending","running"]), just a different
+  // matched status — so it's the same code path, not new logic. Two
+  // cases close that gap: one fully deterministic (the terminal guard),
+  // one that can't be, honestly, because the mock provider is too fast
+  // to GUARANTEE catching a plain run still pending/running (the same
+  // class of race this file's own header excludes from this tier — see
+  // "anything that depends on... a real timing race"). That one asserts
+  // the invariant that holds under EITHER outcome of the race instead of
+  // a single fixed one, so it stays deterministic-in-assertion even
+  // though which branch runs isn't.
+
+  await test("cancel: an already-completed run cannot be cancelled again", async () => {
+    const g = await createGraph("Mock: cancel already completed");
+    const n = await createNode(g.id, mockNode({ name: "Plain" }));
+    await setEntry(g.id, n.id);
+    const runId = await startRun(g.id, "hello");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+
+    const cancel = await api(`/runs/${runId}/cancel`, { method: "POST", body: JSON.stringify({}) });
+    assert(cancel.status === 409, `expected cancelling a completed run to be refused, got ${cancel.status} ${JSON.stringify(cancel.body)}`);
+
+    const after = await api(`/runs/${runId}`);
+    assert(after.body.status === "completed", "a refused cancel must not change the run's status");
+  });
+
+  await test("cancel: stops a plain (non-gated) run before it finishes, if it hasn't already", async () => {
+    const g = await createGraph("Mock: cancel plain run");
+    // A longer explicit chain gives a cancel fired immediately after
+    // creation, with no wait, a real chance to land before every hop
+    // finishes. Mock hops are too fast to guarantee that window every
+    // time, so this doesn't assert a single fixed outcome — it asserts
+    // whichever side of the race actually happened is internally
+    // consistent, which is true regardless of relative timing.
+    const nodes: any[] = [];
+    for (let i = 0; i < 6; i++) {
+      nodes.push(await createNode(g.id, mockNode({ name: `Hop${i}` })));
+    }
+    for (let i = 0; i < nodes.length - 1; i++) {
+      await createEdge(g.id, nodes[i].id, nodes[i + 1].id, "explicit");
+    }
+    await setEntry(g.id, nodes[0].id);
+
+    const runId = await startRun(g.id, "go");
+    const cancel = await api(`/runs/${runId}/cancel`, { method: "POST", body: JSON.stringify({ reason: "stop" }) });
+    const run = await waitForRunStatus(runId, ["completed", "error", "cancelled"]);
+
+    if (cancel.status === 200) {
+      // Won the race: the run must actually be cancelled, not silently
+      // finish anyway, and it must not have run the full chain.
+      assert(run.status === "cancelled", `cancel returned 200 but the run ended up ${run.status}`);
+      assert(
+        succeededEvents(run).length < nodes.length,
+        `a genuinely cancelled run should not have completed the whole ${nodes.length}-hop chain`,
+      );
+    } else {
+      // Lost the race to the mock's own speed: cancel must have failed
+      // because the run had already finished on its own, not for some
+      // other reason.
+      assert(cancel.status === 409, `expected 409 if the run beat cancel to the finish, got ${cancel.status} ${JSON.stringify(cancel.body)}`);
+      assert(
+        run.status === "completed" || run.status === "error",
+        `expected the run to have finished on its own when cancel lost the race, got ${run.status}`,
+      );
+    }
+  });
+
   await test("graph delete cascades cleanly", async () => {
     const g = await createGraph("Mock: delete me");
     const n = await createNode(g.id, mockNode({ name: "Doomed" }));

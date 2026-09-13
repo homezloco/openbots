@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { generateText, stepCountIs, type ModelMessage, type Tool } from "ai";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, ne } from "drizzle-orm";
 import {
   commitWorktreeChanges,
   ensureWorktree,
@@ -209,17 +209,31 @@ export async function advanceRun(
 ): Promise<void> {
   const nextNode = graph.nodes.find((n) => n.id === nextNodeId);
 
-  await db
+  // Guarded, not a plain write: a hop can still be finishing up after a
+  // concurrent /cancel already marked this run terminal (cancel's own
+  // conditional UPDATE only protects its own statement). Without this,
+  // the write below would silently resurrect a cancelled run by moving
+  // it onward — either enqueueing another hop or flipping it back to
+  // awaiting_approval. If the row doesn't come back, cancel won the
+  // race; there is nothing left to advance.
+  const [advanced] = await db
     .update(runs)
     .set({ currentNodeId: nextNodeId, input: nextInput, updatedAt: new Date() })
-    .where(eq(runs.id, runId));
+    .where(and(eq(runs.id, runId), ne(runs.status, "cancelled")))
+    .returning({ id: runs.id });
+  if (!advanced) return;
 
   if (!nextNode?.approvalConfig) {
     await enqueueHop(runId);
     return;
   }
 
-  await db.update(runs).set({ status: "awaiting_approval", updatedAt: new Date() }).where(eq(runs.id, runId));
+  const [gated] = await db
+    .update(runs)
+    .set({ status: "awaiting_approval", updatedAt: new Date() })
+    .where(and(eq(runs.id, runId), ne(runs.status, "cancelled")))
+    .returning({ id: runs.id });
+  if (!gated) return;
   publishRunEvent({
     runId,
     graphId: graph.id,
@@ -230,6 +244,24 @@ export async function advanceRun(
       pendingInput: nextInput,
     },
   });
+}
+
+/**
+ * Marks a run completed — guarded the same way as advanceRun's writes,
+ * since this is reached from the tail end of a hop that may have started
+ * before a concurrent /cancel landed. Three call sites in dispatchHop
+ * used to each repeat this write unguarded; factored out so the guard
+ * can't be missed on one of them.
+ */
+async function completeRun(runId: string, graphId: string, output: unknown, createdAt: Date): Promise<void> {
+  const [updated] = await db
+    .update(runs)
+    .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(runs.id, runId), ne(runs.status, "cancelled")))
+    .returning({ id: runs.id });
+  if (!updated) return;
+  publishRunEvent({ runId, graphId, type: "run_completed", payload: { output } });
+  recordRunFinished({ runId, graphId, status: "completed", createdAt });
 }
 
 /**
@@ -266,7 +298,18 @@ export async function dispatchHop(runId: string): Promise<void> {
   const node = graph.nodes.find((n) => n.id === run.currentNodeId);
   if (!node) throw new Error(`Node ${run.currentNodeId} not found in graph ${graph.id}`);
 
-  await db.update(runs).set({ status: "running" }).where(eq(runs.id, runId));
+  // Guarded: a /cancel can land in the window between the terminal-status
+  // read above and this write. Unguarded, this would resurrect an
+  // already-cancelled run back into "running" and dispatch the hop
+  // anyway — exactly the resurrection this whole family of guards exists
+  // to prevent (see advanceRun). No row back means cancel won; skip the
+  // hop entirely rather than call the model for a run that's already over.
+  const [started] = await db
+    .update(runs)
+    .set({ status: "running" })
+    .where(and(eq(runs.id, runId), ne(runs.status, "cancelled")))
+    .returning({ id: runs.id });
+  if (!started) return;
 
   const sequence = await nextSequence(runId);
   const startedAt = new Date();
@@ -307,10 +350,16 @@ export async function dispatchHop(runId: string): Promise<void> {
       startedAt,
       finishedAt: new Date(),
     });
-    await db.update(runs).set({ status: "error", updatedAt: new Date() }).where(eq(runs.id, runId));
-    publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: node.id, payload: { error } });
     finishHopSpan(hopSpan, { ok: false, error });
-    recordRunFinished({ runId, graphId: graph.id, status: "error", createdAt: run.createdAt });
+    const [failed] = await db
+      .update(runs)
+      .set({ status: "error", updatedAt: new Date() })
+      .where(and(eq(runs.id, runId), ne(runs.status, "cancelled")))
+      .returning({ id: runs.id });
+    if (failed) {
+      publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: node.id, payload: { error } });
+      recordRunFinished({ runId, graphId: graph.id, status: "error", createdAt: run.createdAt });
+    }
     return;
   }
 
@@ -409,12 +458,7 @@ export async function dispatchHop(runId: string): Promise<void> {
       finishedAt: new Date(),
     });
     publishRunEvent({ runId, graphId: graphNow.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
-    await db
-      .update(runs)
-      .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
-      .where(eq(runs.id, runId));
-    publishRunEvent({ runId, graphId: graphNow.id, type: "run_completed", payload: { output } });
-    recordRunFinished({ runId, graphId: graphNow.id, status: "completed", createdAt: run.createdAt });
+    await completeRun(runId, graphNow.id, output, run.createdAt);
     return;
   }
 
@@ -441,12 +485,7 @@ export async function dispatchHop(runId: string): Promise<void> {
   });
 
   if (!nextNodeId) {
-    await db
-      .update(runs)
-      .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
-      .where(eq(runs.id, runId));
-    publishRunEvent({ runId, graphId: graph.id, type: "run_completed", payload: { output } });
-    recordRunFinished({ runId, graphId: graph.id, status: "completed", createdAt: run.createdAt });
+    await completeRun(runId, graph.id, output, run.createdAt);
     return;
   }
 
@@ -456,12 +495,7 @@ export async function dispatchHop(runId: string): Promise<void> {
     .where(and(eq(runEvents.runId, runId), eq(runEvents.nodeId, nextNodeId), eq(runEvents.status, "succeeded")))
     .limit(1);
   if (alreadyVisited) {
-    await db
-      .update(runs)
-      .set({ status: "completed", output, completedAt: new Date(), updatedAt: new Date() })
-      .where(eq(runs.id, runId));
-    publishRunEvent({ runId, graphId: graph.id, type: "run_completed", payload: { output } });
-    recordRunFinished({ runId, graphId: graph.id, status: "completed", createdAt: run.createdAt });
+    await completeRun(runId, graph.id, output, run.createdAt);
     return;
   }
 
@@ -600,21 +634,27 @@ async function dispatchConsensus(
   // synthesize from, so this really is a run-level error, not a partial one.
   if (succeeded.length === 0) {
     await db.update(fanoutBatches).set({ status: "error" }).where(eq(fanoutBatches.id, batch.id));
-    await db.update(runs).set({ status: "error", updatedAt: new Date() }).where(eq(runs.id, runId));
-    publishRunEvent({
-      runId,
-      graphId: graph.id,
-      type: "hop_failed",
-      nodeId: sourceNode.id,
-      payload: { error: `${failedCount}/${branches.length} consensus branches failed` },
-    });
-    const runRow = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
-    recordRunFinished({
-      runId,
-      graphId: graph.id,
-      status: "error",
-      createdAt: runRow?.createdAt ?? new Date(),
-    });
+    const [failed] = await db
+      .update(runs)
+      .set({ status: "error", updatedAt: new Date() })
+      .where(and(eq(runs.id, runId), ne(runs.status, "cancelled")))
+      .returning({ id: runs.id });
+    if (failed) {
+      publishRunEvent({
+        runId,
+        graphId: graph.id,
+        type: "hop_failed",
+        nodeId: sourceNode.id,
+        payload: { error: `${failedCount}/${branches.length} consensus branches failed` },
+      });
+      const runRow = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
+      recordRunFinished({
+        runId,
+        graphId: graph.id,
+        status: "error",
+        createdAt: runRow?.createdAt ?? new Date(),
+      });
+    }
     return;
   }
 
@@ -747,7 +787,8 @@ async function dispatchMap(
   const targetNode = graph.nodes.find((n) => n.id === config.targetNodeId);
   const maxItems = config.maxItems ?? DEFAULT_MAP_MAX_ITEMS;
 
-  const fail = async (error: string) => {
+  /** Returns whether the runs row was actually marked error (false if a concurrent /cancel already terminated it). */
+  const fail = async (error: string): Promise<boolean> => {
     await db.insert(runEvents).values({
       runId,
       nodeId: sourceNode.id,
@@ -757,8 +798,15 @@ async function dispatchMap(
       startedAt: new Date(),
       finishedAt: new Date(),
     });
-    await db.update(runs).set({ status: "error", updatedAt: new Date() }).where(eq(runs.id, runId));
-    publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: sourceNode.id, payload: { error } });
+    const [failed] = await db
+      .update(runs)
+      .set({ status: "error", updatedAt: new Date() })
+      .where(and(eq(runs.id, runId), ne(runs.status, "cancelled")))
+      .returning({ id: runs.id });
+    if (failed) {
+      publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: sourceNode.id, payload: { error } });
+    }
+    return Boolean(failed);
   };
 
   if (!targetNode) {
@@ -872,9 +920,11 @@ async function dispatchMap(
 
   if (succeeded.length === 0) {
     await db.update(fanoutBatches).set({ status: "error" }).where(eq(fanoutBatches.id, batch.id));
-    await fail(`All ${items.length} map branches failed`);
-    const runRow = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
-    recordRunFinished({ runId, graphId: graph.id, status: "error", createdAt: runRow?.createdAt ?? new Date() });
+    const failed = await fail(`All ${items.length} map branches failed`);
+    if (failed) {
+      const runRow = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
+      recordRunFinished({ runId, graphId: graph.id, status: "error", createdAt: runRow?.createdAt ?? new Date() });
+    }
     return;
   }
 

@@ -1618,6 +1618,48 @@ where a gate matters most, nobody is watching it fire — in practice a
 paused run is found by checking the runs list. Email/webhook
 notification is the obvious follow-up; see "Known gaps" below.
 
+## Approve/cancel canvas UI, and a real cancel race found by the follow-up test (2026-09-13)
+
+Shipped the UI the previous entry's API had none of: a checkbox +
+instructions field in `AgentSettingsForm` to set `approvalConfig`, a
+lock icon and a persistent pulsing highlight on a gated node
+(`HierarchyCanvas.tsx`), and a banner — live via `run_awaiting_approval`
+— with an editable input and Approve/Cancel actions. Since
+`HierarchyCanvas` backs both the standalone `/hierarchy` editor and the
+dashboard's embedded team chat, both got it in one change. Verified live
+against the real stack, not just typecheck/build: watched the banner
+and highlight appear on a real run, approved with an edited input and
+confirmed the audit trail recorded it, and confirmed the edit actually
+reached the model (OpenRouter, `anthropic/claude-sonnet-4` — the local
+Anthropic key had run out of credit) with a real completed run.
+
+**A follow-up mock-tier test then found a genuine bug in the shipped
+gate.** The original 8 cases all exercised `/cancel` via the gate
+(`awaiting_approval`) path; nothing tested it on a *plain* pending/
+running run, which the endpoint is equally documented to support. A new
+test fired `/cancel` immediately after starting a 6-hop chain with no
+wait, and on the second CI-style run it failed: `/cancel` returned `200`
+but the run's final status was `completed` anyway. Root cause: every
+`runs.status` write inside `dispatchHop`/`dispatchConsensus`/
+`dispatchMap`/`advanceRun` was a plain unconditional `UPDATE` — a hop
+already in flight when cancel landed would finish independently and
+overwrite `"cancelled"` with `"running"`/`"completed"`/`"error"`/
+`"awaiting_approval"` on its way out, silently undoing the cancellation
+with no error anywhere. Fixed by conditioning every one of those writes
+on `ne(status, "cancelled")` and skipping the write's own downstream
+event/telemetry when the row doesn't come back — the exact same
+"cancelled is sticky" guarantee the `/cancel` endpoint's own conditional
+UPDATE already assumed callers could rely on, now actually true. Three
+duplicated "mark completed" call sites were factored into one
+`completeRun()` helper specifically so this guard can't be missed on a
+future fourth one. Since the bug is a genuine race, the new test asserts
+the invariant that holds under either outcome (cancel wins → run
+`cancelled` with fewer than 6 succeeded hops; run wins → cancel gets a
+`409` and the run is genuinely `completed`/`error`) rather than a single
+fixed one — 5/5 stress runs after the fix landed cancel-wins every time,
+consistent with mock hops being fast but not literally zero-latency
+against two back-to-back local HTTP calls.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

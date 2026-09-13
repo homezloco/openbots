@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { AgentRole, ConsensusGroup, FallbackTarget, HttpEndpoint, McpServer, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
+import { AgentRole, ConsensusGroup, FallbackTarget, HttpEndpoint, MapConfig, McpServer, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
 import { agentGraphs, agentNodes, routingEdges } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
@@ -56,6 +56,9 @@ export const createNodeBody = z.object({
   // .nullable() for the same reason as mcpServers — PATCH must be able to
   // revoke a node's HTTP endpoints, not just replace them.
   httpEndpoints: z.array(HttpEndpoint).nullable().optional(),
+  // .nullable() so PATCH can turn a map source back into a plain node,
+  // same reason as consensusGroup.
+  mapConfig: MapConfig.nullable().optional(),
   position: z.object({ x: z.number(), y: z.number() }),
 });
 
@@ -96,6 +99,7 @@ export async function insertAgentNode(graphId: string, body: CreateNodeBody) {
       sshTarget: body.sshTarget ?? null,
       mcpServers: body.mcpServers ?? null,
       httpEndpoints: body.httpEndpoints ?? null,
+      mapConfig: body.mapConfig ?? null,
       positionX: body.position.x,
       positionY: body.position.y,
     })

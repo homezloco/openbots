@@ -303,6 +303,31 @@ export async function dispatchHop(runId: string): Promise<void> {
     }
   }
 
+  // Dynamic fan-out: this node's output IS the work list. Checked before
+  // normal routing for the same reason consensus is — a map source's next
+  // hop is N copies of one node, not one edge.
+  if (nodeNow.mapConfig) {
+    const items = parseMapItems(output);
+    if (items.length > 0) {
+      await db.insert(runEvents).values({
+        runId,
+        nodeId: node.id,
+        sequence,
+        status: "succeeded",
+        input: run.input,
+        output,
+        startedAt,
+        finishedAt: new Date(),
+      });
+      publishRunEvent({ runId, graphId: graphNow.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
+      await dispatchMap(runId, graphNow, nodeNow, items);
+      return;
+    }
+    // An empty or unparseable list is NOT an error: "no candidates today"
+    // is a legitimate outcome for a scheduled map. Fall through to normal
+    // routing so the source's own output becomes the answer.
+  }
+
   // Aggregator output is the answer. Its outgoing auto edges (if any)
   // are a cycle back into the specialists it just joined.
   if (aggregatorNodeIds(graphNow).has(nodeNow.id)) {
@@ -562,6 +587,255 @@ async function dispatchConsensus(
   await db
     .update(runs)
     .set({ currentNodeId: group.aggregatorNodeId, input: branchOutputs, updatedAt: new Date() })
+    .where(eq(runs.id, runId));
+  await enqueueHop(runId);
+}
+
+/** Default parallel branches for a map. Low on purpose: each branch is a full model call, and N is runtime-determined. */
+const DEFAULT_MAP_CONCURRENCY = 4;
+const DEFAULT_MAP_MAX_ITEMS = 50;
+
+/**
+ * Pulls the work list out of a hop's output. Accepts a bare JSON array or
+ * one embedded in prose, since the source is usually a model that wrapped
+ * its array in a sentence — the same leniency `transform`'s extract-json
+ * op provides, for the same reason.
+ *
+ * Returns [] rather than throwing for anything unparseable: "no items"
+ * must stay a normal outcome, not a run failure (a nightly map over "new
+ * candidates" legitimately finds none most days).
+ */
+export function parseMapItems(output: unknown): unknown[] {
+  if (Array.isArray(output)) return output;
+  if (typeof output !== "string") return [];
+  const direct = tryParseArray(output);
+  if (direct) return direct;
+  const start = output.indexOf("[");
+  if (start === -1) return [];
+  let depth = 0;
+  for (let i = start; i < output.length; i++) {
+    if (output[i] === "[") depth++;
+    else if (output[i] === "]") {
+      depth--;
+      if (depth === 0) return tryParseArray(output.slice(start, i + 1)) ?? [];
+    }
+  }
+  return [];
+}
+
+function tryParseArray(text: string): unknown[] | null {
+  try {
+    const parsed = JSON.parse(text.trim());
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Runs tasks with at most `limit` in flight, preserving result order. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  task: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      try {
+        results[index] = { status: "fulfilled", value: await task(items[index], index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Dynamic fan-out: run ONE target node once per runtime item, then hand
+ * every result to the aggregator. Distinct from dispatchConsensus, which
+ * fans out to N DIFFERENT nodes chosen when the graph was authored — here
+ * the branch COUNT comes from data, which is the whole point and also the
+ * whole risk.
+ *
+ * Reuses `fanout_batches` for the join deliberately. Researching how other
+ * engines do this, the fan-in is consistently where they break: a plain
+ * edge into an aggregator fires on the FIRST branch to arrive (reducing
+ * over partial data, often repeatedly), and LangGraph's `defer=true` fix
+ * is a queue-drain barrier rather than a dependency resolver — it has open
+ * bugs where an aggregator with mixed ancestry runs early, or twice.
+ * OpenBots avoids that class entirely because the batch row records
+ * `totalBranches` up front and the aggregator is dispatched exactly once,
+ * from here, after every branch settles. A counted barrier beats a
+ * timing-based one.
+ *
+ * Bounded concurrency is not optional here the way it arguably is for
+ * consensus: N is model- or data-determined, so an unbounded map over a
+ * long list would fire that many concurrent model calls from one worker
+ * slot and blow through both rate limits and the hop budget.
+ */
+async function dispatchMap(
+  runId: string,
+  graph: AgentGraph,
+  sourceNode: AgentNode,
+  items: unknown[],
+): Promise<void> {
+  const config = sourceNode.mapConfig!;
+  const targetNode = graph.nodes.find((n) => n.id === config.targetNodeId);
+  const maxItems = config.maxItems ?? DEFAULT_MAP_MAX_ITEMS;
+
+  const fail = async (error: string) => {
+    await db.insert(runEvents).values({
+      runId,
+      nodeId: sourceNode.id,
+      sequence: await nextSequence(runId),
+      status: "failed",
+      error,
+      startedAt: new Date(),
+      finishedAt: new Date(),
+    });
+    await db.update(runs).set({ status: "error", updatedAt: new Date() }).where(eq(runs.id, runId));
+    publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: sourceNode.id, payload: { error } });
+  };
+
+  if (!targetNode) {
+    await fail(`Map target node ${config.targetNodeId} not found in graph ${graph.id}`);
+    return;
+  }
+  if (items.length > maxItems) {
+    // Refuse rather than silently truncating: quietly processing 50 of 300
+    // candidates and reporting success is worse than a clear stop.
+    await fail(`Map produced ${items.length} items, above this node's limit of ${maxItems}.`);
+    return;
+  }
+
+  const [batch] = await db
+    .insert(fanoutBatches)
+    .values({
+      runId,
+      aggregatorNodeId: config.aggregatorNodeId,
+      totalBranches: items.length,
+      status: "pending",
+    })
+    .returning();
+
+  const baseSequence = await nextSequence(runId);
+  const concurrency = config.maxConcurrency ?? DEFAULT_MAP_CONCURRENCY;
+
+  const settled = await mapWithConcurrency(items, concurrency, async (item, index) => {
+    const sequence = baseSequence + index;
+    const startedAt = new Date();
+    const hopSpan = startHopSpan({
+      runId,
+      graphId: graph.id,
+      nodeId: targetNode.id,
+      nodeName: targetNode.name,
+      sequence,
+      startTime: startedAt,
+    });
+    publishRunEvent({ runId, graphId: graph.id, type: "hop_dispatched", nodeId: targetNode.id });
+
+    // Each branch's input is ITS OWN item, not the shared source output —
+    // that difference from consensus is the entire feature.
+    const branchInput = typeof item === "string" ? item : JSON.stringify(item);
+    try {
+      const branchTimeoutMs = hopTimeoutMsFor(targetNode);
+      const result = await withNodeTimeout(
+        targetNode.id,
+        () =>
+          callAgent(
+            targetNode,
+            branchInput,
+            runId,
+            getAutoRoutingTargets(graph, targetNode.id),
+            graph.ownerId,
+            startedAt.getTime() + branchTimeoutMs,
+          ),
+        branchTimeoutMs,
+      );
+      await recordUsage(runId, targetNode.id, result);
+      finishHopSpan(hopSpan, {
+        ok: true,
+        provider: result.provider,
+        model: result.model,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        outputChars: result.text.length,
+      });
+      await db.insert(runEvents).values({
+        runId,
+        nodeId: targetNode.id,
+        sequence,
+        status: "succeeded",
+        fanoutBatchId: batch.id,
+        input: branchInput,
+        output: result.text,
+        startedAt,
+        finishedAt: new Date(),
+      });
+      publishRunEvent({
+        runId,
+        graphId: graph.id,
+        type: "hop_succeeded",
+        nodeId: targetNode.id,
+        payload: { output: result.text },
+      });
+      return { item, output: result.text };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      await db.insert(runEvents).values({
+        runId,
+        nodeId: targetNode.id,
+        sequence,
+        status: "failed",
+        fanoutBatchId: batch.id,
+        input: branchInput,
+        error,
+        startedAt,
+        finishedAt: new Date(),
+      });
+      publishRunEvent({ runId, graphId: graph.id, type: "hop_failed", nodeId: targetNode.id, payload: { error } });
+      finishHopSpan(hopSpan, { ok: false, error });
+      throw err;
+    }
+  });
+
+  // Same partial-failure stance as consensus: one bad item must not
+  // discard every good result. Only a total wipeout fails the run.
+  const succeeded = settled.filter(
+    (r): r is PromiseFulfilledResult<{ item: unknown; output: string }> => r.status === "fulfilled",
+  );
+  const failedCount = settled.length - succeeded.length;
+
+  if (succeeded.length === 0) {
+    await db.update(fanoutBatches).set({ status: "error" }).where(eq(fanoutBatches.id, batch.id));
+    await fail(`All ${items.length} map branches failed`);
+    const runRow = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
+    recordRunFinished({ runId, graphId: graph.id, status: "error", createdAt: runRow?.createdAt ?? new Date() });
+    return;
+  }
+
+  const branchOutputs = settled.map((r, i) =>
+    r.status === "fulfilled"
+      ? { item: items[i], output: r.value.output }
+      : {
+          item: items[i],
+          output: `[This item failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}]`,
+        },
+  );
+
+  await db
+    .update(fanoutBatches)
+    .set({ completedBranches: succeeded.length, status: failedCount > 0 ? "partial" : "completed" })
+    .where(eq(fanoutBatches.id, batch.id));
+
+  await db
+    .update(runs)
+    .set({ currentNodeId: config.aggregatorNodeId, input: branchOutputs, updatedAt: new Date() })
     .where(eq(runs.id, runId));
   await enqueueHop(runId);
 }
@@ -1190,6 +1464,7 @@ export function nodeRowToAgentNode(n: typeof agentNodes.$inferSelect): AgentNode
     sshTarget: (n.sshTarget as AgentNode["sshTarget"]) ?? undefined,
     mcpServers: (n.mcpServers as AgentNode["mcpServers"]) ?? undefined,
     httpEndpoints: (n.httpEndpoints as AgentNode["httpEndpoints"]) ?? undefined,
+    mapConfig: (n.mapConfig as AgentNode["mapConfig"]) ?? undefined,
     position: { x: n.positionX, y: n.positionY },
     createdAt: n.createdAt.toISOString(),
     updatedAt: n.updatedAt.toISOString(),

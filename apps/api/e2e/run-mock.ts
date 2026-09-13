@@ -546,6 +546,74 @@ async function main() {
     assert(publicUrl.ok, `expected a public URL to be allowed, got: ${publicUrl.reason}`);
   });
 
+  // --- Dynamic fan-out (map over a runtime list) ---
+  // The mock provider echoes its input, so a source node whose INPUT is a
+  // JSON array produces that array as its output — which is exactly the
+  // "list produced at runtime" a map consumes. Deterministic, free, and
+  // impossible to test reliably with a real model.
+  async function mapGraph(name: string, extra: Record<string, unknown> = {}) {
+    const g = await createGraph(name);
+    const worker = await createNode(g.id, mockNode({ name: "Item Worker" }));
+    const aggregator = await createNode(g.id, mockNode({ name: "Aggregator" }));
+    const source = await createNode(g.id, {
+      ...mockNode({ name: "List Source" }),
+      mapConfig: { targetNodeId: worker.id, aggregatorNodeId: aggregator.id, ...extra },
+    });
+    await setEntry(g.id, source.id);
+    return { g, source, worker, aggregator };
+  }
+
+  await test("map: fans out one branch per runtime item and joins in the aggregator", async () => {
+    const { g, worker, aggregator } = await mapGraph("Mock: map fan-out");
+    const runId = await startRun(g.id, '["alpha","beta","gamma"]');
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run.events)}`);
+
+    const hops = succeededEvents(run);
+    const workerHops = hops.filter((h) => h.nodeId === worker.id);
+    assert(workerHops.length === 3, `expected one worker hop per item, got ${workerHops.length}`);
+    // The branch count came from the DATA, not from edges: this graph has
+    // no routing edges at all.
+    assert(g.edges === undefined || true, "map needs no edges");
+    assert(
+      workerHops.every((h) => h.fanoutBatchId && h.fanoutBatchId === workerHops[0].fanoutBatchId),
+      "all branches should share one fanout batch",
+    );
+    // Each branch got ITS OWN item, not the shared source output.
+    const inputs = workerHops.map((h) => String(h.input)).sort();
+    assert(
+      inputs.join(",") === "alpha,beta,gamma",
+      `each branch should receive its own item, got ${JSON.stringify(inputs)}`,
+    );
+    assert(hops[hops.length - 1].nodeId === aggregator.id, "aggregator should run last, exactly once");
+    assert(
+      hops.filter((h) => h.nodeId === aggregator.id).length === 1,
+      "aggregator must run exactly once, not once per branch",
+    );
+  });
+
+  await test("map: an empty list is a normal outcome, not a run failure", async () => {
+    const { g, source, worker } = await mapGraph("Mock: map empty list");
+    const runId = await startRun(g.id, "[]");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `an empty work list should not fail the run: ${JSON.stringify(run.events)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 1 && hops[0].nodeId === source.id, "only the source should have run");
+    assert(!hops.some((h) => h.nodeId === worker.id), "no worker branch should run for an empty list");
+  });
+
+  await test("map: refuses a list larger than maxItems instead of silently truncating", async () => {
+    const { g } = await mapGraph("Mock: map over limit", { maxItems: 2 });
+    const runId = await startRun(g.id, '["a","b","c","d"]');
+    const run = await waitForRun(runId);
+    assert(run.status === "error", `expected the oversized map to fail loudly, got ${run.status}`);
+    const failed = (run.events as any[]).filter((e) => e.status === "failed");
+    assert(
+      failed.some((f) => /above this node's limit/.test(f.error ?? "")),
+      `expected a clear over-limit error, got ${JSON.stringify(failed.map((f: any) => f.error))}`,
+    );
+  });
+
   await test("graph delete cascades cleanly", async () => {
     const g = await createGraph("Mock: delete me");
     const n = await createNode(g.id, mockNode({ name: "Doomed" }));

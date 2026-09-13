@@ -68,7 +68,7 @@ export function checkFileAccessRootAllowed(fileAccessRoot: string | null | undef
  * unlike read access, write access shouldn't keep working forever after
  * an operator tightens the allowlist post-creation.
  */
-function getAllowedWriteRoots(): string[] {
+export function getAllowedWriteRoots(): string[] {
   const raw = process.env.ALLOWED_FILE_WRITE_ROOTS;
   if (!raw) return [];
   return raw

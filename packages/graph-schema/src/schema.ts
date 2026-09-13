@@ -135,6 +135,35 @@ export const McpServer = z.object({
 });
 export type McpServer = z.infer<typeof McpServer>;
 
+/**
+ * One named REST endpoint this node may call via the http_request tool.
+ * Dual-gate with `\"http_request\"` in `tools[]`: this list alone grants
+ * nothing, and `\"http_request\"` without endpoints is a no-op. URLs are
+ * re-checked against the operator ALLOWED_HTTP_ENDPOINTS prefix allowlist
+ * at save AND at hop time (SSRF protection). Tokens live in user_credentials
+ * (credentialProvider), never in this object.
+ */
+export const HttpEndpoint = z.object({
+  slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/, "slug must be 1-32 lowercase letters, digits, or hyphens"),
+  baseUrl: z.string().url(),
+  credentialProvider: z.string().min(1).optional(),
+  // Unset = Authorization: Bearer <token> (the original/default behavior).
+  // Set = the raw token is sent under this header name instead, no
+  // "Bearer " prefix — covers the dominant non-OAuth vendor pattern
+  // (X-API-Key, api-key, etc.). .nullable() so PATCH can clear a
+  // previously-set header back to the default, same reason
+  // consensusGroup/sshTarget need .nullable().optional() rather than
+  // .optional() alone.
+  headerName: z
+    .string()
+    .min(1)
+    .max(100)
+    .regex(/^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+$/, "must be a valid HTTP header name")
+    .nullable()
+    .optional(),
+});
+export type HttpEndpoint = z.infer<typeof HttpEndpoint>;
+
 export const AgentNode = z.object({
   id: z.string().uuid(),
   graphId: z.string().uuid(),

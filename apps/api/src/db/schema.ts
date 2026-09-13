@@ -30,6 +30,7 @@ export const agentGraphs = pgTable("agent_graphs", {
   name: text("name").notNull(),
   description: text("description").notNull().default(""),
   ownerId: uuid("owner_id").references(() => users.id, { onDelete: "set null" }),
+  fallbackChain: jsonb("fallback_chain").notNull().default([]), // FallbackTarget[]
   entryNodeId: uuid("entry_node_id"),
   version: integer("version").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -1138,17 +1138,41 @@ onto a locked one-shot schema than a tool loop, so it stays out of scope
 (regenerate-from-scratch only) for the same reason it was already listed
 above. Data/file ingestion remains unstarted, as scoped above.
 
-**Known gap, found immediately in testing (2026-09-13)**: both this route
-and quick-add call `pickEnvProvider()` — a single hardcoded provider pick
-(anthropic → openai → xai → openrouter → openai-compatible) with **no
-fallback on failure**. Confirmed via direct parity testing: forcing both
-routes onto OpenRouter (`anthropic/claude-sonnet-4`, no `structuredOutputs`
-support in that path) made both fail identically ("No object generated:
-could not parse the response") with no retry attempted. A configurable,
-multi-provider fallback chain for this generation path specifically (not
-just the existing per-node `AgentNode.fallbackChain`, which already has UI
-in `AgentSettingsForm.tsx`) is a real, user-identified follow-up — scope
-separately.
+**Shipped 2026-09-13, with an honest caveat found in live verification.**
+`AgentGraph.fallbackChain` (new field) + `engine.ts::callAgent()`
+(`node.fallbackChain` when non-empty, else `graph.fallbackChain` — simple
+override, never merged) + a new "Graph settings" panel (the first UI for
+editing any graph-level property after creation — also picked up simple
+name/description editing for free) close the "each graph should have a
+configurable fallback chain" half of this. Verified live: set a graph's
+chain via the panel, confirmed it persists across reload, confirmed a real
+run against a node with a bad credential and no chain of its own falls
+through to the graph's target (new e2e case in `run.ts`, mirroring the
+existing per-node fallback test's proof pattern). This half is unaffected
+by the caveat below — real agent hops use `generateText`, not
+`generateObject`.
+
+A new `generateStructuredWithFallback()` helper (`generateStructured.ts`)
+closes the "configurable chain for the prompting" half: quick-add and
+`/graphs/generate` now try `pickEnvProvider()`'s pick, then the caller's
+fallback chain, then every other env-configured provider, instead of
+giving up after one hard pick. **Caveat, found live**: this mechanically
+works (confirmed via API logs — it walks candidates in the right order),
+but doesn't fully recover in every environment, because OpenRouter's
+`anthropic/claude-sonnet-4` (the default `DEFAULT_MODELS.openrouter` pick,
+and the model quick-add's own earlier parity test already found doesn't
+support `generateObject`'s `structuredOutputs` mode) fails the SAME way
+regardless of which position it's tried in — it's not a transient/auth
+failure a retry can route around, it's a structural incompatibility with
+this specific generation mechanism. So a chain of [depleted Anthropic key,
+OpenRouter] doesn't actually recover; a chain including a provider/model
+that genuinely supports `generateObject` (e.g. a real OpenAI key, or a
+different OpenRouter model) does. Real follow-up, scoped now rather than
+just flagged: either default `DEFAULT_MODELS.openrouter` to a
+structured-output-capable model, or pass OpenRouter's own
+`structuredOutputs` provider option through `getModel()` — a
+`packages/providers/src/registry.ts` change, not a `generateStructured.ts`
+one, since the retry mechanism itself is already correct.
 
 ### MCP marketplace/registry landscape for the "bet on MCP" plan (researched 2026-09-11)
 

@@ -86,12 +86,25 @@ function envConfigured(providerId: ProviderId): boolean {
  * extraction LLM) and the live-reroute example graph so an OpenAI- or
  * Ollama-only box isn't stuck on a hardcoded Anthropic path.
  */
+const ENV_PROVIDER_ORDER: ProviderId[] = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"];
+
 export function pickEnvProvider(): { provider: ProviderId; model: string } | null {
-  const order: ProviderId[] = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"];
-  for (const provider of order) {
+  for (const provider of ENV_PROVIDER_ORDER) {
     if (envConfigured(provider)) return { provider, model: DEFAULT_MODELS[provider] };
   }
   return null;
+}
+
+/**
+ * Every env-configured provider, in the same preference order
+ * pickEnvProvider uses internally — not just the first. Used by
+ * generateStructured.ts to retry a failed structured-generation call
+ * (e.g. a "present but exhausted-credits" key, which envConfigured alone
+ * can't detect) against whatever else the operator has configured, rather
+ * than giving up after a single hard pick.
+ */
+export function allEnvConfiguredProviders(): { provider: ProviderId; model: string }[] {
+  return ENV_PROVIDER_ORDER.filter(envConfigured).map((provider) => ({ provider, model: DEFAULT_MODELS[provider] }));
 }
 
 /** Exported for the standalone chat playground, which has no graph/node to scope a stored credential to. */

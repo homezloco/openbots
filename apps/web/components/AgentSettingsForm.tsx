@@ -16,6 +16,7 @@ import {
   type UserCredentialSummary,
 } from "../lib/api";
 import { PROVIDERS, ROLES } from "./HierarchyCanvas";
+import { FallbackChainEditor } from "./FallbackChainEditor";
 
 const TIERS: AgentNode["tier"][] = [undefined, "economy", "standard", "flagship"];
 const FILE_TOOLS = ["read_file", "list_directory", "search_knowledge"];
@@ -861,48 +862,7 @@ export function AgentSettingsForm({
         {showAdvanced ? "Hide" : "Show"} advanced (fallback chain)
       </button>
 
-      {showAdvanced && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {fallbackChain.map((f, i) => (
-            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <select
-                value={f.provider}
-                onChange={(e) => {
-                  const next = [...fallbackChain];
-                  next[i] = { ...next[i], provider: e.target.value as ProviderId };
-                  setFallbackChain(next);
-                }}
-              >
-                {PROVIDERS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-              <input
-                placeholder="model"
-                value={f.model}
-                onChange={(e) => {
-                  const next = [...fallbackChain];
-                  next[i] = { ...next[i], model: e.target.value };
-                  setFallbackChain(next);
-                }}
-                style={{ flex: 1 }}
-              />
-              <button type="button" onClick={() => setFallbackChain(fallbackChain.filter((_, j) => j !== i))}>
-                Remove
-              </button>
-            </div>
-          ))}
-          <button
-            type="button"
-            onClick={() => setFallbackChain([...fallbackChain, { provider: "anthropic", model: "" }])}
-            style={{ alignSelf: "flex-start" }}
-          >
-            + Add fallback
-          </button>
-        </div>
-      )}
+      {showAdvanced && <FallbackChainEditor value={fallbackChain} onChange={setFallbackChain} />}
 
       <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
         <button onClick={save} disabled={saving || deleting}>

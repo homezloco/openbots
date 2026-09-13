@@ -1,0 +1,1 @@
+ALTER TABLE "agent_graphs" ADD COLUMN "fallback_chain" jsonb DEFAULT '[]'::jsonb NOT NULL;

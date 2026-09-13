@@ -1,11 +1,13 @@
 import type { FastifyInstance } from "fastify";
-import { generateObject } from "ai";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { AgentRole, ProviderId } from "@openbots/graph-schema";
-import { getModel } from "@openbots/providers";
-import { defaultModelFor, getCredentialsFromEnv, pickEnvProvider } from "../orchestrator/credentials.js";
+import { defaultModelFor } from "../orchestrator/credentials.js";
+import { generateStructuredWithFallback } from "../orchestrator/generateStructured.js";
 import { requireAuth } from "../auth/middleware.js";
 import { requireGraphOwner } from "./graphs.js";
+import { db } from "../db/client.js";
+import { agentGraphs } from "../db/schema.js";
 import { insertAgentNode } from "../orchestrator/graphMutations.js";
 import { checkWriteRootAllowed, fileAccessRootSchema } from "../validation/fileAccessRoot.js";
 import { checkDispatchTargetsOwned } from "../validation/dispatchTargets.js";
@@ -48,10 +50,13 @@ const extractionSchema = z.object({
  * this is a UX layer on top of the existing API, not a separate creation
  * mechanism. See PLAN.md.
  *
- * The extraction LLM is whichever provider has an env key (Anthropic
- * first, then OpenAI / xAI / OpenRouter / openai-compatible). Hardcoding
- * Anthropic made "+ New bot" a red error string on an OpenAI- or
- * Ollama-only box.
+ * The extraction LLM tries whichever provider has an env key first
+ * (Anthropic, then OpenAI / xAI / OpenRouter / openai-compatible), then
+ * the target graph's own configured fallbackChain, then every other
+ * env-configured provider — see generateStructured.ts. Hardcoding a
+ * single Anthropic-only pick made "+ New bot" a red error string on an
+ * OpenAI- or Ollama-only box, and gave a present-but-exhausted key no
+ * recovery path at all.
  */
 export async function quickAddRoutes(app: FastifyInstance) {
   app.post("/graphs/:id/agents/quick-add", { preHandler: requireAuth }, async (req, reply) => {
@@ -63,37 +68,36 @@ export async function quickAddRoutes(app: FastifyInstance) {
     const dispatchError = await checkDispatchTargetsOwned(body.tools, body.dispatchTargets, req.userId);
     if (dispatchError) return reply.code(400).send({ error: dispatchError });
 
-    const extraction = pickEnvProvider();
-    if (!extraction) {
-      return reply.code(400).send({
-        error:
-          "No model API key configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, or OPENAI_COMPATIBLE_BASE_URL in .env, then restart the API.",
-      });
-    }
+    const graphRow = await db.query.agentGraphs.findFirst({
+      where: eq(agentGraphs.id, graphId),
+      columns: { fallbackChain: true },
+    });
+    const graphFallbackChain = (graphRow?.fallbackChain ?? []) as { provider: ProviderId; model: string }[];
 
     let extracted: z.infer<typeof extractionSchema>;
+    let usedProvider: ProviderId;
+    let usedModel: string;
     try {
-      const credentials = getCredentialsFromEnv(extraction.provider);
-      const model = getModel(extraction.provider, extraction.model, credentials);
-      const result = await generateObject({
-        model,
-        schema: extractionSchema,
-        system:
-          "You turn a plain-English request for a new AI agent into a structured configuration for that agent. Be specific and concrete in the system prompt — describe exactly what this one agent should do, not generic filler like 'you are a helpful assistant'.",
-        prompt: body.description,
-      });
+      const result = await generateStructuredWithFallback(
+        extractionSchema,
+        "You turn a plain-English request for a new AI agent into a structured configuration for that agent. Be specific and concrete in the system prompt — describe exactly what this one agent should do, not generic filler like 'you are a helpful assistant'.",
+        body.description,
+        graphFallbackChain,
+      );
       extracted = result.object;
+      usedProvider = result.provider;
+      usedModel = result.model;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Quick-add failed";
       return reply.code(400).send({ error: message });
     }
 
-    const nodeProvider = body.provider ?? extraction.provider;
+    const nodeProvider = body.provider ?? usedProvider;
     const node = await insertAgentNode(graphId, {
       name: extracted.name,
       role: extracted.role,
       provider: nodeProvider,
-      model: body.model ?? (body.provider ? defaultModelFor(body.provider) : extraction.model),
+      model: body.model ?? (body.provider ? defaultModelFor(body.provider) : usedModel),
       systemPrompt: extracted.systemPrompt,
       description: extracted.description,
       tools: body.tools,

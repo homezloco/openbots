@@ -127,6 +127,13 @@
       "when": 1789274918893,
       "tag": "0017_simple_tarot",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1789318166208,
+      "tag": "0018_public_vindicator",
+      "breakpoints": true
     }
   ]
 }

@@ -1,10 +1,8 @@
 import type { FastifyInstance } from "fastify";
-import { generateObject } from "ai";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { AgentRole, ModelTier } from "@openbots/graph-schema";
-import { getModel } from "@openbots/providers";
-import { getCredentialsFromEnv, pickEnvProvider } from "../orchestrator/credentials.js";
+import { AgentRole, ModelTier, type ProviderId } from "@openbots/graph-schema";
+import { generateStructuredWithFallback } from "../orchestrator/generateStructured.js";
 import { requireAuth } from "../auth/middleware.js";
 import { db } from "../db/client.js";
 import { agentGraphs } from "../db/schema.js";
@@ -73,23 +71,12 @@ export async function generateGraphRoutes(app: FastifyInstance) {
   app.post("/graphs/generate", { preHandler: requireAuth }, async (req, reply) => {
     const body = generateGraphBody.parse(req.body);
 
-    const picked = pickEnvProvider();
-    if (!picked) {
-      return reply.code(400).send({
-        error:
-          "No model API key configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, or OPENAI_COMPATIBLE_BASE_URL in .env, then restart the API.",
-      });
-    }
-
     let plan: z.infer<typeof generatedGraphSchema>;
+    let picked: { provider: ProviderId; model: string };
     try {
-      const credentials = getCredentialsFromEnv(picked.provider);
-      const model = getModel(picked.provider, picked.model, credentials);
-      const result = await generateObject({
-        model,
-        schema: generatedGraphSchema,
-        system:
-          "You turn a plain-English description of a team/workflow into a structured multi-agent graph plan. " +
+      const result = await generateStructuredWithFallback(
+        generatedGraphSchema,
+        "You turn a plain-English description of a team/workflow into a structured multi-agent graph plan. " +
           "Design a real pipeline: a supervisor or router that coordinates, worker nodes that do the actual work, " +
           "and a reviewer node where a quality gate genuinely makes sense — not one node per sentence. " +
           "Every edge's sourceName/targetName and the top-level entryNodeName must exactly match a name you put in nodes[]. " +
@@ -97,9 +84,10 @@ export async function generateGraphRoutes(app: FastifyInstance) {
           "Prefer 'auto' edges when routing depends on the content of the request (e.g. a router choosing a specialist), " +
           "and 'explicit' edges for a fixed, always-the-same-next-step pipeline. " +
           "Only include tool names that are clearly implied by the agent's job — most agents need no tools at all.",
-        prompt: body.description,
-      });
+        body.description,
+      );
       plan = result.object;
+      picked = { provider: result.provider, model: result.model };
     } catch (err) {
       const message = err instanceof Error ? err.message : "Graph generation failed";
       return reply.code(400).send({ error: message });

@@ -409,7 +409,7 @@ export async function dispatchHop(runId: string): Promise<void> {
   try {
     result = await withNodeTimeout(
       node.id,
-      () => callAgent(node, run.input, runId, autoRoutingTargets, graph.ownerId, hopDeadlineEpochMs),
+      () => callAgent(node, run.input, runId, autoRoutingTargets, graph.ownerId, hopDeadlineEpochMs, graph.fallbackChain),
       hopTimeoutMs,
     );
   } catch (err) {
@@ -677,7 +677,16 @@ async function dispatchConsensus(
         const branchDeadlineEpochMs = startedAt.getTime() + branchTimeoutMs;
         const result = await withNodeTimeout(
           targetNode.id,
-          () => callAgent(targetNode, input, runId, getAutoRoutingTargets(graph, targetNode.id), graph.ownerId, branchDeadlineEpochMs),
+          () =>
+            callAgent(
+              targetNode,
+              input,
+              runId,
+              getAutoRoutingTargets(graph, targetNode.id),
+              graph.ownerId,
+              branchDeadlineEpochMs,
+              graph.fallbackChain,
+            ),
           branchTimeoutMs,
         );
         await recordUsage(runId, targetNode.id, result);
@@ -978,6 +987,7 @@ async function dispatchMap(
             getAutoRoutingTargets(graph, targetNode.id),
             graph.ownerId,
             startedAt.getTime() + branchTimeoutMs,
+            graph.fallbackChain,
           ),
         branchTimeoutMs,
       );
@@ -1292,12 +1302,18 @@ function isAbortError(err: unknown): boolean {
 }
 
 /**
- * Tries node.provider/node.model first, then each entry in
- * node.fallbackChain in order — but only on a classified auth or
+ * Tries node.provider/node.model first, then each entry in the effective
+ * fallback chain in order — but only on a classified auth or
  * model-not-found error (classifyProviderError). Any other error (e.g. a
  * genuine bad-request from malformed input) rethrows immediately, since
  * retrying the same input against a different provider won't help. See
  * docs/adapters.md.
+ *
+ * The effective chain is node.fallbackChain when non-empty, else the
+ * graph's own fallbackChain — a simple override, never a merge, so a
+ * node's own settings panel always shows the complete, actual chain it
+ * runs with (see AgentGraph.fallbackChain, the same "specific → shared"
+ * resolution shape credentials.ts::getCredentials() already uses).
  */
 async function callAgent(
   node: AgentNode,
@@ -1310,8 +1326,10 @@ async function callAgent(
   // in the same hop's tool loop, never trusting a flat per-call constant
   // that could outlive the hop itself (see dispatchTool.ts).
   hopDeadlineEpochMs: number = Date.now() + DEFAULT_NODE_TIMEOUT_MS,
+  graphFallbackChain: AgentNode["fallbackChain"] = [],
 ): Promise<AgentCallResult> {
-  const targets = [{ provider: node.provider, model: node.model }, ...node.fallbackChain];
+  const effectiveFallbackChain = node.fallbackChain.length > 0 ? node.fallbackChain : graphFallbackChain;
+  const targets = [{ provider: node.provider, model: node.model }, ...effectiveFallbackChain];
   const prompt = typeof input === "string" ? input : JSON.stringify(input);
 
   // Write access is a separate, independent grant from read (a node
@@ -1707,6 +1725,7 @@ export async function loadLiveGraph(graphId: string): Promise<AgentGraph> {
     name: graphRow.name,
     description: graphRow.description,
     ownerId: graphRow.ownerId,
+    fallbackChain: graphRow.fallbackChain as AgentGraph["fallbackChain"],
     entryNodeId: graphRow.entryNodeId,
     version: graphRow.version,
     warnings: [],

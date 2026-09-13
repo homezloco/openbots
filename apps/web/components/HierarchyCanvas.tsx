@@ -40,6 +40,7 @@ import { AgentConversationPanel } from "./AgentConversationPanel";
 import { SchedulesPanel } from "./SchedulesPanel";
 import { WebhooksPanel } from "./WebhooksPanel";
 import { GitHubPanel } from "./GitHubPanel";
+import { GraphSettingsPanel } from "./GraphSettingsPanel";
 import { SignalEdge, type EdgePulse } from "./SignalEdge";
 import { useTheme } from "./ThemeProvider";
 
@@ -755,6 +756,7 @@ export function HierarchyCanvas({
   const [showSchedules, setShowSchedules] = useState(false);
   const [showWebhooks, setShowWebhooks] = useState(false);
   const [showGitHub, setShowGitHub] = useState(false);
+  const [showGraphSettings, setShowGraphSettings] = useState(false);
   const [runInputOpen, setRunInputOpen] = useState(false);
   const [runInput, setRunInput] = useState("");
   // Defaults on: this canvas is the interactive "watch it happen" view, and
@@ -949,6 +951,7 @@ export function HierarchyCanvas({
             setOpenAgentPanel(null);
             setShowGitHub(false);
             setShowWebhooks(false);
+            setShowGraphSettings(false);
             setShowSchedules((s) => !s);
           }}
         >
@@ -959,6 +962,7 @@ export function HierarchyCanvas({
             setOpenAgentPanel(null);
             setShowGitHub(false);
             setShowSchedules(false);
+            setShowGraphSettings(false);
             setShowWebhooks((s) => !s);
           }}
         >
@@ -969,10 +973,22 @@ export function HierarchyCanvas({
             setOpenAgentPanel(null);
             setShowSchedules(false);
             setShowWebhooks(false);
+            setShowGraphSettings(false);
             setShowGitHub((s) => !s);
           }}
         >
           🐙 GitHub
+        </button>
+        <button
+          onClick={() => {
+            setOpenAgentPanel(null);
+            setShowSchedules(false);
+            setShowWebhooks(false);
+            setShowGitHub(false);
+            setShowGraphSettings((s) => !s);
+          }}
+        >
+          ⚙️ Settings
         </button>
         <button type="button" onClick={resetLayout} title="Re-fit the view and restore the gateway row from saved positions">
           ↺ Reset layout
@@ -1175,6 +1191,7 @@ export function HierarchyCanvas({
             setShowSchedules(false);
             setShowWebhooks(false);
             setShowGitHub(false);
+            setShowGraphSettings(false);
             setOpenAgentPanel(node.id);
           }}
           colorMode={theme}
@@ -1214,6 +1231,7 @@ export function HierarchyCanvas({
         {showSchedules && <SchedulesPanel graphId={graph.id} onClose={() => setShowSchedules(false)} />}
         {showWebhooks && <WebhooksPanel graphId={graph.id} onClose={() => setShowWebhooks(false)} />}
         {showGitHub && <GitHubPanel graphId={graph.id} onClose={() => setShowGitHub(false)} />}
+        {showGraphSettings && <GraphSettingsPanel graphId={graph.id} onClose={() => setShowGraphSettings(false)} />}
       </div>
     </div>
   );

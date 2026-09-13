@@ -99,8 +99,10 @@ export const quickAddAgent = (
   },
 ) => request<AgentNode>(`/graphs/${graphId}/agents/quick-add`, { method: "POST", body: JSON.stringify(body) });
 
-export const updateGraph = (graphId: string, body: Partial<Pick<AgentGraph, "name" | "description" | "entryNodeId">>) =>
-  request<AgentGraph>(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify(body) });
+export const updateGraph = (
+  graphId: string,
+  body: Partial<Pick<AgentGraph, "name" | "description" | "entryNodeId" | "fallbackChain">>,
+) => request<AgentGraph>(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify(body) });
 
 export interface CreateNodeInput {
   name: string;

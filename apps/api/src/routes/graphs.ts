@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
+import { FallbackTarget } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
 import { agentGraphs, agentNodes, routingEdges, runs, scheduledTriggers } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
@@ -38,6 +39,12 @@ const updateGraphBody = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   entryNodeId: z.string().uuid().optional(),
+  /**
+   * Graph-wide default fallback chain — a node with its own (non-empty)
+   * fallbackChain ignores this; only a node with an empty chain uses it.
+   * See AgentGraph.fallbackChain and engine.ts::callAgent.
+   */
+  fallbackChain: z.array(FallbackTarget).optional(),
 });
 
 /** Every graph gets an owner at creation; per-graph reads and mutations require the caller to match. */

@@ -1094,6 +1094,47 @@ async function main() {
     console.log(`   (chain progressed to fallback target as expected: ${errorText.slice(0, 150)})`);
   });
 
+  await test("graph-level fallback chain: a node with no chain of its own falls through to the graph's", async () => {
+    const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E graph fallback chain" }) });
+    const graphId = g.body.id;
+
+    // The graph's own fallbackChain, not the node's — this is the new
+    // capability under test (node.fallbackChain stays empty below).
+    const patched = await api(`/graphs/${graphId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ fallbackChain: [{ provider: "xai", model: "grok-4" }] }),
+    });
+    assert(patched.status === 200, `graph PATCH failed: ${JSON.stringify(patched.body)}`);
+    assert(patched.body.fallbackChain?.length === 1, `expected the fallbackChain to round-trip, got: ${JSON.stringify(patched.body.fallbackChain)}`);
+
+    const node = await api(`/graphs/${graphId}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: "NoOwnFallbackNode",
+        role: "worker",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
+        systemPrompt: "Say hello.",
+        position: { x: 0, y: 0 },
+      }),
+    });
+    assert(!node.body.fallbackChain || node.body.fallbackChain.length === 0, "test setup assumption violated: node should have no fallback chain of its own");
+    await api(`/graphs/${graphId}/credentials`, {
+      method: "POST",
+      body: JSON.stringify({ provider: E2E_PROVIDER, apiKey: E2E_INVALID_KEY, nodeId: node.body.id }),
+    });
+    await api(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
+
+    const created = await api("/runs", { method: "POST", body: JSON.stringify({ graphId, input: "hi" }) });
+    const run = await waitForRun(created.body.id);
+    assert(run.status === "error", `expected failure (no real xai key configured either), got ${run.status}`);
+    const errorText = run.events[0]?.error ?? "";
+    // Same reasoning as the node-level fallback test above: reaching XAI's
+    // own missing-key error (rather than Anthropic's 401 directly) proves
+    // the GRAPH's fallbackChain was used, since this node's own is empty.
+    assert(/XAI_API_KEY/i.test(errorText), `expected the graph's fallback chain to have been used, got: ${errorText}`);
+  });
+
   // --- Mid-run rerouting: the actual headline differentiator, never previously demonstrated ---
   await testWithRetries("mid-run rerouting: a reroute fired while the first hop is executing changes the next hop", async () => {
     const g = await api("/graphs", { method: "POST", body: JSON.stringify({ name: "E2E mid-run reroute" }) });

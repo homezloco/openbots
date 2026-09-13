@@ -361,6 +361,15 @@ export const AgentGraph = z.object({
   ownerId: z.string().nullable(),
   nodes: z.array(AgentNode),
   edges: z.array(RoutingEdge),
+  /**
+   * Graph-wide default fallback chain. A node with its own (non-empty)
+   * fallbackChain uses only that — this is never merged in, only used
+   * when a node's own chain is empty. Also the retry list quick-add and
+   * /graphs/generate use for the structured-generation call itself. Same
+   * "specific → shared → environment-default" resolution shape
+   * credentials.ts::getCredentials() already uses for API keys.
+   */
+  fallbackChain: z.array(FallbackTarget).default([]),
   /** The node a new run starts at. Must reference a node in `nodes`. */
   entryNodeId: z.string().uuid().nullable(),
   /** Bumped on every node/edge mutation. Pinned runs snapshot this. */

@@ -62,10 +62,21 @@ export function RunEventTrail({
               </button>
             )}
           </div>
+          {event.input != null && (
+            <div style={{ margin: "8px 0 0" }}>
+              <span style={{ color: "var(--text-faint)", fontSize: 12 }}>Input:</span>
+              <pre style={{ whiteSpace: "pre-wrap", margin: "2px 0 0", color: "var(--text-muted)" }}>
+                {typeof event.input === "string" ? event.input : JSON.stringify(event.input, null, 2)}
+              </pre>
+            </div>
+          )}
           {event.output != null && (
-            <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0" }}>
-              {typeof event.output === "string" ? stripRoutingSentinel(event.output) : JSON.stringify(event.output, null, 2)}
-            </pre>
+            <div style={{ margin: "8px 0 0" }}>
+              {event.input != null && <span style={{ color: "var(--text-faint)", fontSize: 12 }}>Output:</span>}
+              <pre style={{ whiteSpace: "pre-wrap", margin: event.input != null ? "2px 0 0" : 0 }}>
+                {typeof event.output === "string" ? stripRoutingSentinel(event.output) : JSON.stringify(event.output, null, 2)}
+              </pre>
+            </div>
           )}
           {event.error && <p style={{ color: "var(--danger)", margin: "8px 0 0" }}>{event.error}</p>}
         </li>

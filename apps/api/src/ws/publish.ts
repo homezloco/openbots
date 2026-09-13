@@ -15,7 +15,17 @@ export interface RunEventMessage {
     // most useful on scheduled/webhook runs, where the pause happens
     // while nobody is looking at the canvas.
     | "run_awaiting_approval"
-    | "run_cancelled";
+    | "run_cancelled"
+    // A dispatch_to_graph call inside a hop's tool loop — not a hop of
+    // its own (dispatch blocks synchronously inside ONE hop, possibly
+    // called more than once per hop for a revise round), so these are
+    // the only signal a client watching the CALLING graph's canvas ever
+    // gets that cross-graph delegation is happening at all. See
+    // dispatchTool.ts.
+    | "dispatch_started"
+    | "dispatch_succeeded"
+    | "dispatch_failed"
+    | "dispatch_timed_out";
   nodeId?: string;
   resolvedEdgeId?: string | null;
   payload?: unknown;

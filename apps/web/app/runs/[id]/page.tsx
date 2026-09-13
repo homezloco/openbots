@@ -115,6 +115,25 @@ export default function RunDetailPage() {
         </div>
       )}
 
+      {(() => {
+        // run.input is a scratch field the engine overwrites on every hop
+        // transition — by completion it holds the LAST hop's input, not
+        // what was actually asked. The true original request is only
+        // ever written once, at sequence 0 (same fix the runs-list
+        // endpoint already applies server-side; done client-side here
+        // since GET /runs/:id doesn't need a second field for it).
+        const original = run.events.find((e) => e.sequence === 0)?.input;
+        if (original == null) return null;
+        return (
+          <>
+            <h2>Original request</h2>
+            <pre style={{ whiteSpace: "pre-wrap", background: "var(--bg-elevated)", padding: 12, borderRadius: 6 }}>
+              {typeof original === "string" ? original : JSON.stringify(original, null, 2)}
+            </pre>
+          </>
+        );
+      })()}
+
       {run.output != null && (
         <>
           <h2>Final output</h2>

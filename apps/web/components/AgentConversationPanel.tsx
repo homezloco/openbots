@@ -18,6 +18,7 @@ export function AgentConversationPanel({
   graphId,
   graph,
   node,
+  refreshKey,
   onClose,
   onNodeUpdated,
   onNodeDeleted,
@@ -25,6 +26,8 @@ export function AgentConversationPanel({
   graphId: string;
   graph: AgentGraph;
   node: AgentNode;
+  /** Bumped by the parent on any hop/run completion — see HierarchyCanvas.tsx. Triggers a refetch without needing a page reload. */
+  refreshKey?: number;
   onClose: () => void;
   onNodeUpdated: (updated: AgentNode) => void;
   onNodeDeleted: (nodeId: string) => void;
@@ -35,17 +38,42 @@ export function AgentConversationPanel({
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollToBottom = () => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  // Guards the live-refresh effect below against double-fetching on
+  // mount, when both effects would otherwise see the same refreshKey at
+  // once.
+  const seenRefreshKey = useRef(refreshKey);
 
   useEffect(() => {
     setConversations(null);
     setError(null);
+    seenRefreshKey.current = refreshKey;
     fetchAgentConversations(graphId, node.id)
       .then((res) => {
         setNodeNames(Object.fromEntries(res.nodes.map((n) => [n.id, n.name])));
         setConversations(res.runs);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load conversations"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graphId, node.id]);
+
+  // A run that starts or finishes while this panel is already open (or
+  // was opened just before) never showed up without a manual page
+  // reload — the effect above only ever fires once per node. This is a
+  // SEPARATE effect, not a shared dependency array, specifically so a
+  // live refresh refetches quietly in the background (no flash back to
+  // "Loading…" while someone's mid-read) rather than resetting state the
+  // way opening a different node should.
+  useEffect(() => {
+    if (refreshKey === undefined || refreshKey === seenRefreshKey.current) return;
+    seenRefreshKey.current = refreshKey;
+    fetchAgentConversations(graphId, node.id)
+      .then((res) => {
+        setNodeNames(Object.fromEntries(res.nodes.map((n) => [n.id, n.name])));
+        setConversations(res.runs);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load conversations"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   return (
     <div

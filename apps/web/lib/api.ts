@@ -488,7 +488,11 @@ export interface RunEventMessage {
     | "hop_failed"
     | "run_completed"
     | "run_awaiting_approval"
-    | "run_cancelled";
+    | "run_cancelled"
+    | "dispatch_started"
+    | "dispatch_succeeded"
+    | "dispatch_failed"
+    | "dispatch_timed_out";
   nodeId?: string;
   resolvedEdgeId?: string | null;
   payload?: unknown;

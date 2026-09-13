@@ -101,6 +101,7 @@ function toFlowEdges(graph: AgentGraph): Edge[] {
 
 const GATEWAY_NODE_PREFIX = "gateway:";
 const GATEWAY_EDGE_PREFIX = "gateway-edge:";
+const DISPATCH_ROUND_LINE = /\n⏳ round \d+$/;
 
 /**
  * Every OTHER graph reachable from this one via dispatch_to_graph or
@@ -210,6 +211,34 @@ export function HierarchyCanvas({
     setPulses((ps) => [...ps, { id, edgeId, color }]);
     setTimeout(() => setPulses((ps) => ps.filter((p) => p.id !== id)), 650);
   }, []);
+
+  /**
+   * Appends/removes a trailing "⏳ round N" line on a gateway node's own
+   * label in place, rather than caching a separate "base label" — reads
+   * whatever the node's current label already is and strips any prior
+   * round line before deciding what to show, so this stays correct
+   * regardless of how many times it's called or whether applyGatewayNodes
+   * has re-run in between (it always rebuilds the base label fresh).
+   * Keyed by targetGraphId alone: two DIFFERENT nodes dispatching into
+   * the SAME target graph concurrently will show only the most recent
+   * one's round count — a known simplification, not the common case this
+   * is for (one lead delegating into one team, reviewing, revising).
+   */
+  const setGatewayDispatchState = useCallback(
+    (targetGraphId: string, active: boolean, round: number) => {
+      const gatewayNodeId = `${GATEWAY_NODE_PREFIX}${targetGraphId}`;
+      setNodes((nds) =>
+        nds.map((n) => {
+          if (n.id !== gatewayNodeId) return n;
+          const currentLabel = String((n.data as { label?: string } | undefined)?.label ?? "");
+          const baseLabel = currentLabel.replace(DISPATCH_ROUND_LINE, "");
+          const label = active ? `${baseLabel}\n⏳ round ${round}` : baseLabel;
+          return { ...n, data: { ...n.data, label } };
+        }),
+      );
+    },
+    [setNodes],
+  );
 
   // Cross-graph reach (dispatch_to_graph/manage_target_graphs) is invisible
   // otherwise — it's node.dispatchTargets, a completely separate mechanism
@@ -335,6 +364,16 @@ export function HierarchyCanvas({
       // Green pulse for a completed hop "communicating" its result to the next node.
       addPulse(msg.resolvedEdgeId, "var(--status-succeeded)");
     }
+    if (msg.type === "hop_succeeded" || msg.type === "hop_failed" || msg.type === "run_completed") {
+      // The conversation-history panel (click a node → History) fetches
+      // once on open — without this, a run that starts or finishes while
+      // it's already sitting open (or was opened just before) never
+      // appears until a manual page refresh, even though the data was
+      // there in the DB all along. Bumped unconditionally rather than
+      // only for the currently-open node: cheap, and the panel itself
+      // only re-fetches while actually mounted for some node.
+      setConversationRefreshKey((k) => k + 1);
+    }
     if (msg.type === "hop_dispatched" && msg.nodeId && consensusGatherByAggregator.has(msg.nodeId)) {
       // All branches are done and the aggregator is being dispatched —
       // animate the gather from the fan-out source down into the aggregator.
@@ -360,6 +399,40 @@ export function HierarchyCanvas({
       pendingApproval?.runId === msg.runId
     ) {
       setPendingApproval(null);
+    }
+
+    // dispatch_to_graph's delegate → wait → review → revise loop,
+    // animated on the gateway edge/node it's actually happening on — see
+    // CLAUDE.md's "Make the review-revise-report loop visible" bet. Not
+    // a hop of its own (it blocks synchronously inside ONE hop's tool
+    // loop, possibly several times for revise rounds), so these events
+    // are the only signal this canvas ever gets that it's in progress.
+    if (msg.nodeId && (msg.type === "dispatch_started" || msg.type === "dispatch_succeeded" || msg.type === "dispatch_failed" || msg.type === "dispatch_timed_out")) {
+      const p = msg.payload as { targetGraphId?: string; round?: number } | undefined;
+      if (p?.targetGraphId) {
+        const gatewayEdgeId = `${GATEWAY_EDGE_PREFIX}${msg.nodeId}-${p.targetGraphId}`;
+        const gatewayNodeId = `${GATEWAY_NODE_PREFIX}${p.targetGraphId}`;
+        if (msg.type === "dispatch_started") {
+          addPulse(gatewayEdgeId, "var(--status-dispatching)");
+          // No autoClearMs: a blocking dispatch can run for minutes: a
+          // one-shot pulse alone would leave nothing visible for most of
+          // that wait, so this stays lit until the call resolves.
+          setNodeStatus(gatewayNodeId, "node-dispatching");
+          setGatewayDispatchState(p.targetGraphId, true, p.round ?? 1);
+        } else {
+          const color =
+            msg.type === "dispatch_succeeded"
+              ? "var(--status-succeeded)"
+              : msg.type === "dispatch_failed"
+                ? "var(--status-failed)"
+                : "var(--status-running)"; // timed_out: the target is still genuinely running, just past OUR wait budget
+          addPulse(gatewayEdgeId, color);
+          if (msg.type === "dispatch_succeeded") setNodeStatus(gatewayNodeId, "node-succeeded", 2000);
+          else if (msg.type === "dispatch_failed") setNodeStatus(gatewayNodeId, "node-failed", 4000);
+          else setNodeStatus(gatewayNodeId, "");
+          setGatewayDispatchState(p.targetGraphId, false, p.round ?? 1);
+        }
+      }
     }
   });
 
@@ -525,6 +598,12 @@ export function HierarchyCanvas({
 
   const [lastRunId, setLastRunId] = useState<string | null>(null);
   const [openAgentPanel, setOpenAgentPanel] = useState<string | null>(null);
+  // AgentConversationPanel fetches a node's run history once, on open — a
+  // run that starts or finishes while the panel is already sitting open
+  // (or was opened before a run began) never appeared without a manual
+  // page refresh. Bumped on any hop/run completion event and passed down
+  // so its effect can depend on it and refetch.
+  const [conversationRefreshKey, setConversationRefreshKey] = useState(0);
 
   // --- Human-in-the-loop approval gate ---
   interface PendingApproval {
@@ -1111,6 +1190,7 @@ export function HierarchyCanvas({
             graphId={graph.id}
             graph={graph}
             node={openAgentNode}
+            refreshKey={conversationRefreshKey}
             onClose={() => setOpenAgentPanel(null)}
             onNodeUpdated={handleNodeUpdated}
             onNodeDeleted={(nodeId) => {

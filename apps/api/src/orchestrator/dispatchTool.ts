@@ -4,6 +4,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { agentGraphs, runEvents, runs } from "../db/schema.js";
 import { createRun } from "./createRun.js";
+import { publishRunEvent } from "../ws/publish.js";
 
 /**
  * Cross-graph dispatch cycles are a genuinely new risk this tool
@@ -120,19 +121,27 @@ async function waitForDispatchedRun(runId: string, budgetMs: number): Promise<Di
  * graph already in this node's own dispatchTargets, never anything else,
  * regardless of what arguments it's given.
  *
- * ownerId/dispatchTargets/callerRunId/callingGraphId/hopDeadlineEpochMs
- * are bound in by the caller (engine.ts::callAgent) at tool-resolution
- * time, not supplied by the model — the same "resolve the trust boundary
- * in the caller, not from anything the model provides" pattern the write
- * tools already follow.
+ * ownerId/dispatchTargets/callerRunId/callerNodeId/callingGraphId/
+ * hopDeadlineEpochMs are bound in by the caller (engine.ts::callAgent)
+ * at tool-resolution time, not supplied by the model — the same
+ * "resolve the trust boundary in the caller, not from anything the
+ * model provides" pattern the write tools already follow.
  */
 export function createDispatchToGraphTool(
   ownerId: string | null,
   dispatchTargets: string[],
   callerRunId: string,
+  callerNodeId: string,
   callingGraphId: string,
   hopDeadlineEpochMs: number,
 ): Tool {
+  // Scoped to this one tool instance, which engine.ts creates fresh per
+  // hop — so this naturally starts at 1 for a hop's first dispatch call
+  // and counts revise rounds within THIS hop, with no persistence or
+  // reset logic needed. The published round number is the only source
+  // of truth the canvas trusts (see HierarchyCanvas.tsx), so a stale
+  // client-side count can never drift from what the server actually did.
+  let round = 0;
   return tool({
     description:
       "Start a new run in another one of your graphs and WAIT for its real result — this call blocks, " +
@@ -172,17 +181,28 @@ export function createDispatchToGraphTool(
         return { error: "Dispatch depth limit reached — this looks like a dispatch cycle between graphs; refusing." };
       }
 
+      round += 1;
       const run = await createRun(targetRow, input, "pinned", undefined, depth, callingGraphId);
+      const eventBase = {
+        runId: callerRunId,
+        graphId: callingGraphId,
+        nodeId: callerNodeId,
+        payload: { targetGraphId: target.id, targetGraphName: target.name, round, dispatchedRunId: run.id },
+      };
+      publishRunEvent({ ...eventBase, type: "dispatch_started" });
 
       const budgetMs = Math.min(DEFAULT_DISPATCH_POLL_TIMEOUT_MS, hopDeadlineEpochMs - Date.now() - DISPATCH_SAFETY_MARGIN_MS);
       const result = await waitForDispatchedRun(run.id, budgetMs);
 
       if (result.outcome === "completed") {
+        publishRunEvent({ ...eventBase, type: "dispatch_succeeded", payload: { ...eventBase.payload, output: result.output } });
         return { outcome: "completed", targetGraph: target.name, runId: run.id, output: result.output };
       }
       if (result.outcome === "failed") {
+        publishRunEvent({ ...eventBase, type: "dispatch_failed", payload: { ...eventBase.payload, error: result.error } });
         return { outcome: "failed", targetGraph: target.name, runId: run.id, error: result.error };
       }
+      publishRunEvent({ ...eventBase, type: "dispatch_timed_out" });
       return {
         outcome: "still_running",
         targetGraph: target.name,

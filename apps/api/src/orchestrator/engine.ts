@@ -1436,7 +1436,7 @@ async function callAgent(
       if (wantsDispatch) {
         tools = {
           ...(tools ?? {}),
-          dispatch_to_graph: createDispatchToGraphTool(ownerId, node.dispatchTargets ?? [], runId, node.graphId, hopDeadlineEpochMs),
+          dispatch_to_graph: createDispatchToGraphTool(ownerId, node.dispatchTargets ?? [], runId, node.id, node.graphId, hopDeadlineEpochMs),
           // Granted automatically alongside dispatch_to_graph — checking on
           // your own prior dispatch is a pure safety improvement over
           // today's "fire and forget with no recourse," not new exposure,

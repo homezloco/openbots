@@ -16,3 +16,12 @@ pnpm-lock.yaml.bak
 apps/api/e2e/fixtures/writable-testrepo/
 apps/api/e2e/fixtures/writable-testrepo-outside/
 apps/api/e2e/fixtures/writable-testrepo-remote.git/
+
+# Isolated git worktrees an agent's write_file/edit_file tools create
+# inside whatever repo they're scoped to (see docs/orchestration.md).
+# They appear in ANY repo an agent has write access to — including this
+# one when dogfooding — and are pure build artifacts of a run, never
+# source. This was previously only in .git/info/exclude, which is local
+# and never cloned: every contributor would otherwise see a pile of
+# untracked worktrees, and could commit one by accident.
+.openbots/

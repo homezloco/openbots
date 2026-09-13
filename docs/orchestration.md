@@ -61,14 +61,48 @@ hop.
   wins.
 - `auto`: resolved by matching the run's output against candidate target
   node **name + description** (mirrors Grok Bot's implicit delegation).
-  `matchAutoEdge` in `resolve.ts` currently does keyword-overlap scoring —
-  a first pass modeled on the keyword-scoring layer of a sibling project's
-  classifier (local-code's `ClassificationRouter`). Scoring description-only
-  was a real bug: a lead that named "Loudest Backend Specialist" tied on
-  the shared token "loudest" and the first auto edge (Frontend) won. The
-  specialist then receives the **original user request**, not the router's
-  "I'm sending this to X" essay. Explicit worker→worker pipelines still
-  chain output.
+  The specialist then receives the **original user request**, not the
+  router's "I'm sending this to X" essay. Explicit worker→worker
+  pipelines still chain output.
+
+### How `matchAutoEdge` decides (in order)
+
+Everything below lives in `resolve.ts::matchAutoEdge`. The order matters:
+every check before the scoring step exists to stop the scorer from
+matching text that was never meant as a routing decision.
+
+1. **`UNKNOWN` prefix → no match.** The router is saying "I can't tell".
+   `appendAutoRoutingContext` (`engine.ts`) teaches every auto-routing
+   node this convention.
+2. **`DONE` prefix → no match.** The router already has a complete answer
+   and doesn't want to hand off, even if that answer happens to name a
+   specialist.
+3. **Output ends with `?` → no match.** If the router ends its turn
+   asking, the question *is* the answer the user needs to see. Unlike 1
+   and 2 this needs no cooperation from the model, which matters: the
+   sentinels only work if the model complies, and smaller models often
+   don't. Measured against a local Gemma 4 E4B, which correctly asked a
+   clarifying question naming both specialists, in plain prose, with no
+   `UNKNOWN` prefix — the scorer then matched a name *inside the
+   question* and silently routed there, discarding it. Keyed on a
+   **trailing** `?` specifically: an earlier, broader version keyed on
+   "names 2+ candidates and contains a `?` anywhere" and wrongly swallowed
+   a decisive answer with a rhetorical lead-in ("Is it a crash? No. This
+   is the Billing Specialist's area, not the Technical Specialist's.").
+4. **Single candidate → take it.**
+5. **Keyword-overlap scoring** over each target's name + description — a
+   first pass modeled on the keyword-scoring layer of a sibling project's
+   classifier (local-code's `ClassificationRouter`). Scoring
+   description-only was a real bug: a lead that named "Loudest Backend
+   Specialist" tied on the shared token "loudest" and the first auto edge
+   (Frontend) won. Zero overlap → no match, rather than guessing.
+
+"No match" returns `{edge: null, nextNodeId: null}`, which `dispatchHop`
+already handles as "no next node → the run completes with this output" —
+so a clarifying question becomes the run's answer with no extra plumbing.
+All three of the non-obvious cases in step 3 are covered deterministically
+in the mock-tier e2e suite (`run-mock.ts`), which can control the router's
+exact wording; real-model coverage of them is inherently flaky.
 
 ## `consensus` edges (fan-out/join)
 
@@ -116,9 +150,16 @@ fan-out set).
 Branches run inline within the source's own BullMQ job (`Promise.allSettled`,
 each still behind its own `withNodeTimeout`) rather than as separately
 queued hops — a deliberate v1 simplification that trades per-branch job
-isolation for a much simpler join. v1 also has no partial-failure
-tolerance: any branch failing fails the whole batch and the run, rather
-than letting the aggregator judge on a subset.
+isolation for a much simpler join.
+
+**Partial failure is tolerated.** The aggregator still runs on whatever
+branches succeeded, with a placeholder for each that failed, as long as
+at least one succeeded; only a total wipeout fails the batch and the run.
+This replaced the original all-or-nothing behavior after a real bug: one
+slow branch timing out discarded every sibling's output — including a
+genuinely useful completed one — in favor of a bare run-level error with
+no output at all. Covered by the `consensus fan-out: one branch failing
+doesn't discard a successful sibling's output` e2e case.
 
 ## Per-node isolation
 
@@ -191,12 +232,19 @@ this was always a latent information-disclosure gap for `read_file`, but
 arbitrary write onto a live project is a much higher-severity version of
 the same bug.
 
-**Root-owned files.** The container runs as root (`apps/api/Dockerfile`,
-no `USER` directive) while host-mounted project directories are owned by
-the host user — `ensureSafeDirectory` runs `git config --global --add
-safe.directory <root>` (idempotent, checked via `--get-all` first) before
-any git operation against a given root, or git refuses with "detected
-dubious ownership." No global git identity is configured anywhere;
+**File ownership.** The api/worker containers run as the host uid, not
+root — `docker-compose.yml` sets `user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"`
+(override both in `.env` if your host user isn't 1000). Running as root
+left every object the container wrote root-owned on the host, so the
+human's next `git add` in their own checkout failed with "insufficient
+permission for adding an object to repository database" until they
+chowned it back. Because a numeric `user:` has no passwd entry to
+resolve a home directory from, `HOME=/tmp` is set explicitly —
+`ensureSafeDirectory` writes `git config --global`, which needs a
+writable home. That call (idempotent, checked via `--get-all` first)
+still runs before any git operation against a given root, or git refuses
+with "detected dubious ownership." No global git identity is configured
+anywhere;
 `GIT_AUTHOR_NAME`/`_EMAIL`/`GIT_COMMITTER_NAME`/`_EMAIL` are set per
 `git commit` child-process call instead. Files the container creates end
 up root-owned on the host afterward (harmless in CI; may need `sudo` to

@@ -2,8 +2,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import type { agentGraphs } from "../db/schema.js";
 import { runEvents, runs } from "../db/schema.js";
-import { enqueueHop } from "../queue/runQueue.js";
-import { loadLiveGraph } from "./engine.js";
+import { advanceRun, loadLiveGraph } from "./engine.js";
 
 type AgentGraphRow = typeof agentGraphs.$inferSelect;
 
@@ -40,7 +39,12 @@ export async function createRun(
     })
     .returning();
 
-  await enqueueHop(run.id);
+  // Reuses the same enqueue-vs-pause decision every other advance point
+  // makes: a gated entry node means the run begins paused instead of
+  // dispatching immediately. Redundantly re-writes currentNodeId/input to
+  // the values just inserted above, which is harmless — the point is the
+  // decision logic, not the write.
+  await advanceRun(run.id, graph, graphRow.entryNodeId!, input);
   return run;
 }
 
@@ -99,6 +103,10 @@ export async function forkRun(
     );
   }
 
-  await enqueueHop(fork.id);
+  // Re-running checkpoint.nodeId is itself an "advance to this node before
+  // it runs" — if that node has since been gated (or already was), the
+  // fork inherits the pause for free, same helper as createRun's entry
+  // dispatch above.
+  await advanceRun(fork.id, graph, checkpoint.nodeId, checkpoint.input);
   return fork;
 }

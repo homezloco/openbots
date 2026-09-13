@@ -171,6 +171,45 @@ export const MapConfig = z.object({
 });
 export type MapConfig = z.infer<typeof MapConfig>;
 
+/**
+ * Marks a node as an approval gate: a run pauses BEFORE this node executes
+ * and waits for a human to approve, edit, or cancel.
+ *
+ * This exists because OpenBots' existing approval mechanism doesn't
+ * generalize. Agent file edits are safe to let run unsupervised because
+ * git provides a staging layer — changes land in an isolated worktree and
+ * reach nobody until a human runs /push. Network side effects have no
+ * equivalent: `http_request` POSTs, `run_remote_command`, and MCP tool
+ * calls take effect the instant the model makes them. There is no local
+ * fork of someone else's CRM.
+ *
+ * The host allowlist answers "which hosts are reachable". It cannot answer
+ * "should this particular message be sent", which is the actual question
+ * when an agent is about to email a real customer.
+ *
+ * Scope, stated honestly: this gates ENTRY TO A NODE, not individual tool
+ * calls. The reviewer approves the input about to be handed to a sending
+ * node — not the exact HTTP payload, which doesn't exist until the model
+ * composes it mid-hop. Gating a tool call would mean suspending inside
+ * the generateText tool loop, which the one-hop-per-job design cannot
+ * express. So the intended pattern is a node whose only job is to send.
+ *
+ * Cannot be combined with being a map target or consensus branch target:
+ * those branches run inline inside one job with no queue boundary to
+ * pause at (see orchestrator/engine.ts's dispatchMap/dispatchConsensus).
+ * Rejected at save time rather than discovered at runtime. Gating the
+ * AGGREGATOR is fine — it is dispatched through the queue normally.
+ */
+export const ApprovalConfig = z.object({
+  /**
+   * Shown to whoever reviews the paused run. Since the gate approves a
+   * node's INPUT rather than its eventual side effect, this is how the
+   * graph author explains what is actually about to happen.
+   */
+  instructions: z.string().max(2000).optional(),
+});
+export type ApprovalConfig = z.infer<typeof ApprovalConfig>;
+
 export const HttpEndpoint = z.object({
   slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/, "slug must be 1-32 lowercase letters, digits, or hyphens"),
   baseUrl: z.string().url(),
@@ -255,6 +294,13 @@ export const AgentNode = z.object({
    * it, same reason as consensusGroup.
    */
   mapConfig: MapConfig.nullable().optional(),
+  /**
+   * Pauses the run for human approval before this node runs — see
+   * ApprovalConfig. Unset means the node runs normally. `.nullable()` so
+   * PATCH can revoke a gate, same reason as consensusGroup: a grant (or
+   * here, a guard) that can't be cleared is a one-way door.
+   */
+  approvalConfig: ApprovalConfig.nullable().optional(),
   position: CanvasPosition,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -357,6 +403,12 @@ export type RunMode = z.infer<typeof RunMode>;
 export const RunStatus = z.enum([
   "pending",
   "running",
+  // A run paused before a gated node (AgentNode.approvalConfig) — waits
+  // indefinitely for POST /runs/:id/approve or /cancel. See engine.ts's
+  // advanceRun. Non-terminal: dispatchHop's terminal-status guard treats
+  // it as "not over" but also refuses to execute the very hop it's
+  // holding (a stale/duplicate job for a still-waiting run).
+  "awaiting_approval",
   "completed",
   "error",
   "cancelled",
@@ -387,6 +439,13 @@ export const RunEventStatus = z.enum([
   "succeeded",
   "failed",
   "timeout",
+  // A human decision at an approval gate, not a node dispatch — recorded
+  // as its own run_events row (nodeId = the gated node, input = the
+  // original proposed input) so approve/cancel decisions are as
+  // attributable as routing_changes already makes live reroutes. See
+  // POST /runs/:id/approve and /cancel in routes/runs.ts.
+  "approved",
+  "cancelled",
 ]);
 export type RunEventStatus = z.infer<typeof RunEventStatus>;
 

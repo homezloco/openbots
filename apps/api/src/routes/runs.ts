@@ -7,6 +7,9 @@ import { db } from "../db/client.js";
 import { agentCommits, agentGraphs, agentNodes, runEvents, runs, usageEvents, userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
 import { createRun, forkRun } from "../orchestrator/createRun.js";
+import { isTerminalStatus, loadGraphForRun, nextSequence } from "../orchestrator/engine.js";
+import { enqueueHop } from "../queue/runQueue.js";
+import { publishRunEvent } from "../ws/publish.js";
 import { requireAuth } from "../auth/middleware.js";
 import { requireGraphOwner } from "./graphs.js";
 import { githubApiRequest } from "../github.js";
@@ -22,13 +25,17 @@ const createRunBody = z.object({
 /**
  * Grok Build's state-sorted triage list (running/blocked first, then
  * everything else by recency) is the pattern this mirrors — see PLAN.md.
+ * awaiting_approval sorts first: it is the one status that never resolves
+ * on its own, so it is exactly "what needs attention" this list exists to
+ * surface.
  */
 const STATUS_PRIORITY: Record<string, number> = {
-  running: 0,
-  pending: 1,
-  error: 2,
-  completed: 3,
-  cancelled: 4,
+  awaiting_approval: 0,
+  running: 1,
+  pending: 2,
+  error: 3,
+  completed: 4,
+  cancelled: 5,
 };
 
 async function handlePushCommand(
@@ -227,6 +234,133 @@ export async function runRoutes(app: FastifyInstance) {
 
     const run = await createRun(graphRow, body.input, body.mode);
     return reply.code(201).send(run);
+  });
+
+  /**
+   * Resumes a run paused at an approval gate (AgentNode.approvalConfig).
+   * Optional `input` overwrites runs.input before enqueueing — this is
+   * approve-with-edit, not just a veto: a human reading the agent's
+   * proposed outbound message and hand-editing it before it sends is the
+   * actual leads-workflow use case, not merely blocking a bad one.
+   *
+   * The status transition is a single conditional UPDATE (only succeeds
+   * if the row is STILL "awaiting_approval"), not a read-then-write — a
+   * double-click or a race between two reviewers must not enqueue the
+   * gated hop twice. The loser gets a clear 409, not a silent no-op.
+   *
+   * Re-validates the paused node against whichever graph this run
+   * actually uses (pinned snapshot or live) before touching anything: a
+   * live-mode run can sit paused for days, long enough for someone to
+   * delete or un-gate that exact node in the meantime (see CLAUDE.md's
+   * "graph drift while paused"). Failing here with a clear message beats
+   * letting dispatchHop's bare "Node not found in graph" surface as an
+   * opaque job failure later — and the run stays paused, not silently
+   * dropped, since nothing about the drift is this call's fault.
+   */
+  app.post("/runs/:id/approve", { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = z.object({ input: z.unknown().optional() }).parse(req.body ?? {});
+
+    const run = await db.query.runs.findFirst({ where: eq(runs.id, id) });
+    if (!run) return reply.code(404).send({ error: "Run not found" });
+    if (!(await requireGraphOwner(req, reply, run.graphId))) return;
+
+    if (run.status !== "awaiting_approval") {
+      return reply.code(409).send({ error: `Run is not awaiting approval (current status: ${run.status})` });
+    }
+    if (!run.currentNodeId) {
+      return reply.code(422).send({ error: "Run has no current node to approve" });
+    }
+
+    const graph = await loadGraphForRun(run.graphId, run.mode, run.graphSnapshot);
+    const node = graph.nodes.find((n) => n.id === run.currentNodeId);
+    if (!node) {
+      return reply.code(422).send({
+        error: `Cannot approve: node ${run.currentNodeId} no longer exists in this graph. The run is still paused — fix the graph or cancel the run.`,
+      });
+    }
+    if (!node.approvalConfig) {
+      return reply.code(422).send({
+        error: `Cannot approve: node "${node.name}" no longer has an approval gate configured. The run is still paused — cancel it if it should not proceed as-is.`,
+      });
+    }
+
+    const originalInput = run.input;
+    const hasEdit = body.input !== undefined;
+    const finalInput = hasEdit ? body.input : originalInput;
+
+    const [updated] = await db
+      .update(runs)
+      .set({ status: "pending", input: finalInput, updatedAt: new Date() })
+      .where(and(eq(runs.id, id), eq(runs.status, "awaiting_approval")))
+      .returning();
+    if (!updated) {
+      return reply.code(409).send({ error: "Run is no longer awaiting approval (approved or cancelled concurrently)" });
+    }
+
+    await db.insert(runEvents).values({
+      runId: id,
+      nodeId: node.id,
+      sequence: await nextSequence(id),
+      status: "approved",
+      input: originalInput,
+      output: { decision: "approved", decidedBy: req.userId, ...(hasEdit ? { editedInput: finalInput } : {}) },
+      startedAt: new Date(),
+      finishedAt: new Date(),
+    });
+
+    await enqueueHop(id);
+    return reply.code(200).send(updated);
+  });
+
+  /**
+   * Terminates a run. Valid from "awaiting_approval" (this is reject — a
+   * gated hop's input is vetoed rather than edited) and from
+   * "pending"/"running" (this is a plain stop). Rejection is deliberately
+   * not a separate status: it is cancelling with a reason recorded at a
+   * gate, which is the same conditional transition and the same terminal
+   * write as any other cancel.
+   *
+   * Honest limit: this stops a run BETWEEN hops. An in-flight hop is
+   * inside generateText in the worker process; aborting it from this API
+   * route would need cross-process signalling this change doesn't add.
+   * dispatchHop's terminal-status guard means a cancelled run's next
+   * dequeued job no-ops on its own — cheap, but only once that hop ends.
+   */
+  app.post("/runs/:id/cancel", { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = z.object({ reason: z.string().optional() }).parse(req.body ?? {});
+
+    const run = await db.query.runs.findFirst({ where: eq(runs.id, id) });
+    if (!run) return reply.code(404).send({ error: "Run not found" });
+    if (!(await requireGraphOwner(req, reply, run.graphId))) return;
+
+    if (isTerminalStatus(run.status)) {
+      return reply.code(409).send({ error: `Run is already ${run.status}` });
+    }
+
+    const [updated] = await db
+      .update(runs)
+      .set({ status: "cancelled", updatedAt: new Date() })
+      .where(and(eq(runs.id, id), inArray(runs.status, ["awaiting_approval", "pending", "running"])))
+      .returning();
+    if (!updated) {
+      return reply.code(409).send({ error: "Run could not be cancelled (it just finished)" });
+    }
+
+    await db.insert(runEvents).values({
+      runId: id,
+      nodeId: run.currentNodeId!,
+      sequence: await nextSequence(id),
+      status: "cancelled",
+      input: run.input,
+      output: { decision: "cancelled", decidedBy: req.userId, reason: body.reason ?? null },
+      startedAt: new Date(),
+      finishedAt: new Date(),
+    });
+
+    publishRunEvent({ runId: id, graphId: run.graphId, type: "run_cancelled", payload: { reason: body.reason ?? null } });
+    return reply.code(200).send(updated);
   });
 
   /**

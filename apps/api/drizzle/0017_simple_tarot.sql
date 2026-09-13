@@ -1,0 +1,1 @@
+ALTER TABLE "agent_nodes" ADD COLUMN "approval_config" jsonb;

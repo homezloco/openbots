@@ -173,6 +173,66 @@ function withStepCaching(
 }
 
 /**
+ * Run statuses that mean "this run is over". `cancelled` was read here
+ * (and in resolve.ts and routes/runs.ts) long before anything could write
+ * it — the approval gate is what finally gives it a writer, since a run
+ * that can pause indefinitely is the first one that needs stopping.
+ */
+const TERMINAL_RUN_STATUSES = new Set(["completed", "error", "cancelled"]);
+
+export function isTerminalStatus(status: string): boolean {
+  return TERMINAL_RUN_STATUSES.has(status);
+}
+
+/**
+ * The single place a run moves to its next node.
+ *
+ * Every advance point previously ended with the same two statements —
+ * write `currentNodeId`/`input`, then `enqueueHop` — and an approval gate
+ * is precisely the decision to run the first without the second. Keeping
+ * that choice in one function is what stops the gate from becoming three
+ * subtly different implementations across dispatchHop, dispatchConsensus,
+ * dispatchMap, and createRun; a gate honored on two of four paths is
+ * worse than no gate, because it would be trusted.
+ *
+ * Note what makes resuming trivial: the row write is unconditional. The
+ * engine re-derives everything about the next hop from the run row on
+ * each dispatch, so "where to resume" is already persisted by the time we
+ * decide whether to enqueue. Approval needs no saved continuation — it is
+ * just the enqueue that didn't happen here.
+ */
+export async function advanceRun(
+  runId: string,
+  graph: AgentGraph,
+  nextNodeId: string,
+  nextInput: unknown,
+): Promise<void> {
+  const nextNode = graph.nodes.find((n) => n.id === nextNodeId);
+
+  await db
+    .update(runs)
+    .set({ currentNodeId: nextNodeId, input: nextInput, updatedAt: new Date() })
+    .where(eq(runs.id, runId));
+
+  if (!nextNode?.approvalConfig) {
+    await enqueueHop(runId);
+    return;
+  }
+
+  await db.update(runs).set({ status: "awaiting_approval", updatedAt: new Date() }).where(eq(runs.id, runId));
+  publishRunEvent({
+    runId,
+    graphId: graph.id,
+    type: "run_awaiting_approval",
+    nodeId: nextNodeId,
+    payload: {
+      instructions: nextNode.approvalConfig.instructions ?? null,
+      pendingInput: nextInput,
+    },
+  });
+}
+
+/**
  * Dispatches exactly one hop for a run, then either enqueues the next hop
  * or completes the run. This is the whole orchestration engine: there is no
  * function that "plans a run" up front. Routing is resolved fresh on every
@@ -188,7 +248,14 @@ function withStepCaching(
 export async function dispatchHop(runId: string): Promise<void> {
   const run = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
   if (!run) throw new Error(`Run ${runId} not found`);
-  if (run.status === "completed" || run.status === "error" || run.status === "cancelled") {
+  if (isTerminalStatus(run.status)) {
+    return;
+  }
+  // A gated run has a job only when someone approved it, which sets the
+  // status back to "pending" in the same statement that enqueues. Still
+  // here means a stale/duplicate job for a run that is still waiting, so
+  // it must not execute the very hop the gate exists to hold.
+  if (run.status === "awaiting_approval") {
     return;
   }
   if (!run.currentNodeId) {
@@ -403,11 +470,7 @@ export async function dispatchHop(runId: string): Promise<void> {
   // chain the previous hop's output (summarize → translate).
   const nextInput = edge?.kind === "auto" ? run.input : output;
 
-  await db
-    .update(runs)
-    .set({ currentNodeId: nextNodeId, input: nextInput, updatedAt: new Date() })
-    .where(eq(runs.id, runId));
-  await enqueueHop(runId);
+  await advanceRun(runId, graphNow, nextNodeId, nextInput);
 }
 
 /**
@@ -584,11 +647,7 @@ async function dispatchConsensus(
     .set({ completedBranches: succeeded.length, status: failedCount > 0 ? "partial" : "completed" })
     .where(eq(fanoutBatches.id, batch.id));
 
-  await db
-    .update(runs)
-    .set({ currentNodeId: group.aggregatorNodeId, input: branchOutputs, updatedAt: new Date() })
-    .where(eq(runs.id, runId));
-  await enqueueHop(runId);
+  await advanceRun(runId, graph, group.aggregatorNodeId, branchOutputs);
 }
 
 /** Default parallel branches for a map. Low on purpose: each branch is a full model call, and N is runtime-determined. */
@@ -833,11 +892,7 @@ async function dispatchMap(
     .set({ completedBranches: succeeded.length, status: failedCount > 0 ? "partial" : "completed" })
     .where(eq(fanoutBatches.id, batch.id));
 
-  await db
-    .update(runs)
-    .set({ currentNodeId: config.aggregatorNodeId, input: branchOutputs, updatedAt: new Date() })
-    .where(eq(runs.id, runId));
-  await enqueueHop(runId);
+  await advanceRun(runId, graph, config.aggregatorNodeId, branchOutputs);
 }
 
 async function recordUsage(runId: string, nodeId: string, result: AgentCallResult): Promise<void> {
@@ -1414,7 +1469,7 @@ async function callAgent(
   throw lastError;
 }
 
-async function nextSequence(runId: string): Promise<number> {
+export async function nextSequence(runId: string): Promise<number> {
   const [last] = await db
     .select({ sequence: runEvents.sequence })
     .from(runEvents)
@@ -1424,7 +1479,7 @@ async function nextSequence(runId: string): Promise<number> {
   return (last?.sequence ?? -1) + 1;
 }
 
-async function loadGraphForRun(
+export async function loadGraphForRun(
   graphId: string,
   mode: string,
   snapshot: unknown,
@@ -1465,6 +1520,7 @@ export function nodeRowToAgentNode(n: typeof agentNodes.$inferSelect): AgentNode
     mcpServers: (n.mcpServers as AgentNode["mcpServers"]) ?? undefined,
     httpEndpoints: (n.httpEndpoints as AgentNode["httpEndpoints"]) ?? undefined,
     mapConfig: (n.mapConfig as AgentNode["mapConfig"]) ?? undefined,
+    approvalConfig: (n.approvalConfig as AgentNode["approvalConfig"]) ?? undefined,
     position: { x: n.positionX, y: n.positionY },
     createdAt: n.createdAt.toISOString(),
     updatedAt: n.updatedAt.toISOString(),

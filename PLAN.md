@@ -744,6 +744,7 @@ than another cloud provider would be.
 6. `business_metrics` now supports two integration *styles* ("dashboard" and "login" — see "Pre-launch hardening" below) rather than a fixed list of named sites, but only two real sources were ever actually wired up on the live account (the former `leadgen-a`/`leadgen-b`/`saas-b` credentials), and **neither integration style actually returns real data reliably today**: the "login" style's live login endpoint has previously returned an empty body — the stored value had drifted from what's actually deployed on that host — and the "dashboard" style's sources have no credential at all today (would need the user to re-add real staff credentials through the new generic /settings form). No revenue source exists yet for either style (needs new endpoint code in the target app), no Railway hosting cost (needs the user's own API token), no Render hosting cost (hard blocker — Render's API has no billing endpoint, full stop). See "Cross-graph dispatch and business metrics" and "Credential security review and a real external-drift finding" above.
 7. `manage_target_graphs`'s *reach* is now visible on the canvas (gateway nodes, above), but the six tools themselves still have no visual affordance for what an agent actually *did* — no "see what changed in graph X" diff view yet, beyond the existing `GET /graphs/:id/routing-changes` audit trail, which still has no page consuming it.
 8. No breadcrumb/"back to parent" link on a gateway-target graph's own canvas — the browser Back button works (gateway navigation pushes a real history entry), but there's no on-canvas affordance, deliberately: a graph can be a dispatch target of more than one parent, so there's no single "the" parent to hard-code a link to.
+9. The approval-gate's pause notification (`run_awaiting_approval`) is WebSocket-only — it reaches a browser that's open right now. For scheduled/webhook runs, where a gate matters most, nobody is watching when it fires, so a paused run is discovered by checking the runs list rather than being pushed to anyone. Email/webhook notification is the obvious follow-up. See "Human-in-the-loop approval gate" above. Also no canvas affordance yet for a gated node (a lock icon, an "N runs waiting" badge) or web-app approve/cancel buttons — this session shipped the API only.
 
 ## Depth demo (not the live-reroute GIF — 2026-09-11)
 
@@ -1558,6 +1559,64 @@ JSON text round-trips back as a parsed document (type change +
 whitespace normalization). `useBotChat` already defends; the mock-tier
 extract-json case now deep-compares for the same reason. A proper fix
 (preserving string-ness) is a small schema/driver change, deferred.
+
+## Human-in-the-loop approval gate (2026-09-12)
+
+The write-tool path already has a working approval gate — agent edits
+land in an isolated git worktree, nothing reaches the remote until a
+human runs `/push`. That pattern doesn't generalize: git supplies a
+staging layer, a place a change can be materialized and discarded before
+anyone outside sees it. Nothing else has one. `http_request` fires a
+POST the instant the model calls it, and so does `run_remote_command`
+and every MCP tool — there's no local fork of someone else's CRM. An
+allowlist answers *which hosts are reachable*; it can't answer *should
+this particular message be sent*, which is the actual question when an
+agent is about to email a real customer. That second question is the
+leads-workflow Phase 1 requirement and the load-bearing claim behind
+"trust them with real write access."
+
+**Turned out cheaper than an earlier pass at this gap analysis
+suggested** — that pass assumed a new pausable run state was needed. It
+wasn't: execution is already hop-by-hop (`dispatchHop` runs exactly one
+hop, then either completes the run or enqueues the next one — no process
+held open across hops), so the engine already persists everything a
+resume needs, because it re-derives the next hop from the run row every
+single time. Pausing is just declining to enqueue; approving is calling
+`enqueueHop` on a row that's already pointing at the right node with the
+right input. See `docs/orchestration.md`'s new "Human-in-the-loop
+approval gate" section for the mechanism (`advanceRun`, the four call
+sites it unifies, the conditional-UPDATE race close, the audit trail,
+and the graph-drift re-validation on approve).
+
+**Shipped**: `AgentNode.approvalConfig` (nullable/PATCH-clearable),
+`RunStatus.awaiting_approval` (non-terminal) and a real writer for
+`cancelled` (previously read in three places, written by nothing — no
+run could ever be stopped before this), `POST /runs/:id/approve` (with
+optional approve-with-edit `input`, not just a veto — the actual
+leads-workflow ask) and `POST /runs/:id/cancel` (doubles as reject, with
+an optional `reason`), an audit `run_events` row on every decision
+(`decidedBy`, and both the original and edited input when approve
+overwrote it), save-time rejection of gating a map/consensus branch
+target (or pointing one at an already-gated node) in either direction,
+and a `run_awaiting_approval` WS event. 8 new mock-tier e2e cases,
+34/34 passing.
+
+**Deliberately left out of v1**: no expiry (`expiresAfterMinutes`
+enforced lazily at approval time produces runs that are neither
+actionable nor terminal, and a nightly scheduled graph nobody watches
+would accumulate them — needs a real sweeper to do properly, and a
+paused run costs nothing while it waits, so there's no pressure forcing
+this yet); no tool-call-level gating (this gates *entry to a node*, not
+the exact payload a model composes mid-hop — see the doc section's
+"Scope, stated honestly"); the gate lives on the node, not the edge,
+since an edge-level gate would let the same sending node be guarded on
+one path and unguarded on another — a footgun dressed as flexibility.
+
+**Known gap carried forward**: notification is WebSocket-only, which
+reaches an open browser and nothing else. For the scheduled/webhook runs
+where a gate matters most, nobody is watching it fire — in practice a
+paused run is found by checking the runs list. Email/webhook
+notification is the obvious follow-up; see "Known gaps" below.
 
 ## License
 

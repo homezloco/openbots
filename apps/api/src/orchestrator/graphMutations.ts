@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { AgentRole, ConsensusGroup, FallbackTarget, HttpEndpoint, MapConfig, McpServer, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
+import { AgentRole, ApprovalConfig, ConsensusGroup, FallbackTarget, HttpEndpoint, MapConfig, McpServer, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
 import { agentGraphs, agentNodes, routingEdges } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
@@ -10,6 +10,7 @@ import { checkDispatchTargetsOwned } from "../validation/dispatchTargets.js";
 import { checkSshTargetAllowed } from "../validation/sshTarget.js";
 import { checkMcpServersAllowed } from "../validation/mcpServer.js";
 import { checkHttpEndpointsAllowed } from "../validation/httpEndpoint.js";
+import { checkApprovalGateCompatible } from "../validation/approvalGate.js";
 
 /**
  * The node/edge mutation core, shared by the HTTP routes (routes/graphs.ts)
@@ -59,6 +60,10 @@ export const createNodeBody = z.object({
   // .nullable() so PATCH can turn a map source back into a plain node,
   // same reason as consensusGroup.
   mapConfig: MapConfig.nullable().optional(),
+  // .nullable() so PATCH can revoke a previously-set approval gate, same
+  // reason as consensusGroup/mapConfig — a guard that can't be cleared is
+  // a one-way door.
+  approvalConfig: ApprovalConfig.nullable().optional(),
   position: z.object({ x: z.number(), y: z.number() }),
 });
 
@@ -100,6 +105,7 @@ export async function insertAgentNode(graphId: string, body: CreateNodeBody) {
       mcpServers: body.mcpServers ?? null,
       httpEndpoints: body.httpEndpoints ?? null,
       mapConfig: body.mapConfig ?? null,
+      approvalConfig: body.approvalConfig ?? null,
       positionX: body.position.x,
       positionY: body.position.y,
     })
@@ -135,6 +141,12 @@ export async function insertAgentNodeValidated(
   if (mcpError) return { ok: false, status: 400, error: mcpError };
   const httpError = checkHttpEndpointsAllowed(body.httpEndpoints);
   if (httpError) return { ok: false, status: 400, error: httpError };
+  const approvalError = await checkApprovalGateCompatible(graphId, null, {
+    approvalConfig: body.approvalConfig,
+    mapConfig: body.mapConfig,
+    consensusGroup: body.consensusGroup,
+  });
+  if (approvalError) return { ok: false, status: 400, error: approvalError };
   return { ok: true, value: await insertAgentNode(graphId, body) };
 }
 
@@ -182,6 +194,18 @@ export async function updateAgentNode(
     body.httpEndpoints !== undefined ? body.httpEndpoints : (before.httpEndpoints as HttpEndpoint[] | null | undefined);
   const httpError = checkHttpEndpointsAllowed(effectiveHttpEndpoints);
   if (httpError) return { ok: false, status: 400, error: httpError };
+
+  const effectiveApprovalConfig =
+    body.approvalConfig !== undefined ? body.approvalConfig : (before.approvalConfig as ApprovalConfig | null | undefined);
+  const effectiveMapConfig = body.mapConfig !== undefined ? body.mapConfig : (before.mapConfig as MapConfig | null | undefined);
+  const effectiveConsensusGroup =
+    body.consensusGroup !== undefined ? body.consensusGroup : (before.consensusGroup as ConsensusGroup | null | undefined);
+  const approvalError = await checkApprovalGateCompatible(graphId, nodeId, {
+    approvalConfig: effectiveApprovalConfig,
+    mapConfig: effectiveMapConfig,
+    consensusGroup: effectiveConsensusGroup,
+  });
+  if (approvalError) return { ok: false, status: 400, error: approvalError };
 
   const { position, ...rest } = body;
   const [after] = await db

@@ -1312,6 +1312,77 @@ Verified end-to-end with a real run through the full API/worker stack:
 cost. Next step: an e2e tier that runs the routing/auth/CRUD cases on
 `mock` so PRs get free CI coverage.
 
+## Dogfood round 2: transform nodes, retry backoff, sentinel display (2026-09-12)
+
+All three changes below were written by the app's own agents (same
+dogfood graph as above) with human validation per branch; two were
+prompted by a real incident in the user's live Loudest chat.
+
+- **`transform` provider — the first non-agent node type** (n8n gap #5
+  v1): no model call, zero cost, deterministic. The model id selects the
+  operation (`template` / `uppercase` / `extract-json`), the systemPrompt
+  carries the operation's config. Implemented as a `MockLanguageModelV3`
+  like `mock`, so zero engine/schema changes. Covered by 3 new mock-tier
+  e2e cases (14/14). Two real bugs found in validation: the agent's
+  `.test()` on a `/g` regex (stateful `lastIndex` — fixed to
+  `.includes`), and — the important one — **engine context injection
+  polluted transform output**: `appendAssignedTaskContext`'s worker
+  guidance got appended to a rendered template, because every
+  `appendXContext` treats systemPrompt as LLM instructions. `callAgent`
+  now skips all context injection for non-LLM providers.
+- **Retry backoff fix**: a real hop failed with `AI_APICallError: Cannot
+  connect to API` after all 3 attempts — the old 500ms/1000ms spacing
+  can't outlive a brief network blip. Now ~1s/~4s + jitter. Root cause
+  on this host was also fixed separately: ULA-only IPv6 with AAAA-first
+  DNS intermittently blackholes provider connects; the (gitignored)
+  worker override now sets `NODE_OPTIONS=--dns-result-order=ipv4first`.
+- **Sentinel leak in chat display**: a real answer rendered starting
+  with the literal text `DONE`. New display-only
+  `stripRoutingSentinel()` (`apps/web/lib/textDisplay.ts`) strips a
+  leading `DONE`/`UNKNOWN`/`ALL` token wherever run *output* renders as
+  answer text; stored data untouched; a bare-sentinel output still
+  displays rather than going blank.
+
+### Run results now surface committed work; hops stop gracefully at their deadline (2026-09-13)
+
+Closed the "a failed run silently hides real committed work" gap found
+twice in the dogfood sessions above. Three layers, first two written by
+the dogfood agents, third (in-flight abort) by hand after live testing
+proved the second alone insufficient:
+
+1. **Surface the truth that already existed**: `GET /runs/:id` now
+   includes the run's `agent_commits` rows as `commits[]`; the run page
+   renders a "Committed work" section (danger-styled on error, noting
+   the branch survives), and `useBotChat`'s error message names any
+   committed branch.
+2. **Graceful stop between steps**: a second `stopWhen` condition ends
+   the tool loop `GRACEFUL_STOP_MARGIN_MS` (15s) before the hop
+   deadline, so the engine can commit + append the commit note and
+   complete the hop normally; the empty-text fallback distinguishes
+   "ran out of time" from "hit my step limit."
+3. **In-flight abort**: live testing with a 45s budget showed stopWhen
+   only evaluates BETWEEN steps — one long read+generate step sailed
+   through the graceful window and still got hard-killed (and
+   `Promise.race` never cancels the loser, so the loop kept running as
+   a zombie and committed afterward with nothing surfacing it). Now an
+   `abortSignal` fires `ABORT_MARGIN_MS` (5s) before the hard deadline,
+   recomputed per retry attempt; a deadline abort on a tool-capable hop
+   is caught and routed through the same commit/fallback path — the
+   hop completes with the honest time-out message plus the commit note
+   and real diff. Verified live: a 45s-budget hop that used to end
+   `status=error output=null` now ends `completed` with the fallback
+   text, the committed branch named, the diff shown, and `commits[]`
+   populated. Non-tool hops keep the old hard-timeout semantics
+   deliberately. `withNodeTimeout` remains as the backstop for a hung
+   single call.
+
+**Known quirk documented while testing** (predates this work):
+`runs.output` is jsonb, so a string output that happens to be valid
+JSON text round-trips back as a parsed document (type change +
+whitespace normalization). `useBotChat` already defends; the mock-tier
+extract-json case now deep-compares for the same reason. A proper fix
+(preserving string-ness) is a small schema/driver change, deferred.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

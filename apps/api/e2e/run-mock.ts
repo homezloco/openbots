@@ -317,6 +317,71 @@ async function main() {
     assert(owner.status === 200, `expected 200 for owner, got ${owner.status}`);
   });
 
+  await test("transform node: template op interpolates {{input}} in an agent→transform pipeline", async () => {
+    const g = await createGraph("Mock: transform template");
+    const agent = await createNode(g.id, mockNode({ name: "Agent" }));
+    const t = await createNode(g.id, {
+      ...mockNode({ name: "Formatter", systemPrompt: "Report follows:\n{{input}}\n-- end --" }),
+      provider: "transform",
+      model: "template",
+    });
+    await createEdge(g.id, agent.id, t.id, "explicit");
+    await setEntry(g.id, agent.id);
+
+    const runId = await startRun(g.id, "raw data");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    // hop 1 (mock agent) outputs "MOCK: raw data"; the explicit edge feeds
+    // that to the transform, which interpolates it into the template.
+    assert(
+      run.output === "Report follows:\nMOCK: raw data\n-- end --",
+      `template interpolation wrong: ${JSON.stringify(run.output)}`,
+    );
+  });
+
+  await test("transform node: extract-json pulls the first JSON object out of noisy text", async () => {
+    const g = await createGraph("Mock: transform extract-json");
+    const t = await createNode(g.id, {
+      ...mockNode({ name: "JsonExtractor" }),
+      provider: "transform",
+      model: "extract-json",
+    });
+    await setEntry(g.id, t.id);
+
+    const runId = await startRun(g.id, 'Here you go: {"a": [1, 2], "b": "x"} hope that helps!');
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    // Compare parsed, not textually: runs.output is a jsonb column, and a
+    // string output that happens to be valid JSON text comes back as a
+    // parsed document (whitespace normalized, type changed) — a known
+    // storage quirk that predates transform nodes (any pure-JSON LLM
+    // answer round-trips the same way; useBotChat already defends).
+    const parsed = typeof run.output === "string" ? JSON.parse(run.output) : run.output;
+    assert(
+      JSON.stringify(parsed) === JSON.stringify({ a: [1, 2], b: "x" }),
+      `extract-json wrong: ${JSON.stringify(run.output)}`,
+    );
+  });
+
+  await test("transform node: unknown operation fails the run with a clear error", async () => {
+    const g = await createGraph("Mock: transform bad op");
+    const t = await createNode(g.id, {
+      ...mockNode({ name: "BadOp" }),
+      provider: "transform",
+      model: "frobnicate",
+    });
+    await setEntry(g.id, t.id);
+
+    const runId = await startRun(g.id, "anything");
+    const run = await waitForRun(runId);
+    assert(run.status === "error", `expected error status, got: ${run.status}`);
+    const failed = (run.events as any[]).filter((e) => e.status === "failed");
+    assert(
+      failed.length === 1 && /Unknown transform operation/.test(failed[0].error ?? ""),
+      `expected a clear unknown-operation error, got: ${JSON.stringify(failed.map((f: any) => f.error))}`,
+    );
+  });
+
   await test("graph delete cascades cleanly", async () => {
     const g = await createGraph("Mock: delete me");
     const n = await createNode(g.id, mockNode({ name: "Doomed" }));

@@ -394,11 +394,29 @@ export interface UsageTotal {
   estimatedCostUsd: number;
 }
 
+/**
+ * One row per per-hop commit made by a write-capable node during this
+ * run (agent_commits, see db/schema.ts) — surfaced on GET /runs/:id so a
+ * timed-out/erroring run's already-committed work isn't invisible. No
+ * `filesChanged` column exists in agent_commits; only what's actually
+ * persisted is returned here.
+ */
+export interface RunCommitSummary {
+  id: string;
+  nodeId: string;
+  branch: string;
+  commitSha: string;
+  pushedAt: string | null;
+  createdAt: string;
+}
+
 export const createRun = (graphId: string, input: unknown, mode: "pinned" | "live" = "pinned") =>
   request<Run>("/runs", { method: "POST", body: JSON.stringify({ graphId, input, mode }) });
 
 export const fetchRun = (runId: string) =>
-  request<Run & { events: RunEventRow[]; usageTotal: UsageTotal }>(`/runs/${runId}`, { cache: "no-store" });
+  request<Run & { events: RunEventRow[]; usageTotal: UsageTotal; commits: RunCommitSummary[] }>(`/runs/${runId}`, {
+    cache: "no-store",
+  });
 
 export const forkRun = (graphId: string, runId: string, fromSequence: number, mode?: "pinned" | "live") =>
   request<Run>(`/graphs/${graphId}/runs/${runId}/fork`, {

@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { RunMode } from "@openbots/graph-schema";
 import { getRemoteUrl, parseGithubRepo, pushBranch, type Worktree } from "@openbots/providers";
@@ -289,7 +289,33 @@ export async function runRoutes(app: FastifyInstance) {
       { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCostUsd: 0 },
     );
 
-    return { ...run, events, usage, usageTotal };
+    // A write-capable node's hop can time out or exhaust its step budget
+    // AFTER already committing real work to its isolated worktree branch
+    // (see CLAUDE.md's "Write tools are isolated to a git worktree") —
+    // the run then reports error with nothing telling the caller a
+    // reviewable branch exists. agent_commits already records this per
+    // hop; surface it here so it's never silently lost. There is no
+    // filesChanged column on agent_commits — only what's actually
+    // persisted (see db/schema.ts) is returned.
+    const commitRows = await db
+      .select({
+        id: agentCommits.id,
+        nodeId: agentCommits.nodeId,
+        branch: agentCommits.branch,
+        commitSha: agentCommits.commitSha,
+        pushedAt: agentCommits.pushedAt,
+        createdAt: agentCommits.createdAt,
+      })
+      .from(agentCommits)
+      .where(eq(agentCommits.runId, id))
+      .orderBy(asc(agentCommits.createdAt));
+    const commits = commitRows.map((c) => ({
+      ...c,
+      pushedAt: c.pushedAt?.toISOString() ?? null,
+      createdAt: c.createdAt.toISOString(),
+    }));
+
+    return { ...run, events, usage, usageTotal, commits };
   });
 
   /** Companion list view to the hierarchy canvas — see PLAN.md's "Runs list view". */

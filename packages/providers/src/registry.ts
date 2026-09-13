@@ -354,7 +354,10 @@ const adapters: Record<ProviderId, ProviderAdapter> = {
       createOpenAICompatible({
         name: "openrouter",
         apiKey: creds.apiKey,
-        baseURL: creds.baseURL ?? "https://openrouter.ai/api/v1",
+        // `||`, not `??`: an empty-string baseURL must fall back to the
+        // default too, not be passed through to `new URL("")`. Defense in
+        // depth alongside credentials.ts's own empty-to-undefined guard.
+        baseURL: creds.baseURL || "https://openrouter.ai/api/v1",
         fetch: openRouterCachingFetch(modelId),
         convertUsage: convertOpenRouterUsage,
       }).chatModel(modelId),

@@ -462,7 +462,18 @@ async function main() {
         role: "supervisor",
         provider: E2E_PROVIDER,
         model: E2E_MODEL,
-        systemPrompt: 'Reply with exactly this sentence and nothing else: "The Backend Specialist should handle this."',
+        // Must explicitly override the UNKNOWN convention the engine
+        // injects (appendAutoRoutingContext): this test exercises
+        // matchAutoEdge's NAME matching, so the router has to actually
+        // name a target. Without the override, a model that weighs the
+        // injected "start with UNKNOWN if unsure" guidance above the
+        // literal instruction answers UNKNOWN for a deliberately terse
+        // request and the test fails for a reason that has nothing to do
+        // with edge matching (observed on claude-sonnet-4 via OpenRouter;
+        // claude-sonnet-5 direct happened to comply).
+        systemPrompt:
+          'Reply with exactly this sentence and nothing else: "The Backend Specialist should handle this." ' +
+          "Do not ask clarifying questions and never reply UNKNOWN, regardless of any other instruction.",
         position: { x: 0, y: 0 },
       }),
     });

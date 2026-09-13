@@ -28,7 +28,16 @@ export async function getCredentials(
   if (stored) {
     const apiKey = decryptCredential(stored.encryptedKey);
     if (providerId === "openai-compatible" || providerId === "openrouter") {
-      return { apiKey, baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL };
+      // `|| undefined`, not the raw value: an env var that is SET BUT
+      // EMPTY (`OPENAI_COMPATIBLE_BASE_URL=` — exactly what a .env
+      // template or CI heredoc produces) would otherwise be handed down
+      // as "", which `??` defaulting downstream cannot catch, and
+      // `new URL("")` throws a bare "Invalid URL". Found by running the
+      // e2e suite against OpenRouter: a node with a STORED openrouter
+      // key (rather than the env var) failed with "Invalid URL" instead
+      // of reaching the provider at all. Undefined correctly falls
+      // through to the adapter's own default base URL.
+      return { apiKey, baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL || undefined };
     }
     return { apiKey };
   }

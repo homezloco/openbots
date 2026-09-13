@@ -65,6 +65,20 @@ jobs:
       - name: Build api image
         run: docker compose build api mcp-echo
 
+      # Must run BEFORE `docker compose up api/worker` touches these bind
+      # mounts. On a fresh checkout these three directories are gitignored
+      # scratch (never committed) and don't exist yet — if Docker is the
+      # one to first bind-mount a non-existent host path, it auto-creates
+      # it as root (dockerd itself runs as root), and since api/worker run
+      # as a non-root uid (see docker-compose.yml), the container can no
+      # longer reliably hand that ownership back, leaving the host-side
+      # setup step's own mkdir/rm calls failing with EACCES. Creating the
+      # directories here first, as the runner's own user, means Docker
+      # just bind-mounts what already exists — nothing to auto-create.
+      # test:e2e re-runs this same (idempotent) script itself; that's fine.
+      - name: Pre-create writable e2e fixture dirs
+        run: node apps/api/e2e/setup-writable-fixture.mjs
+
       - name: Start api + worker
         run: docker compose up api worker mcp-echo -d
 

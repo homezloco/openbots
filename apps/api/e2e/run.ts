@@ -2518,7 +2518,14 @@ async function main() {
     // minute for a standard 5-field pattern's next boundary.
     const created = await api(`/graphs/${scheduleGraphId}/schedules`, {
       method: "POST",
-      body: JSON.stringify({ name: "e2e tick", input: "ping", cronExpression: "*/5 * * * * *" }),
+      // Input deliberately NOT "ping": that baits a "pong" completion that
+      // competes with the node's "reply exactly: tick" instruction, and a
+      // model that takes the bait fails this test for reasons that have
+      // nothing to do with scheduling (observed on claude-sonnet-4 via
+      // OpenRouter). This test is about a cron trigger actually firing a
+      // real run; the "tick" assertion is only a sanity check that the hop
+      // genuinely reached the model.
+      body: JSON.stringify({ name: "e2e tick", input: "report status", cronExpression: "*/5 * * * * *" }),
     });
     assert(created.status === 201, `schedule create failed: ${JSON.stringify(created.body)}`);
     const scheduleId = created.body.id;

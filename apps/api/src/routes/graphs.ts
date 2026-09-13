@@ -17,6 +17,7 @@ import {
   updateAgentNode,
   updateNodeBody,
 } from "../orchestrator/graphMutations.js";
+import { checkEdgeRetargetGateCompatible } from "../validation/approvalGate.js";
 import { createAgencyExample, createLiveRerouteExample } from "../orchestrator/exampleGraphs.js";
 
 const createGraphBody = z.object({
@@ -266,6 +267,9 @@ export async function graphRoutes(app: FastifyInstance) {
       where: and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)),
     });
     if (!before) return reply.code(404).send({ error: "Edge not found" });
+
+    const gateError = await checkEdgeRetargetGateCompatible(graphId, edgeId, body.targetNodeId);
+    if (gateError) return reply.code(400).send({ error: gateError });
 
     const [after] = await db
       .update(routingEdges)

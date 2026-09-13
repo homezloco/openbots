@@ -1709,6 +1709,126 @@ cases passing, stable across three consecutive runs. Web UI: a
 "Notify a webhook when this gate trips" field in `AgentSettingsForm`
 alongside the reviewer-instructions field added earlier.
 
+## External review found four real, verified bugs (2026-09-13)
+
+A code review from another session (working the same repo — "Warp,"
+across the http_request/web_search/web_fetch/map work; see the entries
+above) flagged five issues in recent work: three severe ("fix before
+relying on these features"), and blockers on the still-unpushed webhook
+commit. **Verified every specific, checkable claim against the actual
+code before touching anything** (ran the exact WHATWG URL resolutions
+in Node, re-read every referenced function) rather than acting on the
+review's word alone — all four held up exactly as described; nothing
+was found to be wrong or exaggerated.
+
+**1. `http_request` could leak one endpoint's credentials to a
+different allowlisted endpoint's host.** `new URL(path, base)` with
+`path` forced (by its own zod schema) to start with `"/"` is a WHATWG
+absolute-path or network-path reference — `path="/admin"` discards the
+base's own sub-path entirely (`https://api.example/v2/` + `/admin` →
+`https://api.example/admin`, silently dropping `/v2`), and
+`path="//other-host/x"` (or `"/\\other-host/x"`, a backslash parses the
+same way for http/https) replaces the HOST. The post-resolve check
+(`isHttpEndpointUrlAllowed`) validated against the OPERATOR's whole
+allowlist, not the SELECTED endpoint's own origin — so with two
+allowlisted endpoints (the documented multi-endpoint shape), a crafted
+path on endpoint A's slug could resolve to endpoint B's host while
+still carrying endpoint A's own `Authorization` header. Confirmed with
+real `new URL()` calls before touching anything. The fix isn't just a
+rejection, though — a naive "reject anything that resolves off-prefix"
+check would have made every endpoint with a non-root `baseUrl` path
+*permanently unusable* (since a WHATWG absolute-path reference can
+literally never end up back under the base's own sub-path). The actual
+fix strips a leading `/` so resolution is an APPEND (a WHATWG *relative*
+reference) rather than a replace, explicitly rejects `//`/backslash
+outright first (host-switching shapes), and still verifies the result
+stays under the selected endpoint's own origin+prefix (catching `../`
+dot-segment climbs) before the operator-allowlist check. Verified with
+a battery of real `new URL()` resolutions covering both root and
+sub-path bases before landing on this shape — the first version broke
+the legitimate case. **No automated regression test exists for this
+anywhere** — the mock provider can't call tools at all (`doGenerate`
+always returns text, never a tool call), and `run.ts` (the only tier
+that could exercise it with a real model) has zero existing
+`http_request` coverage to extend. Flagging honestly rather than
+claiming coverage that doesn't exist; a real test needs a two-endpoint
+fixture and a real model call, deliberately not added here without
+discussing the added billed-suite cost first.
+
+**2. A gated node could become a live, unsupervised fan-out branch
+two ways that bypass the node-save-time check entirely.**
+`checkApprovalGateCompatible` (the approval-gate feature) only ran in
+`insertAgentNode`/`updateAgentNode` — but a node also becomes a
+`consensusGroup.edgeIds` member via `insertRoutingEdge`'s hybrid
+auto-sync (adding a new `auto` edge to an already-hybrid source) and via
+the canvas's own core drag-and-drop gesture, `PATCH .../edges/:edgeId`
+retargeting an existing branch edge — neither mutation path ever
+touches the node the original check runs against. Fixed at three
+layers: a direct check in `insertRoutingEdge` before the auto-sync
+write; a new `checkEdgeRetargetGateCompatible` (scans every node's
+`consensusGroup.edgeIds` for the edge being retargeted, independent of
+the edge's own `kind` — matches how `dispatchConsensus` resolves branch
+membership purely by id) in the reroute route; and, as defense in
+depth matching every other "config is a save-time convenience, not the
+security boundary" allowlist in this codebase, `dispatchConsensus`/
+`dispatchMap` now each refuse a gated branch target at dispatch time
+too, recorded as a failed branch rather than a thrown error so the
+existing partial-failure join handles it the same as any other bad
+branch. 4 new mock-tier cases, all passing.
+
+**3. A self-referential fan-out aggregator was a genuine, unguarded
+infinite loop**, not just confusing config. `dispatchHop` checked
+`mapConfig`'s fan-out trigger *before* the aggregator-terminal check,
+and `aggregatorNodeIds()` only tracked consensus aggregators — so
+`mapConfig.aggregatorNodeId === the source's own id` meant: fan out,
+join, `advanceRun` back to the SAME node, which still has the same
+`mapConfig`, re-parses its own just-joined output as a fresh work list,
+fans out again, forever. `resolveNextHop`'s `alreadyVisited` cycle guard
+never runs on this path at all — it only guards normal single-edge
+routing. **Found while fixing this that `consensusGroup` has the exact
+same hazard, and worse**: a pure consensus source with no auto edges
+re-triggers `dispatchConsensus` *unconditionally* on every single hop
+(this is the documented, intentional behavior for that case) — so a
+self-referential consensus aggregator loops on its very first dispatch,
+no output-shape luck required at all. Fixed both: `aggregatorNodeIds()`
+now covers map aggregators too; the aggregator-terminal check in
+`dispatchHop` was reordered to run *first*, before either fan-out
+trigger, so even a longer cycle through several nodes' aggregator roles
+is closed, not just literal self-reference; and
+`checkMapConfigNotSelfReferential`/`checkConsensusGroupNotSelfReferential`
+(new `validation/mapConfig.ts`) reject the literal self-reference at
+save time for both. 2 new mock-tier cases.
+
+**b496fc7 (the unpushed webhook-notification commit) had three real
+gaps of its own**, caught before it ever shipped: `ALLOWED_NOTIFICATION_WEBHOOKS`
+was missing from both CI workflows' `.env` heredocs — the new mock-tier
+delivery test would have failed the very next time `e2e-mock.yml` ran
+on a PR (a direct push to `main` doesn't trigger it, `on: pull_request`
+only, so pushing the commit as-is would have looked clean while quietly
+breaking CI for the next PR). `notifyApprovalWebhook`'s `fetch` had no
+`redirect: "error"` (unlike `http_request`/`web_fetch`, which both
+already have it for the identical reason — the allowlist only validates
+the URL you started with, not wherever a redirect sends you). And its
+error logs printed the full webhook URL — harmless for most targets, but
+a Slack incoming-webhook URL's secret is an opaque PATH segment
+(`https://hooks.slack.com/services/T000/B000/XXXX`), which is exactly
+the shape `checkNotificationWebhookAllowed`'s credential checks
+(userinfo, credential-shaped query params) *can't* catch, by design —
+there's nowhere else for a Slack webhook to put its own auth. All three
+fixed; logs now show origin only.
+
+**Verified everything with 42/42 mock-tier cases passing** (10 new: 4
+approval-gate-vs-fan-out-bypass, 2 self-referential-aggregator, 2 from
+the earlier cancel-race fix, 2 webhook-notification), full monorepo
+build/typecheck clean, image rebuilt and re-tested against the live
+stack. Deliberately did NOT chase every item in the review's own
+"secondary"/"product gaps" lists in this same pass (e.g. `parseMapItems`
+taking the first JSON-parseable array rather than the best match, no
+canvas UI yet for `http_request`/`mapConfig`/`web_search`/`web_fetch`
+config, `useBotChat` not handling `awaiting_approval`/`cancelled`) —
+those are real, worth tracking, but distinct from the three "confirmed,
+fix before relying on this" items this pass focused on closing first.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

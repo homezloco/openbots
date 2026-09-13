@@ -102,7 +102,7 @@ export async function resolveHttpRequestTools(node: AgentNode, ownerId: string |
       // Non-empty by construction (early-returned above), so the tuple cast is safe.
       endpoint: z.enum(slugs as [string, ...string[]]).describe("Which configured endpoint to call"),
       method: z.enum(["GET", "POST"]),
-      path: z.string().startsWith("/").describe("Path appended to the endpoint's base URL, e.g. /api/items"),
+      path: z.string().min(1).describe("Path appended to the endpoint's base URL, e.g. /api/items"),
       body: z.unknown().optional().describe("JSON body; POST only, ignored for GET"),
     }),
     execute: async ({
@@ -123,10 +123,44 @@ export async function resolveHttpRequestTools(node: AgentNode, ownerId: string |
 
       let url: string;
       try {
-        // Resolved against the base so a path can't escape to another
-        // origin; the result is re-checked against the allowlist because
-        // `new URL("/x", base)` can still change the pathname.
-        const resolvedUrl = new URL(path, match.endpoint.baseUrl.endsWith("/") ? match.endpoint.baseUrl : `${match.endpoint.baseUrl}/`);
+        // A bare "//host/x" is a WHATWG network-path reference that
+        // REPLACES the host entirely, and a backslash is normalized the
+        // same way as "/" in http(s) parsing (so "/\host/x" behaves
+        // identically) — both would let `path` alone redirect this
+        // endpoint's own credentials to a completely different origin.
+        // Rejected outright, before any resolution: there is no
+        // legitimate path that needs either.
+        if (path.startsWith("//") || path.includes("\\")) {
+          return { error: `Path "${path}" is not a valid relative path.` };
+        }
+        const baseUrl = new URL(match.endpoint.baseUrl.endsWith("/") ? match.endpoint.baseUrl : `${match.endpoint.baseUrl}/`);
+        // Resolved as an APPEND to the base's own path (a WHATWG relative
+        // reference — the leading "/" is stripped first), never a
+        // replace: `new URL(path, base)` with `path` still carrying its
+        // leading "/" is an absolute-path reference, which discards the
+        // base's own sub-path (e.g. "/v2") entirely and resolves from the
+        // origin root instead — silently breaking (or, combined with the
+        // allowlist covering more than one endpoint, silently redirecting
+        // cross-endpoint) every endpoint whose baseUrl isn't bare-root.
+        const relativePath = path.replace(/^\/+/, "");
+        const resolvedUrl = new URL(relativePath, baseUrl);
+        // Append semantics still don't stop a "../" segment from
+        // climbing back out of the base's own prefix once WHATWG resolves
+        // the dot-segments — so the RESULT must also still sit under the
+        // base's own origin and path, not just have been built from a
+        // relative-looking input. The operator allowlist re-check below
+        // is defense in depth on top of this, not a substitute for it:
+        // this is the check that a crafted path can't cross from this
+        // endpoint's own origin/prefix into a DIFFERENT allowlisted
+        // endpoint's, which a shared, endpoint-agnostic allowlist alone
+        // can't tell apart.
+        const staysWithinEndpoint =
+          resolvedUrl.protocol === baseUrl.protocol &&
+          resolvedUrl.host === baseUrl.host &&
+          resolvedUrl.pathname.startsWith(baseUrl.pathname);
+        if (!staysWithinEndpoint) {
+          return { error: `Path "${path}" resolves outside this endpoint's own origin/prefix.` };
+        }
         if (!isHttpEndpointUrlAllowed(resolvedUrl.toString())) {
           return { error: `Path "${path}" resolves outside the allowed endpoint prefix.` };
         }

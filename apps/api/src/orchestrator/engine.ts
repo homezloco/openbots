@@ -200,12 +200,30 @@ const NOTIFICATION_WEBHOOK_TIMEOUT_MS = 5_000;
  * configured takes effect on the very next gate trip, same as every
  * other runtime-re-checked allowlist in this file.
  */
+/**
+ * Origin only (scheme+host), never the full URL — a Slack incoming
+ * webhook's secret is an opaque PATH segment
+ * (https://hooks.slack.com/services/T000/B000/XXXX...), not a userinfo
+ * or query-param shape, so it passes checkNotificationWebhookAllowed's
+ * credential checks by design (there's nowhere else to put a Slack
+ * webhook's own auth) and would otherwise end up verbatim in server
+ * logs on every delivery failure — exactly what the query-param check
+ * exists to prevent for the URL as a whole.
+ */
+function webhookOriginForLogging(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "(invalid url)";
+  }
+}
+
 async function notifyApprovalWebhook(
   url: string,
   payload: { runId: string; graphId: string; nodeId: string; nodeName: string; instructions: string | null; pendingInput: unknown },
 ): Promise<void> {
   if (!isNotificationWebhookUrlAllowed(url)) {
-    console.error(`[approval-webhook] run ${payload.runId}: url no longer allowed, skipping delivery: ${url}`);
+    console.error(`[approval-webhook] run ${payload.runId}: url no longer allowed, skipping delivery to ${webhookOriginForLogging(url)}`);
     return;
   }
   try {
@@ -213,13 +231,20 @@ async function notifyApprovalWebhook(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ event: "run_awaiting_approval", ...payload }),
+      // Same reasoning as httpRequestTool.ts/web_fetch: the allowlist only
+      // validated THIS url. Following a redirect would deliver to
+      // wherever the target sent us instead — including, e.g., an
+      // internal service a compromised/misconfigured target 302s to —
+      // with the outbound request already fully formed. Refuse rather
+      // than silently follow.
+      redirect: "error",
       signal: AbortSignal.timeout(NOTIFICATION_WEBHOOK_TIMEOUT_MS),
     });
     if (!res.ok) {
-      console.error(`[approval-webhook] run ${payload.runId}: delivery to ${url} returned ${res.status}`);
+      console.error(`[approval-webhook] run ${payload.runId}: delivery to ${webhookOriginForLogging(url)} returned ${res.status}`);
     }
   } catch (err) {
-    console.error(`[approval-webhook] run ${payload.runId}: delivery to ${url} failed: ${err instanceof Error ? err.message : err}`);
+    console.error(`[approval-webhook] run ${payload.runId}: delivery to ${webhookOriginForLogging(url)} failed: ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -436,6 +461,40 @@ export async function dispatchHop(runId: string): Promise<void> {
     ? []
     : getAutoRoutingTargets(graphNow, nodeNow.id);
 
+  // Aggregator output is the answer — checked FIRST, before either
+  // fan-out trigger below. aggregatorNodeIds covers both consensus and
+  // map aggregators (resolve.ts), specifically so a node reached in its
+  // JOIN role never re-enters fan-out even if it ALSO carries its own
+  // consensusGroup/mapConfig. A consensusGroup or mapConfig whose own
+  // aggregatorNodeId equals the source's own id is the concrete case
+  // this closes: without this ordering-first, that node would re-parse
+  // its own just-joined output as a fresh consensus trigger or work
+  // list and fan out again, forever — no cycle guard exists on this
+  // path (resolveNextHop's alreadyVisited check below only runs for
+  // normal single-edge routing, never for fan-out), and for a pure
+  // consensus source with no auto edges the re-trigger is unconditional
+  // on every single hop, not even output-dependent. Outgoing edges from
+  // an aggregator are never followed either way — its hop is always
+  // terminal. checkMapConfigNotSelfReferential rejects the literal
+  // self-reference at save time for map; this is the runtime backstop,
+  // and the only protection consensusGroup's own self-reference has
+  // (no equivalent save-time check exists for it yet).
+  if (aggregatorNodeIds(graphNow).has(nodeNow.id)) {
+    await db.insert(runEvents).values({
+      runId,
+      nodeId: node.id,
+      sequence,
+      status: "succeeded",
+      input: run.input,
+      output,
+      startedAt,
+      finishedAt: new Date(),
+    });
+    publishRunEvent({ runId, graphId: graphNow.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
+    await completeRun(runId, graphNow.id, output, run.createdAt);
+    return;
+  }
+
   // A consensus source node with NO auto edges (the original pattern)
   // bypasses normal routing unconditionally on every hop, exactly as
   // before. A HYBRID node — one with both auto edges and a
@@ -491,24 +550,6 @@ export async function dispatchHop(runId: string): Promise<void> {
     // An empty or unparseable list is NOT an error: "no candidates today"
     // is a legitimate outcome for a scheduled map. Fall through to normal
     // routing so the source's own output becomes the answer.
-  }
-
-  // Aggregator output is the answer. Its outgoing auto edges (if any)
-  // are a cycle back into the specialists it just joined.
-  if (aggregatorNodeIds(graphNow).has(nodeNow.id)) {
-    await db.insert(runEvents).values({
-      runId,
-      nodeId: node.id,
-      sequence,
-      status: "succeeded",
-      input: run.input,
-      output,
-      startedAt,
-      finishedAt: new Date(),
-    });
-    publishRunEvent({ runId, graphId: graphNow.id, type: "hop_succeeded", nodeId: node.id, payload: { output } });
-    await completeRun(runId, graphNow.id, output, run.createdAt);
-    return;
   }
 
   const { edge, nextNodeId } = resolveNextHop(graphNow, nodeNow.id, output);
@@ -616,6 +657,22 @@ async function dispatchConsensus(
       publishRunEvent({ runId, graphId: graph.id, type: "hop_dispatched", nodeId: targetNode.id });
 
       try {
+        // Defense in depth, not the primary guard — checkApprovalGateCompatible
+        // (node save) and checkEdgeRetargetGateCompatible (edge insert/reroute)
+        // are meant to make this unreachable, but both are save-time checks on
+        // mutation paths, and this is the runtime boundary a gated branch
+        // actually fires its side effects at. Same "config is a save-time
+        // convenience, not the security boundary" pattern fileAccessRoot/
+        // dispatchTargets/httpEndpoints already follow — re-checked fresh here,
+        // not trusted from whatever passed validation when the graph was last
+        // saved. Recorded as a failed branch, not a thrown error that would
+        // abort sibling branches: the existing partial-failure join already
+        // handles "one branch didn't produce output" correctly.
+        if (targetNode.approvalConfig) {
+          throw new Error(
+            `"${targetNode.name}" has an approval gate configured and cannot run as a consensus branch — fan-out branches run inline with no queue boundary to pause at.`,
+          );
+        }
         const branchTimeoutMs = hopTimeoutMsFor(targetNode);
         const branchDeadlineEpochMs = startedAt.getTime() + branchTimeoutMs;
         const result = await withNodeTimeout(
@@ -860,6 +917,17 @@ async function dispatchMap(
 
   if (!targetNode) {
     await fail(`Map target node ${config.targetNodeId} not found in graph ${graph.id}`);
+    return;
+  }
+  // Defense in depth, same reasoning as dispatchConsensus's per-branch
+  // check: save-time validation (checkApprovalGateCompatible on node
+  // save, checkEdgeRetargetGateCompatible on edge insert/reroute — not
+  // applicable to mapConfig.targetNodeId directly, which is itself
+  // already checked at node-save time, but re-checked here fresh rather
+  // than trusted) is a convenience, not the security boundary. One
+  // target for every item, so this is checked once rather than per item.
+  if (targetNode.approvalConfig) {
+    await fail(`"${targetNode.name}" has an approval gate configured and cannot run as a map target — fan-out branches run inline with no queue boundary to pause at.`);
     return;
   }
   if (items.length > maxItems) {

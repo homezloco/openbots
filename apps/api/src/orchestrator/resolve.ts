@@ -1,10 +1,23 @@
 import type { AgentGraph, RoutingEdge } from "@openbots/graph-schema";
 
-/** Node ids that exist only as a consensus join — they run via dispatchConsensus, never as a sequential next hop. */
+/**
+ * Node ids that exist only as a join — a consensus fan-out's aggregator,
+ * or a map fan-out's. Both matter here for the same reason: a node
+ * reached as a join must never be treated as a fresh fan-out SOURCE
+ * again, even if it happens to also carry its own mapConfig/consensusGroup
+ * — engine.ts's dispatchHop checks this set before re-triggering map
+ * fan-out specifically to close the self-referential-aggregator cycle
+ * (mapConfig.aggregatorNodeId === the source's own id would otherwise
+ * re-parse its own joined output as a fresh work list and fan out again,
+ * with no cycle guard on that path — checkMapConfigNotSelfReferential
+ * rejects the literal self-reference at save time, this closes the
+ * general class at runtime).
+ */
 export function aggregatorNodeIds(graph: AgentGraph): Set<string> {
   const ids = new Set<string>();
   for (const n of graph.nodes) {
     if (n.consensusGroup?.aggregatorNodeId) ids.add(n.consensusGroup.aggregatorNodeId);
+    if (n.mapConfig?.aggregatorNodeId) ids.add(n.mapConfig.aggregatorNodeId);
   }
   return ids;
 }

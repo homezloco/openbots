@@ -12,6 +12,7 @@ import { checkMcpServersAllowed } from "../validation/mcpServer.js";
 import { checkHttpEndpointsAllowed } from "../validation/httpEndpoint.js";
 import { checkApprovalGateCompatible } from "../validation/approvalGate.js";
 import { checkNotificationWebhookAllowed } from "../validation/notificationWebhook.js";
+import { checkConsensusGroupNotSelfReferential, checkMapConfigNotSelfReferential } from "../validation/mapConfig.js";
 
 /**
  * The node/edge mutation core, shared by the HTTP routes (routes/graphs.ts)
@@ -211,6 +212,10 @@ export async function updateAgentNode(
   if (approvalError) return { ok: false, status: 400, error: approvalError };
   const webhookError = checkNotificationWebhookAllowed(effectiveApprovalConfig);
   if (webhookError) return { ok: false, status: 400, error: webhookError };
+  const mapSelfRefError = checkMapConfigNotSelfReferential(nodeId, effectiveMapConfig);
+  if (mapSelfRefError) return { ok: false, status: 400, error: mapSelfRefError };
+  const consensusSelfRefError = checkConsensusGroupNotSelfReferential(nodeId, effectiveConsensusGroup);
+  if (consensusSelfRefError) return { ok: false, status: 400, error: consensusSelfRefError };
 
   const { position, ...rest } = body;
   const [after] = await db
@@ -265,6 +270,21 @@ export async function insertRoutingEdge(graphId: string, body: CreateEdgeBody): 
   ]);
   if (!source) return { ok: false, status: 404, error: "sourceNodeId not found in this graph" };
   if (!target) return { ok: false, status: 404, error: "targetNodeId not found in this graph" };
+
+  // A new `auto` edge on an already-hybrid source gets auto-synced into
+  // its consensusGroup.edgeIds below, making the target an immediate
+  // live consensus branch — checked BEFORE inserting anything, since
+  // dispatchConsensus fans out to whatever's in that list inline with no
+  // queue boundary to pause a gated branch at (checkApprovalGateCompatible
+  // only runs on node create/update, not this edge-mutation path that
+  // reaches the exact same outcome).
+  if (body.kind === "auto" && source.consensusGroup && target.approvalConfig) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Cannot add this edge: "${target.name}" has an approval gate configured and this edge would immediately become a live consensus branch member of "${source.name}".`,
+    };
+  }
 
   const [edge] = await db
     .insert(routingEdges)

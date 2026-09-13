@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { agentNodes, routingEdges } from "../db/schema.js";
 
@@ -85,4 +85,39 @@ export async function checkApprovalGateCompatible(
   }
 
   return null;
+}
+
+/**
+ * The other way a node becomes a live consensus/hybrid branch target
+ * without ever going through checkApprovalGateCompatible: dragging an
+ * EXISTING branch edge (PATCH /graphs/:id/edges/:edgeId) onto a gated
+ * node. That route only ever touches `routing_edges`, never the node
+ * whose `consensusGroup.edgeIds` references this edge id — so it must
+ * run its own check rather than relying on the node-save-time one.
+ * `dispatchConsensus` resolves branch membership purely by edge id
+ * (CLAUDE.md's "Hybrid auto/consensus nodes"), independent of the
+ * edge's own `kind`, so this scans every node's consensusGroup for the
+ * edge id regardless of whether it's a `consensus` or `auto` edge.
+ */
+export async function checkEdgeRetargetGateCompatible(
+  graphId: string,
+  edgeId: string,
+  newTargetNodeId: string,
+): Promise<string | null> {
+  const newTarget = await db.query.agentNodes.findFirst({
+    where: and(eq(agentNodes.id, newTargetNodeId), eq(agentNodes.graphId, graphId)),
+  });
+  if (!newTarget?.approvalConfig) return null;
+
+  const nodes = await db
+    .select({ id: agentNodes.id, name: agentNodes.name, consensusGroup: agentNodes.consensusGroup })
+    .from(agentNodes)
+    .where(eq(agentNodes.graphId, graphId));
+  const referencingNode = nodes.find((n) => {
+    const group = n.consensusGroup as { edgeIds?: string[] } | null;
+    return group?.edgeIds?.includes(edgeId);
+  });
+  if (!referencingNode) return null;
+
+  return `Cannot retarget this edge to "${newTarget.name}": it has an approval gate configured, and this edge is a consensus branch member of "${referencingNode.name}" — a gated node cannot be a fan-out branch target.`;
 }

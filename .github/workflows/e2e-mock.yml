@@ -52,6 +52,7 @@ jobs:
           ALLOWED_FILE_WRITE_ROOTS=
           ALLOWED_SSH_HOSTS=
           ALLOWED_MCP_SERVERS=
+          ALLOWED_NOTIFICATION_WEBHOOKS=http://mcp-echo:3930,http://127.0.0.1:3930
           SSH_KNOWN_HOSTS=
           COOKIE_SECURE=false
           EOF

@@ -293,6 +293,39 @@ genuinely useful completed one — in favor of a bare run-level error with
 no output at all. Covered by the `consensus fan-out: one branch failing
 doesn't discard a successful sibling's output` e2e case.
 
+**A self-referential aggregator is an infinite loop, not just nonsense**
+(found via external review, 2026-09-13). `aggregatorNodeId === source's
+own id` used to have no protection at all: `dispatchHop` checked
+`mapConfig`/`consensusGroup`'s fan-out TRIGGER before the aggregator-
+TERMINAL check, and `aggregatorNodeIds()` (`resolve.ts`) only tracked
+consensus aggregators, never map ones — so a node reached in its own
+aggregator role would re-parse its just-joined output as a fresh
+fan-out trigger and go again, forever (for a pure-consensus source with
+no auto edges, this re-trigger is *unconditional* on every hop, not
+even output-dependent). Fixed two ways: `checkMapConfigNotSelfReferential`/
+`checkConsensusGroupNotSelfReferential` (`validation/mapConfig.ts`)
+reject the literal self-reference at save time for either fan-out kind;
+`aggregatorNodeIds()` now covers both kinds, and the aggregator-terminal
+check in `dispatchHop` runs *first*, before either fan-out trigger — so
+even a longer cycle through several nodes' aggregator roles (not just
+literal self-reference) can't re-enter fan-out once any node in that
+chain is reached as a join point.
+
+**A gated node can become a live fan-out branch two ways a node-level
+save-time check doesn't see** (same review). `checkApprovalGateCompatible`
+only ran on node create/update — but a node also becomes a
+`consensusGroup.edgeIds` member via `insertRoutingEdge`'s hybrid
+auto-sync (a new `auto` edge on an already-hybrid source, see above) and
+via `PATCH /graphs/:id/edges/:edgeId` retargeting an *existing* branch
+edge onto a different node — neither mutation ever touches the node
+whose config the original check runs against. Both are now checked too
+(`checkEdgeRetargetGateCompatible` for the reroute path; an inline check
+in `insertRoutingEdge` for the auto-sync path), and `dispatchConsensus`/
+`dispatchMap` each also refuse a gated branch target at dispatch time as
+defense in depth, the same "config is a save-time convenience, not the
+security boundary" pattern `fileAccessRoot`/`dispatchTargets`/
+`httpEndpoints` already follow.
+
 ## Per-node isolation
 
 Every hop runs behind `withNodeTimeout` (`circuitBreaker.ts`) and as its

@@ -267,6 +267,124 @@ async function main() {
     assert(typeof run.output === "string" && run.output.startsWith("MOCK: "), `aggregator output missing: ${JSON.stringify(run.output)}`);
   });
 
+  // --- Self-referential fan-out aggregators (found via external review, 2026-09-13) ---
+  // dispatchHop used to check mapConfig before the aggregator-terminal
+  // path, and aggregatorNodeIds() only tracked consensus aggregators —
+  // a node whose own mapConfig/consensusGroup.aggregatorNodeId pointed
+  // at itself would re-trigger fan-out forever with no cycle guard.
+  // These are save-time-only cases; the runtime reordering fix
+  // (aggregatorNodeIds now covers map too, checked before either
+  // fan-out trigger) has no mock-tier equivalent, since the only way to
+  // reach it live is the exact self-reference these save-time checks
+  // now reject outright.
+
+  await test("security: mapConfig cannot reference the node itself as target or aggregator", async () => {
+    const g = await createGraph("Mock: map self-reference");
+    const source = await createNode(g.id, mockNode({ name: "MapSource" }));
+    const worker = await createNode(g.id, mockNode({ name: "Worker" }));
+    const aggregator = await createNode(g.id, mockNode({ name: "Aggregator" }));
+
+    const selfTarget = await api(`/graphs/${g.id}/nodes/${source.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ mapConfig: { targetNodeId: source.id, aggregatorNodeId: aggregator.id } }),
+    });
+    assert(selfTarget.status === 400, `expected 400 for self-referential targetNodeId, got ${selfTarget.status} ${JSON.stringify(selfTarget.body)}`);
+    assert(/targetNodeId/.test(selfTarget.body.error ?? ""), `expected a targetNodeId-specific error, got: ${JSON.stringify(selfTarget.body)}`);
+
+    const selfAggregator = await api(`/graphs/${g.id}/nodes/${source.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ mapConfig: { targetNodeId: worker.id, aggregatorNodeId: source.id } }),
+    });
+    assert(selfAggregator.status === 400, `expected 400 for self-referential aggregatorNodeId, got ${selfAggregator.status} ${JSON.stringify(selfAggregator.body)}`);
+    assert(/aggregatorNodeId/.test(selfAggregator.body.error ?? ""), `expected an aggregatorNodeId-specific error, got: ${JSON.stringify(selfAggregator.body)}`);
+  });
+
+  await test("security: consensusGroup cannot reference the node itself as aggregator", async () => {
+    const g = await createGraph("Mock: consensus self-reference");
+    const source = await createNode(g.id, mockNode({ name: "ConsensusSource" }));
+    const branch = await createNode(g.id, mockNode({ name: "Branch" }));
+    const other = await createNode(g.id, mockNode({ name: "Other" }));
+    const e1 = await createEdge(g.id, source.id, branch.id, "consensus");
+    const e2 = await createEdge(g.id, source.id, other.id, "consensus");
+
+    const patch = await api(`/graphs/${g.id}/nodes/${source.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ consensusGroup: { edgeIds: [e1.id, e2.id], aggregatorNodeId: source.id } }),
+    });
+    assert(patch.status === 400, `expected 400 for self-referential consensus aggregator, got ${patch.status} ${JSON.stringify(patch.body)}`);
+    assert(/aggregatorNodeId/.test(patch.body.error ?? ""), `expected an aggregatorNodeId-specific error, got: ${JSON.stringify(patch.body)}`);
+  });
+
+  // --- Approval gate vs. fan-out bypass via edge mutations, not node saves (found via external review, 2026-09-13) ---
+  // checkApprovalGateCompatible only ran on node create/update. Two other
+  // mutations could still make a gated node a live fan-out branch target:
+  // auto-syncing a new edge into an already-hybrid node's consensusGroup
+  // (insertRoutingEdge), and dragging an existing branch edge onto a
+  // gated node (the edge reroute PATCH). Both are now checked too.
+
+  await test("security: a new auto edge is rejected if it would auto-sync a gated node into a hybrid's consensusGroup", async () => {
+    const g = await createGraph("Mock: hybrid auto-sync vs gate");
+    const source = await createNode(g.id, mockNode({ name: "HybridSource" }));
+    const branch = await createNode(g.id, mockNode({ name: "Branch" }));
+    const branch2 = await createNode(g.id, mockNode({ name: "Branch2" }));
+    const aggregator = await createNode(g.id, mockNode({ name: "Aggregator" }));
+    const existingEdge = await createEdge(g.id, source.id, branch.id, "auto");
+    const existingEdge2 = await createEdge(g.id, source.id, branch2.id, "auto");
+    const patch = await api(`/graphs/${g.id}/nodes/${source.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ consensusGroup: { edgeIds: [existingEdge.id, existingEdge2.id], aggregatorNodeId: aggregator.id } }),
+    });
+    assert(patch.status === 200, `consensusGroup patch failed: ${patch.status} ${JSON.stringify(patch.body)}`);
+
+    const gated = await createNode(g.id, {
+      ...mockNode({ name: "GatedTarget" }),
+      approvalConfig: { instructions: "review" },
+    });
+    const newEdge = await api(`/graphs/${g.id}/edges`, {
+      method: "POST",
+      body: JSON.stringify({ sourceNodeId: source.id, targetNodeId: gated.id, kind: "auto" }),
+    });
+    assert(newEdge.status === 400, `expected 400 adding an auto edge into a gated node from a hybrid source, got ${newEdge.status} ${JSON.stringify(newEdge.body)}`);
+    assert(/approval gate/i.test(newEdge.body.error ?? ""), `expected a clear approval-gate error, got: ${JSON.stringify(newEdge.body)}`);
+
+    // The edge must not have been created at all, and the gated node must
+    // not have been silently synced into consensusGroup.edgeIds either.
+    const graph = await api(`/graphs/${g.id}`);
+    assert(!graph.body.edges.some((e: any) => e.targetNodeId === gated.id), "the rejected edge should not exist");
+    const refreshedSource = graph.body.nodes.find((n: any) => n.id === source.id);
+    assert(!refreshedSource.consensusGroup.edgeIds.includes(gated.id), "gated node's edge must not be in consensusGroup.edgeIds");
+  });
+
+  await test("security: rerouting a live consensus branch edge onto a gated node is rejected", async () => {
+    const g = await createGraph("Mock: reroute vs gate");
+    const source = await createNode(g.id, mockNode({ name: "ConsensusSource2" }));
+    const branch = await createNode(g.id, mockNode({ name: "Branch2a" }));
+    const branch2 = await createNode(g.id, mockNode({ name: "Branch2b" }));
+    const aggregator = await createNode(g.id, mockNode({ name: "Aggregator2" }));
+    const edge = await createEdge(g.id, source.id, branch.id, "consensus");
+    const edge2 = await createEdge(g.id, source.id, branch2.id, "consensus");
+    const patch = await api(`/graphs/${g.id}/nodes/${source.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ consensusGroup: { edgeIds: [edge.id, edge2.id], aggregatorNodeId: aggregator.id } }),
+    });
+    assert(patch.status === 200, `consensusGroup patch failed: ${patch.status} ${JSON.stringify(patch.body)}`);
+
+    const gated = await createNode(g.id, {
+      ...mockNode({ name: "GatedRerouteTarget" }),
+      approvalConfig: { instructions: "review" },
+    });
+    const reroute = await api(`/graphs/${g.id}/edges/${edge.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ targetNodeId: gated.id }),
+    });
+    assert(reroute.status === 400, `expected 400 rerouting a consensus branch edge onto a gated node, got ${reroute.status} ${JSON.stringify(reroute.body)}`);
+    assert(/approval gate/i.test(reroute.body.error ?? ""), `expected a clear approval-gate error, got: ${JSON.stringify(reroute.body)}`);
+
+    const graph = await api(`/graphs/${g.id}`);
+    const stillEdge = graph.body.edges.find((e: any) => e.id === edge.id);
+    assert(stillEdge.targetNodeId === branch.id, "the edge's target must be unchanged after a rejected reroute");
+  });
+
   await test("cycle guard: an explicit A→B→A loop completes instead of spinning forever", async () => {
     const g = await createGraph("Mock: cycle guard");
     const a = await createNode(g.id, mockNode({ name: "LoopA" }));

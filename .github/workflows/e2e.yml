@@ -44,6 +44,7 @@ jobs:
           ALLOWED_FILE_WRITE_ROOTS=/tmp/writable-testrepo
           ALLOWED_SSH_HOSTS=ubuntu@203.0.113.10
           ALLOWED_MCP_SERVERS=http://mcp-echo:3930,http://127.0.0.1:3930
+          ALLOWED_NOTIFICATION_WEBHOOKS=http://mcp-echo:3930,http://127.0.0.1:3930
           SSH_KNOWN_HOSTS=203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
           COOKIE_SECURE=false
           # Low on purpose: makes dispatch_to_graph's timeout-fallback e2e

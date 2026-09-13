@@ -17,6 +17,37 @@ import { dirname, join } from "node:path";
 const BASE_URL = process.env.E2E_BASE_URL ?? "http://localhost:4000";
 const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
+/**
+ * Which real provider this suite's agent nodes run on. Defaults to
+ * Anthropic direct (the original behavior), overridable so the same suite
+ * can run against OpenRouter — useful when the direct Anthropic key is
+ * exhausted, and it additionally exercises the OpenRouter prompt-caching
+ * path (registry.ts::openRouterCachingFetch) on every run.
+ *
+ *   E2E_PROVIDER=openrouter E2E_MODEL=anthropic/claude-sonnet-4 \
+ *   E2E_SECONDARY_MODEL=anthropic/claude-haiku-4.5 pnpm --filter @openbots/api test:e2e
+ *
+ * Deliberately NOT applied to the three provider-specific cases below,
+ * which assert on provider identity rather than just needing "a model":
+ * the stored-credential test (openai + unset OPENAI_API_KEY), the
+ * fallback-chain test's xai target, and the GitHub credential rows.
+ */
+const E2E_PROVIDER = process.env.E2E_PROVIDER ?? "anthropic";
+const E2E_MODEL = process.env.E2E_MODEL ?? "claude-sonnet-5";
+/** A cheaper/distinct model for the reviewer tier-mismatch case; only the tier field is asserted on. */
+const E2E_SECONDARY_MODEL = process.env.E2E_SECONDARY_MODEL ?? "claude-haiku-4-5-20251001";
+/**
+ * A syntactically plausible but invalid key for the provider under test,
+ * used to force a real, classified auth error from the provider (NOT a
+ * local "missing env var" throw — see the consensus partial-failure and
+ * fallback-chain tests, which depend on that distinction).
+ */
+const E2E_INVALID_KEY =
+  process.env.E2E_INVALID_KEY ??
+  (E2E_PROVIDER === "openrouter" ? "sk-or-v1-invalid0000000000000000000000000000000000000000000000000000" : "sk-ant-invalid-key-for-e2e-000000");
+
+console.log(`e2e provider: ${E2E_PROVIDER} / ${E2E_MODEL}`);
+
 let sessionCookie = "";
 
 async function api(path: string, init: RequestInit = {}): Promise<{ status: number; body: any }> {
@@ -205,8 +236,8 @@ async function main() {
       body: JSON.stringify({
         name: "Triage",
         role: "router",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Classify the request in one line: billing or technical.",
         description: "Classifies incoming requests",
         position: { x: 0, y: 0 },
@@ -224,8 +255,8 @@ async function main() {
       body: JSON.stringify({
         name: "Responder",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Write a brief, friendly reply based on the triage note.",
         description: "Writes the customer reply",
         position: { x: 300, y: 0 },
@@ -326,8 +357,8 @@ async function main() {
       body: JSON.stringify({
         name: "Worker",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         tier: "flagship",
         systemPrompt: "Say hello.",
         position: { x: 0, y: 0 },
@@ -338,8 +369,8 @@ async function main() {
       body: JSON.stringify({
         name: "Reviewer",
         role: "reviewer",
-        provider: "anthropic",
-        model: "claude-haiku-4-5-20251001",
+        provider: E2E_PROVIDER,
+        model: E2E_SECONDARY_MODEL,
         tier: "economy",
         systemPrompt: "Review it.",
         position: { x: 300, y: 0 },
@@ -367,8 +398,8 @@ async function main() {
       body: JSON.stringify({
         name: "Master",
         role: "supervisor",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt:
           "Decide which specialist should handle this: BILLING or CODE. Respond with the team name in capitals first, then one sentence restating the request.",
         description: "Routes requests",
@@ -381,8 +412,8 @@ async function main() {
       body: JSON.stringify({
         name: "Billing",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Answer the billing question briefly.",
         description: "Handles BILLING invoices payments subscription pricing questions",
         position: { x: 0, y: 180 },
@@ -394,8 +425,8 @@ async function main() {
       body: JSON.stringify({
         name: "Code",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Answer the code question briefly.",
         description: "Handles CODE repository bug technical implementation questions",
         position: { x: 300, y: 180 },
@@ -429,8 +460,8 @@ async function main() {
       body: JSON.stringify({
         name: "Lead",
         role: "supervisor",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: 'Reply with exactly this sentence and nothing else: "The Backend Specialist should handle this."',
         position: { x: 0, y: 0 },
       }),
@@ -440,8 +471,8 @@ async function main() {
       body: JSON.stringify({
         name: "Backend Specialist",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Reply with one short sentence starting 'Backend got it:'.",
         // Deliberately no "backend" token — scoring description-only used
         // to tie on shared words and pick the first auto edge (Frontend).
@@ -454,8 +485,8 @@ async function main() {
       body: JSON.stringify({
         name: "Frontend Specialist",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Reply with one short sentence starting 'Frontend got it:'.",
         description: "UI layout, accessibility, and the Create React App",
         position: { x: 300, y: 180 },
@@ -484,8 +515,8 @@ async function main() {
       body: JSON.stringify({
         name: "Lead",
         role: "supervisor",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Reply with exactly: Billing should handle this because of invoices.",
         position: { x: 0, y: 0 },
       }),
@@ -495,8 +526,8 @@ async function main() {
       body: JSON.stringify({
         name: "Billing",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Quote the user's original question verbatim in your answer, including the exact phrase WIDGETIZER_CHARGE_TWICE if it appears.",
         description: "Handles billing invoices payments subscription pricing questions",
         position: { x: 0, y: 180 },
@@ -530,8 +561,8 @@ async function main() {
       body: JSON.stringify({
         name: "Source",
         role: "router",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Repeat the user's message back verbatim, unchanged. Output nothing else.",
         position: { x: 300, y: 0 },
       }),
@@ -542,8 +573,8 @@ async function main() {
       body: JSON.stringify({
         name: "OptimisticEstimator",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "You are an optimistic estimator. Give one brief, positive-leaning sentence estimating the answer.",
         position: { x: 0, y: 180 },
       }),
@@ -554,8 +585,8 @@ async function main() {
       body: JSON.stringify({
         name: "ConservativeEstimator",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "You are a conservative estimator. Give one brief, cautious sentence estimating the answer.",
         position: { x: 600, y: 180 },
       }),
@@ -566,8 +597,8 @@ async function main() {
       body: JSON.stringify({
         name: "Aggregator",
         role: "reviewer",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt:
           "You receive a JSON array of estimates from different analysts. Synthesize them into one final balanced answer in 1-2 sentences, and explicitly say you considered multiple perspectives.",
         position: { x: 300, y: 360 },
@@ -624,8 +655,8 @@ async function main() {
       body: JSON.stringify({
         name: "Source",
         role: "router",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Repeat the user's message back verbatim, unchanged. Output nothing else.",
         position: { x: 300, y: 0 },
       }),
@@ -636,8 +667,8 @@ async function main() {
       body: JSON.stringify({
         name: "WorkingEstimator",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Give one brief sentence estimating the answer.",
         position: { x: 0, y: 180 },
       }),
@@ -651,15 +682,15 @@ async function main() {
       body: JSON.stringify({
         name: "BrokenEstimator",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Give one brief sentence estimating the answer.",
         position: { x: 600, y: 180 },
       }),
     });
     await api(`/graphs/${graphId}/credentials`, {
       method: "POST",
-      body: JSON.stringify({ provider: "anthropic", apiKey: "sk-ant-invalid-key-for-e2e-000000", nodeId: branchB.body.id }),
+      body: JSON.stringify({ provider: E2E_PROVIDER, apiKey: E2E_INVALID_KEY, nodeId: branchB.body.id }),
     });
 
     const aggregator = await api(`/graphs/${graphId}/nodes`, {
@@ -667,8 +698,8 @@ async function main() {
       body: JSON.stringify({
         name: "Aggregator",
         role: "reviewer",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt:
           "You receive a JSON array of {nodeId, output} reports from different analysts. Synthesize them into one final answer, and explicitly call out if any analyst failed to respond rather than ignoring the gap.",
         position: { x: 300, y: 360 },
@@ -721,8 +752,8 @@ async function main() {
       body: JSON.stringify({
         name: "RepoReader",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "You have read-only access to a directory via list_directory and read_file. Use them to answer.",
         tools: ["read_file", "list_directory"],
         fileAccessRoot: "/tmp/testrepo",
@@ -753,8 +784,8 @@ async function main() {
       body: JSON.stringify({
         name: "Searcher",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Use search_knowledge to answer. Quote matching excerpts.",
         tools: ["search_knowledge"],
         fileAccessRoot: "/tmp/testrepo",
@@ -782,8 +813,8 @@ async function main() {
       body: JSON.stringify({
         name: "SecretReader",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Read the file with read_file and quote its exact contents back to me, verbatim, in full.",
         tools: ["read_file"],
         fileAccessRoot: "/tmp/testrepo",
@@ -813,8 +844,8 @@ async function main() {
       body: JSON.stringify({
         name: "SecretSearcher",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Use search_knowledge to answer. Quote the matching excerpt verbatim.",
         tools: ["search_knowledge"],
         fileAccessRoot: "/tmp/testrepo",
@@ -840,8 +871,8 @@ async function main() {
       body: JSON.stringify({
         name: "NoSearch",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Answer honestly about which tools you have. Do not invent a search tool.",
         tools: [],
         fileAccessRoot: "/tmp/testrepo",
@@ -875,8 +906,8 @@ async function main() {
       body: JSON.stringify({
         name: "Reader",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         // Deliberately no mention of CLAUDE.md anywhere in this prompt —
         // the point is to verify the ENGINE tells it to check, not that a
         // hand-written prompt happened to.
@@ -973,8 +1004,8 @@ async function main() {
       body: JSON.stringify({
         name: "FallbackNode",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Say hello.",
         fallbackChain: [{ provider: "xai", model: "grok-4" }],
         position: { x: 0, y: 0 },
@@ -983,7 +1014,7 @@ async function main() {
     // Bad node-specific credential forces a real 401 from Anthropic on the primary attempt.
     await api(`/graphs/${graphId}/credentials`, {
       method: "POST",
-      body: JSON.stringify({ provider: "anthropic", apiKey: "sk-ant-invalid-key-for-e2e-000000", nodeId: node.body.id }),
+      body: JSON.stringify({ provider: E2E_PROVIDER, apiKey: E2E_INVALID_KEY, nodeId: node.body.id }),
     });
     await api(`/graphs/${graphId}`, { method: "PATCH", body: JSON.stringify({ entryNodeId: node.body.id }) });
 
@@ -1011,8 +1042,8 @@ async function main() {
       body: JSON.stringify({
         name: "Entry",
         role: "router",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         // Deliberately long-winded: the reroute has to land before this
         // finishes generating, and a one-word reply leaves almost no
         // window (a real failure seen on the first run of this test).
@@ -1026,8 +1057,8 @@ async function main() {
       body: JSON.stringify({
         name: "OriginalTarget",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Say ORIGINAL.",
         position: { x: 0, y: 180 },
       }),
@@ -1037,8 +1068,8 @@ async function main() {
       body: JSON.stringify({
         name: "RerouteTarget",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Say REROUTED.",
         position: { x: 600, y: 180 },
       }),
@@ -1087,8 +1118,8 @@ async function main() {
       body: JSON.stringify({
         name: "Snoop",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Read files.",
         tools: ["read_file"],
         fileAccessRoot: "/etc",
@@ -1105,8 +1136,8 @@ async function main() {
       body: JSON.stringify({
         name: "Reader",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Read files.",
         tools: ["read_file"],
         fileAccessRoot: "/tmp/testrepo",
@@ -1132,8 +1163,8 @@ async function main() {
       body: JSON.stringify({
         name: "Ssrf",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Call MCP tools.",
         tools: ["mcp"],
         mcpServers: [{ slug: "meta", url: "http://169.254.169.254/latest/meta-data", allowedTools: ["echo"] }],
@@ -1150,8 +1181,8 @@ async function main() {
       body: JSON.stringify({
         name: "Leak",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         tools: ["mcp"],
         mcpServers: [{ slug: "echo", url: "http://user:pass@127.0.0.1:3930/mcp", allowedTools: ["echo"] }],
         position: { x: 0, y: 0 },
@@ -1167,8 +1198,8 @@ async function main() {
       body: JSON.stringify({
         name: "LeakQuery",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         tools: ["mcp"],
         mcpServers: [{ slug: "echo", url: "http://127.0.0.1:3930/mcp?api_key=shouldnotbehere", allowedTools: ["echo"] }],
         position: { x: 0, y: 0 },
@@ -1185,8 +1216,8 @@ async function main() {
       body: JSON.stringify({
         name: "Dup",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         tools: ["mcp"],
         mcpServers: [
           { slug: "echo", url: "http://127.0.0.1:3930/mcp", allowedTools: ["echo"] },
@@ -1202,8 +1233,8 @@ async function main() {
       body: JSON.stringify({
         name: "InertMcp",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         tools: [],
         mcpServers: [{ slug: "echo", url: "http://127.0.0.1:3930/mcp", allowedTools: ["echo"] }],
         position: { x: 0, y: 0 },
@@ -1220,8 +1251,8 @@ async function main() {
       body: JSON.stringify({
         name: "WithMcp",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         tools: ["mcp"],
         mcpServers: [{ slug: "echo", url: "http://127.0.0.1:3930/mcp", allowedTools: ["echo"] }],
         position: { x: 0, y: 0 },
@@ -1254,8 +1285,8 @@ async function main() {
       body: JSON.stringify({
         name: "McpCaller",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "You can call MCP tools that were listed in your instructions. Use them when asked. Quote tool results exactly.",
         tools: ["mcp"],
         mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"] }],
@@ -1319,8 +1350,8 @@ async function main() {
       body: JSON.stringify({
         name: "InertMcpRuntime",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Answer honestly about what tools you actually have available; don't guess.",
         tools: [],
         mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"] }],
@@ -1351,8 +1382,8 @@ async function main() {
       body: JSON.stringify({
         name: "NeedsCred",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "test",
         tools: ["mcp"],
         mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"], credentialProvider: "mcp_echo" }],
@@ -1390,8 +1421,8 @@ async function main() {
       body: JSON.stringify({
         name: "HeaderAuth",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Call mcp_echo_echo_headers and quote its exact JSON result back to me, verbatim.",
         tools: ["mcp"],
         mcpServers: [
@@ -1433,8 +1464,8 @@ async function main() {
       body: JSON.stringify({
         name: "BearerAuth",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Call mcp_echo_echo_headers and quote its exact JSON result back to me, verbatim.",
         tools: ["mcp"],
         mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo_headers"], credentialProvider: "mcp_echo_beartest" }],
@@ -1469,8 +1500,8 @@ async function main() {
       body: JSON.stringify({
         name: "ClearHeader",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         tools: ["mcp"],
         mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"], headerName: "X-Something" }],
         position: { x: 0, y: 0 },
@@ -1494,8 +1525,8 @@ async function main() {
       body: JSON.stringify({
         name: "BadHeader",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         tools: ["mcp"],
         mcpServers: [{ slug: "echo", url: MCP_ECHO_URL, allowedTools: ["echo"], headerName: "not a valid header" }],
         position: { x: 0, y: 0 },
@@ -1593,8 +1624,8 @@ async function main() {
       body: JSON.stringify({
         name: "VictimAgent",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "original prompt",
         position: { x: 0, y: 0 },
       }),
@@ -1636,7 +1667,7 @@ async function main() {
       const mkVictimNode = (name: string) =>
         api(`/graphs/${victimGraph.body.id}/nodes`, {
           method: "POST",
-          body: JSON.stringify({ name, role: "worker", provider: "anthropic", model: "claude-sonnet-5", position: { x: 0, y: 0 } }),
+          body: JSON.stringify({ name, role: "worker", provider: E2E_PROVIDER, model: E2E_MODEL, position: { x: 0, y: 0 } }),
         });
       const victimHybrid = await mkVictimNode("VictimHybrid");
       const victimSpecialistA = await mkVictimNode("VictimSpecialistA");
@@ -1668,8 +1699,8 @@ async function main() {
         body: JSON.stringify({
           name: "AttackerNode",
           role: "worker",
-          provider: "anthropic",
-          model: "claude-sonnet-5",
+          provider: E2E_PROVIDER,
+          model: E2E_MODEL,
           position: { x: 0, y: 0 },
         }),
       });
@@ -1811,8 +1842,8 @@ async function main() {
       body: JSON.stringify({
         name: "ReusableAgent",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "distinctive prompt for reuse test",
         description: "distinctive description",
         tools: ["read_file", "list_directory"],
@@ -1850,8 +1881,8 @@ async function main() {
       body: JSON.stringify({
         name: "VictimReusable",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         position: { x: 0, y: 0 },
       }),
     });
@@ -1921,8 +1952,8 @@ async function main() {
       body: JSON.stringify({
         name: "LeadEngineer",
         role: "supervisor",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Route engineering requests to the right project specialist.",
         description: "Routes engineering requests to project specialists",
         position: { x: 300, y: 0 },
@@ -1935,8 +1966,8 @@ async function main() {
       body: JSON.stringify({
         name: "ProjectAlpha",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "You are the engineer for Project Alpha. Reply with one short sentence starting 'Alpha status:'.",
         description: "Handles engineering questions about Project Alpha, a fictional inventory tracking system",
         position: { x: 0, y: 180 },
@@ -1949,8 +1980,8 @@ async function main() {
       body: JSON.stringify({
         name: "ProjectBeta",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "You are the engineer for Project Beta. Reply with one short sentence starting 'Beta status:'.",
         description: "Handles engineering questions about Project Beta, a fictional billing and payments system",
         position: { x: 600, y: 180 },
@@ -1963,8 +1994,8 @@ async function main() {
       body: JSON.stringify({
         name: "Aggregator",
         role: "reviewer",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt:
           "You receive a JSON array of per-project status reports. Combine them into one summary that explicitly mentions both Alpha and Beta.",
         position: { x: 300, y: 360 },
@@ -2059,8 +2090,8 @@ async function main() {
       body: JSON.stringify({
         name: "ProjectGamma",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "You are the engineer for Project Gamma. Reply with one short sentence starting 'Gamma status:'.",
         description: "Handles engineering questions about Project Gamma, a fictional analytics system",
         position: { x: 900, y: 180 },
@@ -2098,8 +2129,8 @@ async function main() {
       body: JSON.stringify({
         name: "ProjectDelta",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "You are the engineer for Project Delta. Reply with one short sentence starting 'Delta status:'.",
         description: "Handles engineering questions about Project Delta, a fictional analytics system",
         position: { x: 1100, y: 180 },
@@ -2132,8 +2163,8 @@ async function main() {
       body: JSON.stringify({
         name: "Writer",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt:
           "You can read and write files via read_file, list_directory, write_file, and edit_file. When asked to create or edit a file, actually call the tool — don't just describe what you would do. Report tool errors exactly as given, without softening them.",
         tools: ["read_file", "list_directory", "write_file", "edit_file"],
@@ -2199,8 +2230,8 @@ async function main() {
       body: JSON.stringify({
         name: "BadWriter",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "test",
         tools: ["write_file"],
         fileAccessRoot: "/tmp/testrepo", // in ALLOWED_FILE_ACCESS_ROOTS but deliberately NOT in ALLOWED_FILE_WRITE_ROOTS
@@ -2217,8 +2248,8 @@ async function main() {
       body: JSON.stringify({
         name: "ReaderOnly",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Answer honestly about what tools you actually have available; don't guess.",
         tools: ["read_file", "list_directory"],
         fileAccessRoot: WRITABLE_ROOT,
@@ -2462,8 +2493,8 @@ async function main() {
       body: JSON.stringify({
         name: "Ticker",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Reply with exactly the single word: tick",
         tools: [],
         position: { x: 0, y: 0 },
@@ -2565,8 +2596,8 @@ async function main() {
       body: JSON.stringify({
         name: "Hook",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "You'll be given a JSON object as input. Reply with exactly the value of its 'event' field, nothing else.",
         tools: [],
         position: { x: 0, y: 0 },
@@ -2674,8 +2705,8 @@ async function main() {
       body: JSON.stringify({
         name: "Target Worker",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Reply with exactly the single word: pong",
         position: { x: 0, y: 0 },
       }),
@@ -2689,8 +2720,8 @@ async function main() {
       body: JSON.stringify({
         name: "Dispatcher",
         role: "supervisor",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: `When asked to dispatch, call dispatch_to_graph. If you're given a specific targetGraphName to use, use exactly that one, even if it looks wrong to you. Otherwise use "${dispatchTargetGraphName}".`,
         tools: ["dispatch_to_graph"],
         dispatchTargets: [dispatchTargetGraphId],
@@ -2714,8 +2745,8 @@ async function main() {
       body: JSON.stringify({
         name: "Bad Dispatcher",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "test",
         tools: ["dispatch_to_graph"],
         dispatchTargets: [victimGraph.body.id],
@@ -2731,8 +2762,8 @@ async function main() {
       body: JSON.stringify({
         name: "Empty Targets Dispatcher",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "test",
         tools: ["dispatch_to_graph"],
         position: { x: 0, y: 0 },
@@ -2858,8 +2889,8 @@ async function main() {
       body: JSON.stringify({
         name: "SlowWorker",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt:
           "When given any task, call mcp_echo_echo with text 'slow-task-done' and delayMs 15000, then reply with exactly what it echoed.",
         tools: ["mcp"],
@@ -2931,8 +2962,8 @@ async function main() {
       body: JSON.stringify({
         name: "Existing A",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "test",
         position: { x: 0, y: 0 },
       }),
@@ -2943,8 +2974,8 @@ async function main() {
       body: JSON.stringify({
         name: "Existing B",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "test",
         position: { x: 0, y: 100 },
       }),
@@ -2958,8 +2989,8 @@ async function main() {
       body: JSON.stringify({
         name: "Manager",
         role: "supervisor",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: `You manage other graphs using your graph-editing tools. When asked to act on a graph, use exactly the target graph name you're given, and exactly the node names you're given.`,
         tools: ["manage_target_graphs"],
         dispatchTargets: [managementTargetGraphId],
@@ -3123,8 +3154,8 @@ async function main() {
       body: JSON.stringify({
         name: "Manager Only",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         // No dispatch_to_graph — appendReachableGraphsContext used to only
         // fire when wantsDispatch was true, leaving a node with ONLY
         // manage_target_graphs with no idea what any target was named.
@@ -3168,8 +3199,8 @@ async function main() {
       body: JSON.stringify({
         name: "Analyst",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "When asked for metrics, call business_metrics with source 'acme'. Report the exact error text if you get one.",
         tools: ["business_metrics"],
         position: { x: 0, y: 0 },
@@ -3232,8 +3263,8 @@ async function main() {
       body: JSON.stringify({
         name: "Analyst",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         // No mention of any source name in the prompt — appendMetricsSourcesContext
         // (engine.ts) must be what tells it, mirroring appendReachableGraphsContext.
         systemPrompt: "test",
@@ -3273,8 +3304,8 @@ async function main() {
       body: JSON.stringify({
         name: "Rogue",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Run remote commands.",
         tools: ["run_remote_command"],
         sshTarget: { host: "198.51.100.7", username: "root", allowedCommands: [{ label: "whoami", command: "whoami" }] },
@@ -3295,8 +3326,8 @@ async function main() {
       body: JSON.stringify({
         name: "Ops",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Run remote commands when asked, using run_remote_command.",
         tools: ["run_remote_command"],
         sshTarget: {
@@ -3347,8 +3378,8 @@ async function main() {
       body: JSON.stringify({
         name: "NotOps",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Answer honestly about what tools you actually have available; don't guess.",
         tools: [],
         sshTarget: {
@@ -3399,8 +3430,8 @@ async function main() {
       body: JSON.stringify({
         name: "Coder",
         role: "worker",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: E2E_PROVIDER,
+        model: E2E_MODEL,
         systemPrompt: "Answer honestly about what tools you actually have available; don't guess.",
         tools: ["run_code"],
         position: { x: 0, y: 0 },
@@ -3451,8 +3482,8 @@ async function main() {
         body: JSON.stringify({
           name: "Coder",
           role: "worker",
-          provider: "anthropic",
-          model: "claude-sonnet-5",
+          provider: E2E_PROVIDER,
+          model: E2E_MODEL,
           systemPrompt: "Run code with run_code when asked, and report the exact output back.",
           tools: ["run_code"],
           position: { x: 0, y: 0 },

@@ -317,6 +317,72 @@ async function main() {
     assert(owner.status === 200, `expected 200 for owner, got ${owner.status}`);
   });
 
+  // --- Structural ambiguity detection (resolve.ts::matchAutoEdge) ---
+  // The mock provider echoes the input back as the router's output, which
+  // makes the router's exact wording controllable — the only way to test
+  // these paths deterministically. Real-model coverage of the same
+  // behaviour is inherently flaky; this is the point of the mock tier.
+  async function ambiguityGraph(name: string) {
+    const g = await createGraph(name);
+    const router = await createNode(g.id, mockNode({ name: "Router", role: "router" }));
+    const billing = await createNode(
+      g.id,
+      mockNode({ name: "Billing Specialist", description: "invoices, payments, refunds" }),
+    );
+    const tech = await createNode(
+      g.id,
+      mockNode({ name: "Technical Specialist", description: "bugs, crashes, errors" }),
+    );
+    await createEdge(g.id, router.id, billing.id, "auto");
+    await createEdge(g.id, router.id, tech.id, "auto");
+    await setEntry(g.id, router.id);
+    return { g, router, billing, tech };
+  }
+
+  await test("auto-routing: a clarifying question naming two specialists does not silently route", async () => {
+    const { g, router } = await ambiguityGraph("Mock: ambiguity two names");
+    // Mirrors a real Gemma 4 E4B output: correct judgement (it asked),
+    // wrong protocol (no UNKNOWN prefix). Before the structural check this
+    // keyword-matched "Billing Specialist" and threw the question away.
+    const runId = await startRun(
+      g.id,
+      "Is this about your invoice (Billing Specialist) or a crash (Technical Specialist)?",
+    );
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 1, `expected the question to end the run, got ${hops.length} hops`);
+    assert(hops[0].nodeId === router.id, "the router's own question should be the answer");
+  });
+
+  await test("auto-routing: a trailing question naming nobody does not tie-break into a target", async () => {
+    const { g, router } = await ambiguityGraph("Mock: ambiguity no names");
+    // "Specialist" is a token both targets share, so scoring alone would
+    // tie and pick one arbitrarily by priority.
+    const runId = await startRun(g.id, "Which specialist should handle this?");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 1, `expected the question to end the run, got ${hops.length} hops`);
+    assert(hops[0].nodeId === router.id, "the router's own question should be the answer");
+  });
+
+  await test("auto-routing: a decisive answer mentioning a second specialist still routes", async () => {
+    const { g, billing } = await ambiguityGraph("Mock: decisive with contrast");
+    // Names both AND contains a question mark, but the question is not
+    // trailing and the sentence is a decision — the regression this fix
+    // most risked causing.
+    const runId = await startRun(
+      g.id,
+      "Is it a crash? No. This is the Billing Specialist's area, not the Technical Specialist's.",
+    );
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 2, `expected the run to route onward, got ${hops.length} hops`);
+    assert(hops[1].nodeId === billing.id, `expected Billing, got ${hops[1].nodeId}`);
+  });
+
   await test("transform node: template op interpolates {{input}} in an agent→transform pipeline", async () => {
     const g = await createGraph("Mock: transform template");
     const agent = await createNode(g.id, mockNode({ name: "Agent" }));
@@ -380,6 +446,73 @@ async function main() {
       failed.length === 1 && /Unknown transform operation/.test(failed[0].error ?? ""),
       `expected a clear unknown-operation error, got: ${JSON.stringify(failed.map((f: any) => f.error))}`,
     );
+  });
+
+  // --- http_request operator allowlist (no model involved) ---
+  // ALLOWED_HTTP_ENDPOINTS is unset in the mock CI env, so EVERY baseUrl
+  // is outside the allowlist — which is exactly the empty-deny default
+  // worth asserting: a fresh deployment must not be able to grant HTTP
+  // access to anything at all.
+  async function httpNode(slug: string, baseUrl: string, extra: Record<string, unknown> = {}) {
+    const g = await createGraph(`Mock: http ${slug} ${Date.now()}`);
+    return api(`/graphs/${g.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...mockNode({ name: "HTTP Caller" }),
+        tools: ["http_request"],
+        httpEndpoints: [{ slug, baseUrl, ...extra }],
+      }),
+    });
+  }
+
+  await test("security: an httpEndpoints baseUrl outside ALLOWED_HTTP_ENDPOINTS is rejected", async () => {
+    // The canonical SSRF target: cloud instance metadata.
+    const res = await httpNode("meta", "http://169.254.169.254");
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+    assert(
+      /ALLOWED_HTTP_ENDPOINTS/.test(JSON.stringify(res.body)),
+      `error should name the allowlist, got: ${JSON.stringify(res.body)}`,
+    );
+  });
+
+  await test("security: an httpEndpoints baseUrl with embedded credentials is rejected", async () => {
+    const res = await httpNode("userinfo", "http://user:pass@example.com");
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("security: an httpEndpoints baseUrl with a credential-shaped query param is rejected", async () => {
+    // A token in a URL ends up in node config, logs, and browser history.
+    const res = await httpNode("leaky", "http://example.com/?api_key=secret");
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("security: duplicate httpEndpoints slugs are rejected", async () => {
+    const g = await createGraph("Mock: http duplicate slug");
+    const res = await api(`/graphs/${g.id}/nodes`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...mockNode({ name: "Dupe" }),
+        tools: ["http_request"],
+        httpEndpoints: [
+          { slug: "same", baseUrl: "http://a.example.com" },
+          { slug: "same", baseUrl: "http://b.example.com" },
+        ],
+      }),
+    });
+    assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(res.body)}`);
+    assert(/duplicate slug/i.test(JSON.stringify(res.body)), `expected a duplicate-slug error, got: ${JSON.stringify(res.body)}`);
+  });
+
+  await test("PATCH httpEndpoints: null revokes previously-granted endpoints", async () => {
+    // Same .nullable() reason as consensusGroup/sshTarget/mcpServers: a
+    // grant that can't be revoked is a one-way door.
+    const g = await createGraph("Mock: http revoke");
+    const node = await createNode(g.id, mockNode({ name: "Revocable" }));
+    const patch = await api(`/graphs/${g.id}/nodes/${node.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ httpEndpoints: null }),
+    });
+    assert(patch.status === 200, `expected the null clear to be accepted, got ${patch.status}: ${JSON.stringify(patch.body)}`);
   });
 
   await test("graph delete cascades cleanly", async () => {

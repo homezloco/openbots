@@ -55,6 +55,7 @@ export const agentNodes = pgTable("agent_nodes", {
   dispatchTargets: jsonb("dispatch_targets"), // string[] (graph ids) | null — see orchestrator/dispatchTool.ts
   sshTarget: jsonb("ssh_target"), // {host, username, allowedCommands: {label, command}[]} | null — see orchestrator/remoteCommandTool.ts
   mcpServers: jsonb("mcp_servers"), // McpServer[] | null — see orchestrator/mcpTool.ts (PR 2) and validation/mcpServer.ts
+  httpEndpoints: jsonb("http_endpoints"), // HttpEndpoint[] | null — see orchestrator/httpRequestTool.ts and validation/httpEndpoint.ts
   positionX: real("position_x").notNull().default(0),
   positionY: real("position_y").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

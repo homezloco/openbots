@@ -4,6 +4,32 @@ All notable changes to OpenBots are documented here. This project uses
 [semantic versioning](https://semver.org/); pre-1.0, minor versions may
 contain breaking changes, which will always be called out explicitly.
 
+## Unreleased
+
+### Fixed
+
+- **Auto-routing no longer depends on the model following a convention.**
+  `matchAutoEdge` now treats any router output ending in a question mark
+  as "no match", in addition to the existing `UNKNOWN`/`DONE` sentinels.
+  Those sentinels only work if the model complies with them; smaller
+  models often don't, and a clarifying question that named a specialist
+  would get keyword-matched and silently routed, discarding the question.
+  See `docs/orchestration.md` → "How `matchAutoEdge` decides".
+- **Stored OpenRouter credentials no longer fail with "Invalid URL".**
+  A present-but-empty `OPENAI_COMPATIBLE_BASE_URL` was passed through as
+  an empty string rather than falling back to the provider default.
+- **Agent-written files are no longer root-owned.** The api/worker
+  containers run as the host uid (`DOCKER_UID`/`DOCKER_GID`).
+
+### Changed
+
+- `openai-compatible` now declares `toolCalling: true` — verified against
+  a local Ollama returning well-formed OpenAI-shape `tool_calls`.
+- The full e2e suite is provider-configurable (`E2E_PROVIDER` /
+  `E2E_MODEL`); CI runs it on OpenRouter.
+- Prompt caching is enabled on the OpenRouter route for Anthropic-family
+  models, with correct cache-read *and* cache-write cost accounting.
+
 ## v0.1.0 — 2026-09-13
 
 First tagged release. OpenBots has been developed and dogfooded against

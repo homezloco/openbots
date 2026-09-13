@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { AgentRole, ConsensusGroup, FallbackTarget, McpServer, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
+import { AgentRole, ConsensusGroup, FallbackTarget, HttpEndpoint, McpServer, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
 import { agentGraphs, agentNodes, routingEdges } from "../db/schema.js";
 import { recordChange } from "../db/routingChanges.js";
@@ -9,6 +9,7 @@ import { checkFileAccessRootAllowed, checkWriteRootAllowed, fileAccessRootSchema
 import { checkDispatchTargetsOwned } from "../validation/dispatchTargets.js";
 import { checkSshTargetAllowed } from "../validation/sshTarget.js";
 import { checkMcpServersAllowed } from "../validation/mcpServer.js";
+import { checkHttpEndpointsAllowed } from "../validation/httpEndpoint.js";
 
 /**
  * The node/edge mutation core, shared by the HTTP routes (routes/graphs.ts)
@@ -52,6 +53,9 @@ export const createNodeBody = z.object({
   sshTarget: SshTarget.nullable().optional(),
   // .nullable() so PATCH can clear MCP config the same way as sshTarget.
   mcpServers: z.array(McpServer).nullable().optional(),
+  // .nullable() for the same reason as mcpServers — PATCH must be able to
+  // revoke a node's HTTP endpoints, not just replace them.
+  httpEndpoints: z.array(HttpEndpoint).nullable().optional(),
   position: z.object({ x: z.number(), y: z.number() }),
 });
 
@@ -91,6 +95,7 @@ export async function insertAgentNode(graphId: string, body: CreateNodeBody) {
       dispatchTargets: body.dispatchTargets ?? null,
       sshTarget: body.sshTarget ?? null,
       mcpServers: body.mcpServers ?? null,
+      httpEndpoints: body.httpEndpoints ?? null,
       positionX: body.position.x,
       positionY: body.position.y,
     })
@@ -124,6 +129,8 @@ export async function insertAgentNodeValidated(
   if (sshError) return { ok: false, status: 400, error: sshError };
   const mcpError = checkMcpServersAllowed(body.mcpServers);
   if (mcpError) return { ok: false, status: 400, error: mcpError };
+  const httpError = checkHttpEndpointsAllowed(body.httpEndpoints);
+  if (httpError) return { ok: false, status: 400, error: httpError };
   return { ok: true, value: await insertAgentNode(graphId, body) };
 }
 
@@ -166,6 +173,11 @@ export async function updateAgentNode(
     body.mcpServers !== undefined ? body.mcpServers : (before.mcpServers as McpServer[] | null | undefined);
   const mcpError = checkMcpServersAllowed(effectiveMcpServers);
   if (mcpError) return { ok: false, status: 400, error: mcpError };
+
+  const effectiveHttpEndpoints =
+    body.httpEndpoints !== undefined ? body.httpEndpoints : (before.httpEndpoints as HttpEndpoint[] | null | undefined);
+  const httpError = checkHttpEndpointsAllowed(effectiveHttpEndpoints);
+  if (httpError) return { ok: false, status: 400, error: httpError };
 
   const { position, ...rest } = body;
   const [after] = await db

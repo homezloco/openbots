@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { join, sep } from "node:path";
 import { promisify } from "node:util";
 import { sshCommandFor, withEphemeralSshKey } from "./sshExec.js";
 
@@ -65,17 +65,108 @@ export async function getRemoteUrl(worktreePath: string): Promise<string> {
 }
 
 /**
+ * The repo root a worktree lives under. Worktree paths are always
+ * `<root>/.openbots/worktrees/<name>` (see ensureWorktree), so the root is
+ * recoverable from the path alone — no extra plumbing through callers.
+ */
+function rootFromWorktreePath(worktreePath: string): string | null {
+  const marker = `${sep}.openbots${sep}worktrees${sep}`;
+  const idx = worktreePath.indexOf(marker);
+  return idx === -1 ? null : worktreePath.slice(0, idx);
+}
+
+/**
  * Full diff for one commit, for the GitHub tab's "view diff" expander.
- * Worktrees are never cleaned up (see CLAUDE.md), so this normally still
- * works long after the run that made the commit finished — but `git show`
- * throws (ENOENT via execFile, or git's own "not a git repository") if the
- * worktree was moved/deleted by something outside OpenBots; the route
- * handler is responsible for turning that into a clear user-facing message
- * rather than a raw stack trace.
+ *
+ * Falls back to the repo ROOT when the worktree directory is gone — now a
+ * normal, expected state rather than corruption, since `pruneWorktrees`
+ * reclaims old worktree directories. A commit survives that entirely:
+ * verified directly that `git worktree remove` deletes the working
+ * directory and its admin files but leaves the branch and every object
+ * intact, so `git show <sha>` from the root returns the same diff.
+ * Without this fallback, pruning would have silently broken the diff
+ * viewer for every historical commit.
  */
 export async function getCommitDiff(worktreePath: string, sha: string): Promise<string> {
-  await ensureSafeDirectory(worktreePath);
-  return git(["show", "--no-color", sha], worktreePath);
+  const worktreeExists = await stat(worktreePath)
+    .then(() => true)
+    .catch(() => false);
+  const cwd = worktreeExists ? worktreePath : rootFromWorktreePath(worktreePath);
+  if (!cwd) {
+    throw new Error(`Worktree ${worktreePath} is gone and its repo root could not be derived from the path.`);
+  }
+  await ensureSafeDirectory(cwd);
+  return git(["show", "--no-color", sha], cwd);
+}
+
+/**
+ * Reclaims old agent worktree DIRECTORIES. Nothing is lost: `git worktree
+ * remove` leaves the `openbots/*` branch and all of its commits in the
+ * repo's object store, so unpushed work stays recoverable (`git log
+ * openbots/<name>`), `/push` still works, and getCommitDiff above falls
+ * back to the root. Only the checked-out copy of the files goes away.
+ *
+ * Without this they accumulate forever — one directory per (node, run),
+ * each a full checkout of the project. An actively dogfooded repo had 18
+ * after a single day.
+ *
+ * Deliberately conservative:
+ * - **Skips dirty worktrees entirely.** Uncommitted changes mean a hop
+ *   died mid-write; unlike a commit, that IS unrecoverable if deleted, so
+ *   it's left alone regardless of age and reported back to the caller.
+ * - **Age is measured by mtime**, so a worktree something is still
+ *   touching is never a candidate.
+ * - Failures are per-worktree and non-fatal: this is housekeeping and must
+ *   never take down the worker that calls it.
+ */
+export async function pruneWorktrees(
+  root: string,
+  maxAgeMs: number,
+): Promise<{ removed: string[]; keptDirty: string[] }> {
+  const removed: string[] = [];
+  const keptDirty: string[] = [];
+  const worktreesDir = join(root, ".openbots", "worktrees");
+
+  const entries = await readdir(worktreesDir, { withFileTypes: true }).catch(() => []);
+  if (entries.length === 0) return { removed, keptDirty };
+
+  await ensureSafeDirectory(root);
+  const cutoff = Date.now() - maxAgeMs;
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const worktreePath = join(worktreesDir, entry.name);
+    try {
+      const info = await stat(worktreePath);
+      if (info.mtimeMs > cutoff) continue;
+
+      await ensureSafeDirectory(worktreePath);
+      const dirty = (await git(["status", "--porcelain"], worktreePath)).trim();
+      if (dirty) {
+        keptDirty.push(worktreePath);
+        continue;
+      }
+
+      await git(["worktree", "remove", "--force", worktreePath], root);
+      removed.push(worktreePath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Almost always a worktree written by an older root-running
+      // container (before the compose `user:` fix), which the worker's
+      // now-unprivileged uid cannot delete. Say so, rather than making
+      // the operator decode a bare "Permission denied" from git.
+      const hint = /permission denied/i.test(message)
+        ? " — likely created by an older root-running container; remove it manually (sudo rm -rf) once."
+        : "";
+      console.warn(`[worktree-prune] skipped ${worktreePath}: ${message}${hint}`);
+    }
+  }
+
+  // Clears admin entries for worktrees whose directory vanished by other
+  // means (a human `rm -rf`), which git otherwise keeps listing forever.
+  await git(["worktree", "prune"], root).catch(() => "");
+
+  return { removed, keptDirty };
 }
 
 function isGithubSshRemote(remote: string): boolean {

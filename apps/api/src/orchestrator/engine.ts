@@ -48,6 +48,7 @@ import { createBusinessMetricsTool, getMetricsSources, type MetricsSource } from
 import { createRunRemoteCommandTool } from "./remoteCommandTool.js";
 import { createRunCodeTool } from "./codeSandboxTool.js";
 import { appendMcpContext, resolveMcpTools, type McpResolution } from "./mcpTool.js";
+import { resolveHttpRequestTools } from "./httpRequestTool.js";
 import { computeWarnings } from "./warnings.js";
 import { enqueueHop } from "../queue/runQueue.js";
 import { publishRunEvent } from "../ws/publish.js";
@@ -708,6 +709,20 @@ function appendRemoteCommandContext(systemPrompt: string, allowedCommands: { lab
  * this whole appendXContext family was built to stop) or the model just
  * invents a plausible-sounding source name that fails.
  */
+/**
+ * Same family as appendMetricsSourcesContext below: the `http_request`
+ * tool takes an endpoint SLUG, which the model could never guess. Without
+ * this a node either has to be told its endpoints by hand in its own
+ * system prompt (which drifts, exactly like the auto-routing-candidates
+ * bug this whole appendXContext family exists to stop) or the model
+ * invents a plausible-sounding slug and the call fails.
+ */
+function appendHttpEndpointsContext(systemPrompt: string, endpoints: AgentNode["httpEndpoints"]): string {
+  if (!endpoints || endpoints.length === 0) return systemPrompt;
+  const list = endpoints.map((e) => `- ${e.slug}: ${e.baseUrl}`).join("\n");
+  return `${systemPrompt}\n\nYou can call these pre-authorized REST endpoints with http_request, by slug (never by URL):\n${list}\n\nYou supply the slug plus a relative path; the base URL and any credentials are attached for you. You cannot reach any other host.`;
+}
+
 function appendMetricsSourcesContext(systemPrompt: string, sources: MetricsSource[]): string {
   if (sources.length === 0) return systemPrompt;
   const list = sources.map((s) => `- ${s.slug}${s.label ? ` (${s.label})` : ""}`).join("\n");
@@ -848,6 +863,10 @@ async function callAgent(
   // Dual-gate: the "mcp" tool name AND a non-empty mcpServers list.
   // URL allowlist is re-checked inside resolveMcpTools on every hop.
   const wantsMcp = node.tools.includes("mcp") && Boolean(node.mcpServers?.length);
+  // Dual-gate: the "http_request" tool name AND a non-empty httpEndpoints
+  // list. Base URLs are re-checked against ALLOWED_HTTP_ENDPOINTS inside
+  // resolveHttpRequestTools on every hop, not just at node-save time.
+  const wantsHttpRequest = node.tools.includes("http_request") && Boolean(node.httpEndpoints?.length);
   // Computed whenever EITHER capability wants it — not just wantsDispatch
   // alone, which used to leave a manage_target_graphs-only node with no
   // idea what any of its target graphs were even named. See PLAN.md.
@@ -869,6 +888,7 @@ async function callAgent(
   const systemPrompt = isNonLlmProvider
     ? node.systemPrompt
     : appendProjectContext(
+        appendHttpEndpointsContext(
         appendMetricsSourcesContext(
           appendRemoteCommandContext(
             appendReachableGraphsContext(
@@ -888,6 +908,8 @@ async function callAgent(
             wantsRemoteCommand ? node.sshTarget!.allowedCommands : [],
           ),
           metricsSources,
+        ),
+        wantsHttpRequest ? node.httpEndpoints : [],
         ),
         effectiveFileRoot,
         canRead,
@@ -959,6 +981,16 @@ async function callAgent(
         mcp = await resolveMcpTools(node, ownerId, new Set(Object.keys(tools ?? {})));
         if (Object.keys(mcp.tools).length > 0) {
           tools = { ...(tools ?? {}), ...mcp.tools };
+        }
+      }
+      if (wantsHttpRequest) {
+        // Resolved fresh per attempt like MCP: credentials are decrypted
+        // into memory here and the allowlist is re-checked, so this must
+        // not be hoisted out of the fallback-chain loop.
+        const http = await resolveHttpRequestTools(node, ownerId);
+        for (const reason of http.skipped) console.warn(`[http_request] ${reason}`);
+        if (Object.keys(http.tools).length > 0) {
+          tools = { ...(tools ?? {}), ...http.tools };
         }
       }
       const hopPrompt = appendMcpContext(systemPrompt, mcp);
@@ -1157,6 +1189,7 @@ export function nodeRowToAgentNode(n: typeof agentNodes.$inferSelect): AgentNode
     dispatchTargets: (n.dispatchTargets as string[] | null) ?? undefined,
     sshTarget: (n.sshTarget as AgentNode["sshTarget"]) ?? undefined,
     mcpServers: (n.mcpServers as AgentNode["mcpServers"]) ?? undefined,
+    httpEndpoints: (n.httpEndpoints as AgentNode["httpEndpoints"]) ?? undefined,
     position: { x: n.positionX, y: n.positionY },
     createdAt: n.createdAt.toISOString(),
     updatedAt: n.updatedAt.toISOString(),

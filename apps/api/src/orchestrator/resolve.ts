@@ -113,6 +113,30 @@ function matchAutoEdge(
   // surfacing the lead's actual answer.
   if (startsWithSentinel(text, "done")) return null;
 
+  // Both sentinels above depend on the MODEL COMPLYING with a convention
+  // engine.ts injects. Frontier models generally do; smaller ones often
+  // don't — measured against a local Gemma 4 E4B, which correctly
+  // recognized an ambiguous request and asked a clarifying question, but
+  // phrased it in plain prose with no UNKNOWN prefix. The question named
+  // both specialists while offering them as options, so the keyword
+  // scoring below matched one and the run silently continued, throwing
+  // the user's question away — exactly the failure the UNKNOWN sentinel
+  // was introduced to prevent, just reached by a different route.
+  //
+  // So: also detect the ambiguity STRUCTURALLY, independent of whether
+  // the model followed protocol. If the router ENDS ITS TURN ASKING, the
+  // question is the output that matters and the user needs to see it —
+  // routing onward would discard it, which is the whole bug.
+  //
+  // Deliberately keyed on a TRAILING "?" rather than one appearing
+  // anywhere: an earlier attempt here fired on "names 2+ candidates AND
+  // contains a question mark", which looked reasonable but wrongly
+  // swallowed a decisive answer phrased with a rhetorical lead-in ("Is it
+  // a crash? No. This is the Billing Specialist's area, not the Technical
+  // Specialist's."). The mock-tier suite catches that case specifically.
+  // Ending on a question is the honest signal; containing one is not.
+  if (/\?\s*$/.test(text)) return null;
+
   if (candidates.length <= 1) return candidates[0] ?? null;
 
   const outputTokens = tokenize(text);

@@ -1071,6 +1071,54 @@ the same way live mid-run rerouting already is:
   and maintaining a rival connector library by hand, without OpenBots
   ever needing to become an integrations company.
 
+### Promptable workflow generation — the mantra applied to graph-building itself (proposed 2026-09-13)
+
+"Describe what you want, AI builds it" is not a blue ocean — n8n
+shipped an AI workflow-builder (prompt → starter workflow), Zapier has
+AI-assisted Zap/Agent creation, Make.com has AI-assisted scenario
+building, and a cluster of funded startups (Lindy, Gumloop, Relevance
+AI, Stack AI) are built around exactly this pitch. Table stakes now,
+not a differentiator on its own — see the mantra in `CLAUDE.md`'s "What
+this is" section for why the real wedge is narrower: every one of those
+either hides the graph entirely (Lindy/Gumloop/Zapier — no visible,
+editable structure at all) or exposes a canvas that goes inert once a
+run starts (n8n). None combine generation with a live, interruptible,
+self-hosted result.
+
+**Scoped direction, not yet started.** The load-bearing piece already
+exists: `manage_target_graphs` (`orchestrator/graphManagementTools.ts`)
+already lets an agent create/edit nodes and edges on a graph via the
+same REST API the canvas itself uses, re-verifying ownership fresh on
+every call — the same trust pattern `dispatch_to_graph`/`fileAccessRoot`
+already follow. A "describe your workflow" builder is that pattern
+pointed at a **new** graph instead of an existing one, with a system
+prompt that knows the schema conventions (`explicit`/`auto`/`consensus`
+edge kinds, the `UNKNOWN`/`DONE` sentinels, when to reach for
+`consensusGroup` vs `mapConfig` vs plain auto-routing) — closer to
+"give the existing tool a chat front end" than a from-scratch feature.
+Quick-add's "describe a new agent in plain English, fill in role/
+prompt/model" (see README) is the single-node version of this that
+already ships; the gap is specifically multi-node graph generation
+(nodes **and** edges **and** routing **and** tool config) from one
+prompt.
+
+Real open gaps before this is buildable, not just hand-waved:
+
+- **Guardrails on what a builder-agent can grant itself.** It must never
+  set `fileAccessRoot`/`sshTarget`/`dispatchTargets`/`mcpServers` beyond
+  what a human explicitly approves afterward — the existing runtime-
+  allowlist re-check (`ALLOWED_FILE_ACCESS_ROOTS` etc.) helps, but the
+  UX needs a clear "review before this goes live" step, not silent
+  full-trust generation.
+- **Data/file ingestion is new scope.** "Upload your project or data"
+  has no landing place today — `fileAccessRoot` only ever points at a
+  pre-existing, operator-approved directory. Needs real upload handling
+  and storage, not just a bigger prompt.
+- **Multi-turn correction.** "No, route it through the reviewer first"
+  needs the builder-agent to read the *current* graph state before
+  mutating it (not just generate-once), the same fresh-read discipline
+  `dispatch_to_graph`'s ownership check already follows.
+
 ### MCP marketplace/registry landscape for the "bet on MCP" plan (researched 2026-09-11)
 
 Concrete follow-up on what to actually integrate with. The **official

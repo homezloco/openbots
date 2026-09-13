@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-OpenBots: an open-source, self-hosted, model-agnostic multi-agent orchestration platform. The differentiator is a live, editable canvas of the agent hierarchy/routing — drag an edge to reroute, even while a run is executing. See `PLAN.md` for full scope, phase status, and a running "known gaps" list — check it before assuming something is finished. `docs/orchestration.md` and `docs/adapters.md` cover the two trickiest subsystems in depth.
+OpenBots: an open-source, self-hosted, model-agnostic multi-agent orchestration platform. The differentiator is a live, editable canvas of the agent hierarchy/routing — drag an edge to reroute, even while a run is executing.
+
+**The mantra**: generate it however you want — prompt it, hand-build it, template it — the result always lands on the same live, self-hosted canvas you can watch, interrupt, and redirect while it's running. Never a black box (the closed AI-agent-builder SaaS tools — Lindy, Gumloop, Zapier Agents — hide the graph entirely), and never a diagram that goes inert the moment a run starts (n8n's canvas, and every general workflow tool's). The enemy isn't AI-assisted generation; it's opacity and inertness during execution. Any new feature that lets AI build or edit a graph (quick-add's role/prompt/model fill-in today, a future full-graph generator) must land its output on this same editable, interruptible surface — never a separate, less-visible code path.
+
+See `PLAN.md` for full scope, phase status, and a running "known gaps" list — check it before assuming something is finished. `docs/orchestration.md` and `docs/adapters.md` cover the two trickiest subsystems in depth.
 
 ## Commands
 

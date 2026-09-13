@@ -6,8 +6,10 @@ an edge, and trust them with real write access.
 OpenBots is open-source, self-hosted, and model-agnostic: connect any
 provider — Anthropic, OpenAI, xAI, OpenRouter, or any OpenAI-compatible
 endpoint (including local models via Ollama) — and design agent
-hierarchies on a live canvas with drag-and-drop routing, instead of a
-black-box "just describe your bot" flow.
+hierarchies on a live canvas with drag-and-drop routing. Describe what
+you want and let AI build it, or build it by hand — either way it lands
+on this same canvas, not a black box that hides the result once it's
+built and goes inert the moment a run starts.
 
 <p align="center">
   <img src="docs/assets/openbots-reroute.gif" width="720" alt="Dragging an edge on the Hierarchy canvas mid-run so the next hop goes to Billing instead of Support">

@@ -226,6 +226,65 @@ function markCacheable(message: ChatMessage): void {
   }
 }
 
+/**
+ * The openai-compatible package's default usage converter reads
+ * `prompt_tokens_details.cached_tokens` into `cacheRead` but hard-codes
+ * `cacheWrite: void 0` — it has no concept of a cache-write count, since
+ * that isn't in the OpenAI shape it targets. OpenRouter DOES report one
+ * (`prompt_tokens_details.cache_write_tokens`), and the package's schema
+ * for that object is `$loose`, so the extra field survives parsing and is
+ * readable here.
+ *
+ * Left unmapped, every cache-write token falls into `noCache` and gets
+ * priced at 1.0x instead of Anthropic's 1.25x cache-write rate — real,
+ * if modest, cost UNDER-estimation on exactly the calls that populate a
+ * cache (measured: a 5,850-token write reported as 0). `convertUsage` is
+ * the provider's own sanctioned hook for "token accounting semantics that
+ * differ from the default OpenAI-compatible shape", so this rides that
+ * rather than patching around it.
+ *
+ * Faithfully mirrors the upstream default in every other respect
+ * (including `raw`), only subtracting the write tokens out of `noCache`
+ * so the three buckets still sum to `total`.
+ */
+// Derived from the installed package's own settings type rather than
+// importing LanguageModelV4Usage from a transitive @ai-sdk/provider dep —
+// same reasoning as MockDoGenerate above: this stays correct if the
+// upstream usage shape changes, and keeps our import surface to direct
+// dependencies only.
+type ConvertUsageFn = NonNullable<Parameters<typeof createOpenAICompatible>[0]["convertUsage"]>;
+type ConvertUsageResult = ReturnType<ConvertUsageFn>;
+
+function convertOpenRouterUsage(usage: Parameters<ConvertUsageFn>[0]): ConvertUsageResult {
+  const u = (usage ?? {}) as {
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+    prompt_tokens_details?: { cached_tokens?: number | null; cache_write_tokens?: number | null } | null;
+    completion_tokens_details?: { reasoning_tokens?: number | null } | null;
+  };
+  const promptTokens = u.prompt_tokens ?? 0;
+  const completionTokens = u.completion_tokens ?? 0;
+  const cacheReadTokens = u.prompt_tokens_details?.cached_tokens ?? 0;
+  const cacheWriteTokens = u.prompt_tokens_details?.cache_write_tokens ?? 0;
+  const reasoningTokens = u.completion_tokens_details?.reasoning_tokens ?? 0;
+  return {
+    inputTokens: {
+      total: promptTokens,
+      // Math.max guards a provider that reports prompt_tokens EXCLUSIVE of
+      // cache writes; without it a negative noCache would corrupt pricing.
+      noCache: Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens),
+      cacheRead: cacheReadTokens,
+      cacheWrite: cacheWriteTokens,
+    },
+    outputTokens: {
+      total: completionTokens,
+      text: Math.max(0, completionTokens - reasoningTokens),
+      reasoning: reasoningTokens,
+    },
+    raw: u,
+  } as ConvertUsageResult;
+}
+
 function openRouterCachingFetch(modelId: string): typeof globalThis.fetch {
   return async (input, init) => {
     // Only Anthropic-family models use explicit cache_control breakpoints;
@@ -297,6 +356,7 @@ const adapters: Record<ProviderId, ProviderAdapter> = {
         apiKey: creds.apiKey,
         baseURL: creds.baseURL ?? "https://openrouter.ai/api/v1",
         fetch: openRouterCachingFetch(modelId),
+        convertUsage: convertOpenRouterUsage,
       }).chatModel(modelId),
   },
   "openai-compatible": {

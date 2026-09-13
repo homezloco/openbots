@@ -1445,11 +1445,21 @@ the control call without it showed 0/0. Then end-to-end through the
 app on two real hops against one node: input 5,866 both times,
 `cache_read_tokens` 0 → **5,850**, cost **$0.01863 → $0.00317 (-83%)**.
 
-**Known gap**: `cache_write_tokens` records as 0 in `usage_events` on
-this route even though OpenRouter reported 6,882 on the raw call — the
-SDK maps cache reads but apparently not writes for openai-compatible,
-so first-call cost is slightly under-attributed. Cache *reads* (the
-part that matters for the savings claim) are mapped correctly.
+**Cache-write accounting — found and fixed the same session.** The
+first pass recorded `cache_write_tokens` as 0 even though OpenRouter
+reported them, because the openai-compatible package maps
+`cached_tokens` → `cacheRead` but hard-codes `cacheWrite: void 0`
+(verified by reading its compiled `convertOpenAICompatibleChatUsage`).
+Write tokens therefore fell into `noCache` and were priced at 1.0x
+instead of Anthropic's 1.25x cache-write rate — a genuine cost
+under-estimate on every cache-populating call. Fixed via the package's
+own `convertUsage` provider setting (its `prompt_tokens_details` schema
+is `$loose`, so OpenRouter's extra field survives parsing);
+`convertOpenRouterUsage` mirrors the upstream default exactly and only
+subtracts writes out of `noCache` so the buckets still sum to `total`.
+Re-verified on a fresh node: hop 1 now records 5,531 cache-write tokens
+at $0.02189 (correctly *higher* than the previous under-estimate), hop 2
+records 5,519 cache-read tokens at $0.00306.
 
 **Known quirk documented while testing** (predates this work):
 `runs.output` is jsonb, so a string output that happens to be valid

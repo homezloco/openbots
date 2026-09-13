@@ -17,10 +17,54 @@ no dedicated client needed for either.
 ## Capability flags, not a lowest common denominator
 
 Each adapter declares `ProviderCapabilities` (`streaming`, `toolCalling`,
-`vision`) rather than the engine assuming uniform support across
-providers. A graph that wires a node to a provider lacking a capability
-the node's config needs should surface that as a validation error, not a
-silent runtime failure — not yet implemented, tracked as a Phase 1/2 item.
+`vision`, `promptCaching`) rather than the engine assuming uniform support
+across providers. A graph that wires a node to a provider lacking a
+capability the node's config needs should surface that as a validation
+error, not a silent runtime failure — not yet implemented, tracked as a
+Phase 1/2 item.
+
+## Prompt caching
+
+The `promptCaching` flag means "this codebase has an explicit opt-in
+mechanism for this provider", not "this provider caches". OpenAI caches
+automatically with no code at all, and is flagged `false` for that reason
+— its savings still land in cost estimates via the SDK's normalized usage.
+
+Two providers have real mechanisms, and they work differently:
+
+**`anthropic`** (direct) — gated behind the `ANTHROPIC_PROMPT_CACHING`
+env var, off by default. `engine.ts::buildPromptOptions` puts
+`cache_control` on the system prompt via `providerOptions`, and
+`withStepCaching` adds a single *moving* breakpoint on the last message
+of each tool-loop step (`prepareStep`), so a multi-step investigation
+stops resending every prior file read at full price. One moving marker,
+not one per step — Anthropic allows only four breakpoints per request.
+
+**`openrouter`** — always on for `anthropic/*` models, because it costs
+nothing when unused. It cannot use `providerOptions`: the generic
+`@ai-sdk/openai-compatible` serializer drops them entirely. Instead
+`registry.ts::openRouterCachingFetch` injects `cache_control` into the
+serialized body through the provider's own `fetch` hook, marking the
+system message and the final message. It uses **per-content-block**
+breakpoints rather than OpenRouter's top-level `cache_control`, because
+the top-level form forces routing to Anthropic direct while per-block
+works through Bedrock and Vertex too. Any unexpected body shape is sent
+through untouched — a cost optimization must never break a request.
+
+**Usage accounting on OpenRouter needs its own converter.** The
+openai-compatible package maps `cached_tokens` → `cacheRead` but
+hard-codes `cacheWrite: void 0`, since cache writes aren't in the OpenAI
+shape it targets. OpenRouter does report `cache_write_tokens` (and the
+package's schema for that object is `$loose`, so the field survives
+parsing), so `convertOpenRouterUsage` supplies it via the sanctioned
+`convertUsage` setting. Without it, write tokens fall into `noCache` and
+get priced at 1.0x instead of Anthropic's 1.25x cache-write rate — a real
+cost under-estimate on exactly the calls that populate a cache.
+
+Measured end-to-end on two hops against one node (OpenRouter → Bedrock,
+`anthropic/claude-sonnet-4`): hop 1 recorded 5,531 cache-write tokens at
+$0.02189; hop 2 recorded 5,519 cache-read tokens at $0.00306 — **86%
+cheaper on the repeat hop**, with both buckets now priced correctly.
 
 ## Guarding against silent breakage
 

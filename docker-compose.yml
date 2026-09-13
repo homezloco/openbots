@@ -31,9 +31,23 @@ services:
       dockerfile: apps/api/Dockerfile
     image: openbots-api
     env_file: .env
+    # Run as the host user, not root. Agent file writes land in a git
+    # worktree inside a BIND-MOUNTED host directory, so a root container
+    # leaves root-owned objects in the host's own .git — after which the
+    # human's next `git add` fails with "insufficient permission for
+    # adding an object to repository database" until they chown it back.
+    # Hit twice in real use. Override DOCKER_UID/DOCKER_GID in .env if
+    # your host user isn't 1000:1000 (`id -u` / `id -g`).
+    #
+    # HOME must be set explicitly: a numeric `user:` has no passwd entry
+    # to resolve a home directory from, and gitWorktree.ts's
+    # ensureSafeDirectory writes `git config --global`. /tmp is writable
+    # for any uid; the config is per-container and re-created idempotently.
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     environment:
       DATABASE_URL: postgres://openbots:openbots@postgres:5432/openbots
       REDIS_URL: redis://redis:6379
+      HOME: /tmp
     ports:
       - "4000:4000"
     volumes:
@@ -83,9 +97,13 @@ services:
     image: openbots-api
     command: ["node", "dist/worker.js"]
     env_file: .env
+    # Same host-UID reasoning as `api` above — and this is the process that
+    # actually performs agent writes/commits, so it matters most here.
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     environment:
       DATABASE_URL: postgres://openbots:openbots@postgres:5432/openbots
       REDIS_URL: redis://redis:6379
+      HOME: /tmp
     volumes:
       - ./apps/api/e2e/fixtures/testrepo:/tmp/testrepo:ro
       - ./apps/api/e2e/fixtures/writable-testrepo:/tmp/writable-testrepo:rw

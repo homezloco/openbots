@@ -83,6 +83,16 @@ jobs:
           docker compose logs api worker
           exit 1
 
+      # Almost every case drives the API over HTTP, but the research URL
+      # guard is a pure function with no HTTP surface, so that one case
+      # imports @openbots/providers in-process. That resolves to dist/,
+      # which the docker image builds internally but the host never does —
+      # it only passed locally because a stale dist happened to be there.
+      - name: Build workspace packages the host-side runner imports
+        run: |
+          pnpm --filter @openbots/graph-schema build
+          pnpm --filter @openbots/providers build
+
       - name: Run mock e2e suite
         run: pnpm --filter @openbots/api test:e2e:mock
 

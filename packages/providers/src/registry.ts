@@ -179,6 +179,81 @@ const transformAdapter: ProviderAdapter = {
 };
 
 /**
+ * OpenRouter supports Anthropic-style prompt caching, but NOT through the
+ * AI SDK's `providerOptions` — the generic openai-compatible serializer
+ * drops provider-specific message options entirely (confirmed by grepping
+ * the installed @ai-sdk/openai-compatible@3.0.44 dist: it has no
+ * providerOptions/cache_control handling at all). So engine.ts's
+ * `cacheControl` providerOptions are a silent no-op on this route, and the
+ * marker has to be injected into the already-serialized request body
+ * instead — via the `fetch` hook the provider settings explicitly expose
+ * for exactly this "intercept requests" purpose.
+ *
+ * Per OpenRouter's own prompt-caching docs, EXPLICIT per-content-block
+ * `cache_control` breakpoints work across all Anthropic-compatible
+ * providers including Bedrock and Vertex — unlike top-level automatic
+ * `cache_control`, which forces routing to Anthropic direct. Our real
+ * test call landed on Bedrock, so per-block is the only option that works
+ * without constraining routing.
+ *
+ * Applies at most 2 of Anthropic's 4 allowed breakpoints: the system
+ * message (static, resent identically every hop) and the final message
+ * (the moving breakpoint that makes a growing tool loop cacheable — the
+ * same strategy engine.ts::withStepCaching uses on the direct Anthropic
+ * route). Tool-role messages are deliberately skipped: their content
+ * shape is not reliably block-convertible across providers.
+ */
+const ANTHROPIC_MODEL_PREFIX = "anthropic/";
+
+type ChatMessage = { role?: string; content?: unknown };
+
+/** Converts a string content to block form and marks it; leaves existing block arrays alone except for marking the last text block. */
+function markCacheable(message: ChatMessage): void {
+  if (message.role === "tool") return;
+  if (typeof message.content === "string") {
+    if (!message.content) return;
+    message.content = [{ type: "text", text: message.content, cache_control: { type: "ephemeral" } }];
+    return;
+  }
+  if (Array.isArray(message.content)) {
+    for (let i = message.content.length - 1; i >= 0; i--) {
+      const block = message.content[i] as { type?: string } | null;
+      if (block && typeof block === "object" && block.type === "text") {
+        (block as Record<string, unknown>).cache_control = { type: "ephemeral" };
+        return;
+      }
+    }
+  }
+}
+
+function openRouterCachingFetch(modelId: string): typeof globalThis.fetch {
+  return async (input, init) => {
+    // Only Anthropic-family models use explicit cache_control breakpoints;
+    // everything else on OpenRouter either caches automatically or ignores
+    // the field. Bail out untouched on anything unexpected rather than
+    // risking a malformed body — a caching optimization must never be able
+    // to break a request.
+    if (!modelId.startsWith(ANTHROPIC_MODEL_PREFIX) || !init?.body || typeof init.body !== "string") {
+      return globalThis.fetch(input, init);
+    }
+    try {
+      const body = JSON.parse(init.body) as { messages?: ChatMessage[] };
+      const messages = body.messages;
+      if (Array.isArray(messages) && messages.length > 0) {
+        const system = messages.find((m) => m.role === "system");
+        if (system) markCacheable(system);
+        const last = messages[messages.length - 1];
+        if (last && last !== system) markCacheable(last);
+        return globalThis.fetch(input, { ...init, body: JSON.stringify(body) });
+      }
+    } catch {
+      // Unparseable/unexpected body — send the original untouched.
+    }
+    return globalThis.fetch(input, init);
+  };
+}
+
+/**
  * Every provider is normalized behind the Vercel AI SDK rather than
  * hand-rolled request/response mapping — provider wire-format drift (new
  * tool-calling shapes, streaming changes) is absorbed upstream instead of
@@ -212,12 +287,16 @@ const adapters: Record<ProviderId, ProviderAdapter> = {
     id: "openrouter",
     // Routed through the generic OpenAI-compatible adapter — OpenRouter
     // speaks the OpenAI wire format, so no dedicated client is needed.
-    capabilities: { streaming: true, toolCalling: true, vision: false, promptCaching: false },
+    // promptCaching: true covers Anthropic-family models only, and is
+    // implemented by openRouterCachingFetch (body-level injection) rather
+    // than providerOptions, which this adapter drops — see that function.
+    capabilities: { streaming: true, toolCalling: true, vision: false, promptCaching: true },
     getModel: (modelId, creds) =>
       createOpenAICompatible({
         name: "openrouter",
         apiKey: creds.apiKey,
         baseURL: creds.baseURL ?? "https://openrouter.ai/api/v1",
+        fetch: openRouterCachingFetch(modelId),
       }).chatModel(modelId),
   },
   "openai-compatible": {

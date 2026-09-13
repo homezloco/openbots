@@ -1409,6 +1409,48 @@ blocked on Anthropic credit at the time this shipped. `pnpm typecheck`
 and the full mock-tier suite (unaffected, feature is off by default)
 are clean.
 
+### OpenRouter prompt caching — built and verified with real numbers (2026-09-13)
+
+The `openrouter` adapter declared `promptCaching: false`, so neither
+caching mechanism engaged on that route regardless of which model it
+proxied to (the gate keys on OpenBots' provider id, not the model
+string). Since OpenRouter is the practical way to reach Claude when a
+direct Anthropic key is exhausted, that made the most-used route the
+least efficient one.
+
+**Why `providerOptions` doesn't work here**: the generic
+`@ai-sdk/openai-compatible` serializer drops provider-specific message
+options entirely — confirmed by grepping the installed v3.0.44 dist,
+which contains no `providerOptions`/`cache_control` handling at all. So
+`buildPromptOptions`/`withStepCaching`'s Anthropic `cacheControl`
+markers are silent no-ops on this route. The fix injects
+`cache_control` into the already-serialized request body through the
+`fetch` hook the provider settings expose for exactly this purpose
+(`FetchFunction = typeof globalThis.fetch`).
+
+**Why per-block, not top-level**: OpenRouter's own docs state that
+top-level automatic `cache_control` forces routing to Anthropic direct
+(Bedrock/Vertex don't support it), while EXPLICIT per-content-block
+breakpoints work across all Anthropic-compatible providers. Real calls
+here land on Amazon Bedrock, so per-block is the only option that
+doesn't constrain routing. Two breakpoints max (system + final
+message), well under Anthropic's limit of four; tool-role messages are
+skipped (content shape isn't reliably block-convertible). Anthropic-
+family models only; any parse/shape surprise sends the original body
+untouched — a caching optimization must never break a request.
+
+**Verified, not assumed.** Raw A/B against the live API: with
+`cache_control`, call 1 wrote 6,882 tokens and call 2 read 6,882 back;
+the control call without it showed 0/0. Then end-to-end through the
+app on two real hops against one node: input 5,866 both times,
+`cache_read_tokens` 0 → **5,850**, cost **$0.01863 → $0.00317 (-83%)**.
+
+**Known gap**: `cache_write_tokens` records as 0 in `usage_events` on
+this route even though OpenRouter reported 6,882 on the raw call — the
+SDK maps cache reads but apparently not writes for openai-compatible,
+so first-call cost is slightly under-attributed. Cache *reads* (the
+part that matters for the savings claim) are mapped correctly.
+
 **Known quirk documented while testing** (predates this work):
 `runs.output` is jsonb, so a string output that happens to be valid
 JSON text round-trips back as a parsed document (type change +

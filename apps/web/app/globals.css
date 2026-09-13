@@ -18,6 +18,7 @@
   --status-failed: #e74c3c;
   --status-neutral: #999999;
   --consensus-edge: #8e44ad;
+  --status-awaiting-approval: #6366f1;
 }
 
 /* Explicit choice always wins; this covers "system" mode following the OS. */
@@ -41,6 +42,7 @@
   --status-failed: #ff6b5e;
   --status-neutral: #7a7a85;
   --consensus-edge: #c99ce0;
+  --status-awaiting-approval: #818cf8;
 }
 
 html,
@@ -113,6 +115,19 @@ button:disabled {
 .node-failed {
   box-shadow: 0 0 0 2px var(--status-failed);
   animation: ob-flash-failed 0.5s ease-out;
+}
+
+/* Persistent, not auto-cleared like the others — a paused run stays
+   paused until a human approves or cancels it, so the highlight has to
+   stay too. A slower pulse than node-running distinguishes "waiting on
+   you" from "actively working". */
+@keyframes ob-pulse-awaiting-approval {
+  0%, 100% { box-shadow: 0 0 0 2px var(--status-awaiting-approval); }
+  50% { box-shadow: 0 0 0 8px var(--status-awaiting-approval); }
+}
+
+.node-awaiting-approval {
+  animation: ob-pulse-awaiting-approval 1.8s ease-in-out infinite;
 }
 
 a {

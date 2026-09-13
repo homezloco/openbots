@@ -121,6 +121,8 @@ export function AgentSettingsForm({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [approvalEnabled, setApprovalEnabled] = useState(Boolean(node.approvalConfig));
+  const [approvalInstructions, setApprovalInstructions] = useState(node.approvalConfig?.instructions ?? "");
   const outgoing = graph.edges.filter((e) => e.sourceNodeId === node.id);
   const [fanoutEnabled, setFanoutEnabled] = useState(Boolean(node.consensusGroup));
   const [aggregatorId, setAggregatorId] = useState(node.consensusGroup?.aggregatorNodeId ?? "");
@@ -331,6 +333,7 @@ export function AgentSettingsForm({
               }))
           : [],
         consensusGroup: fanoutEnabled ? { aggregatorNodeId: aggregatorId, edgeIds: fanoutEdgeIds } : null,
+        approvalConfig: approvalEnabled ? { instructions: approvalInstructions.trim() || undefined } : null,
       });
       onSaved(updated);
     } catch (err) {
@@ -421,6 +424,33 @@ export function AgentSettingsForm({
           </span>
         </span>
       </label>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input type="checkbox" checked={approvalEnabled} onChange={(e) => setApprovalEnabled(e.target.checked)} />
+        <span>
+          🔒 Require human approval before this node runs{" "}
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            (pauses the run here until someone approves — optionally editing the input first — or cancels it; use
+            this on a node whose only job is to send something real, like an email or an outbound API call)
+          </span>
+        </span>
+      </label>
+
+      {approvalEnabled && (
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, marginLeft: 24 }}>
+          Reviewer instructions <span style={{ color: "var(--text-faint)", fontSize: 12 }}>(shown to whoever approves — explain what to check)</span>
+          <textarea
+            rows={2}
+            placeholder="e.g. Check the recipient and tone before this goes out."
+            value={approvalInstructions}
+            onChange={(e) => setApprovalInstructions(e.target.value)}
+          />
+          <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+            Can&apos;t be combined with being a map or consensus branch target — those fan out inline with no point
+            to pause at. Gating the aggregator itself is fine.
+          </span>
+        </label>
+      )}
 
       <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <input type="checkbox" checked={dispatchEnabled} onChange={(e) => setDispatchEnabled(e.target.checked)} />

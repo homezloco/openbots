@@ -18,6 +18,8 @@ import {
 import "@xyflow/react/dist/style.css";
 import type { AgentGraph, AgentNode, ProviderId } from "@openbots/graph-schema";
 import {
+  approveRun,
+  cancelRun,
   createEdge,
   createNode,
   createNodeFromExisting,
@@ -27,6 +29,7 @@ import {
   deleteNode,
   listAllAgents,
   listGraphs,
+  listRuns,
   quickAddAgent,
   rerouteEdge,
   updateGraph,
@@ -44,11 +47,17 @@ const EDGE_TYPES = { signal: SignalEdge };
 
 const ROLE_ICON: Partial<Record<AgentNode["role"], string>> = { supervisor: "👑 ", reviewer: "🔎 " };
 
+/** Shared by toFlowNodes and handleNodeUpdated's inline relabel — one place that knows this label format. */
+function nodeLabel(n: AgentNode): string {
+  const lock = n.approvalConfig ? "🔒 " : "";
+  return `${lock}${ROLE_ICON[n.role] ?? ""}${n.name}\n${n.provider}:${n.model}`;
+}
+
 function toFlowNodes(graph: AgentGraph): Node[] {
   return graph.nodes.map((n) => ({
     id: n.id,
     position: n.position,
-    data: { label: `${ROLE_ICON[n.role] ?? ""}${n.name}\n${n.provider}:${n.model}` },
+    data: { label: nodeLabel(n) },
   }));
 }
 
@@ -316,6 +325,11 @@ export function HierarchyCanvas({
       if (msg.type === "hop_dispatched") setNodeStatus(msg.nodeId, "node-running");
       else if (msg.type === "hop_succeeded") setNodeStatus(msg.nodeId, "node-succeeded", 2000);
       else if (msg.type === "hop_failed") setNodeStatus(msg.nodeId, "node-failed", 4000);
+      // No autoClearMs: unlike the transient statuses above, this one
+      // stays until a human actually resolves it (see the approve/cancel
+      // banner below) — clearing it on a timer would make an unattended
+      // gate look like it's still running normally.
+      else if (msg.type === "run_awaiting_approval") setNodeStatus(msg.nodeId, "node-awaiting-approval");
     }
     if (msg.type === "hop_succeeded" && msg.resolvedEdgeId) {
       // Green pulse for a completed hop "communicating" its result to the next node.
@@ -325,6 +339,27 @@ export function HierarchyCanvas({
       // All branches are done and the aggregator is being dispatched —
       // animate the gather from the fan-out source down into the aggregator.
       addPulse(consensusGatherByAggregator.get(msg.nodeId)!, "var(--consensus-edge)");
+    }
+    if (msg.type === "run_awaiting_approval" && msg.nodeId) {
+      const node = graph.nodes.find((n) => n.id === msg.nodeId);
+      const payload = msg.payload as { instructions?: string | null; pendingInput?: unknown } | undefined;
+      setPendingApproval({
+        runId: msg.runId,
+        nodeId: msg.nodeId,
+        nodeName: node?.name ?? msg.nodeId,
+        instructions: payload?.instructions ?? null,
+        pendingInput: payload?.pendingInput,
+      });
+    }
+    // A run this canvas is showing a banner for just got resolved some
+    // other way (e.g. cancelled/approved from a different tab, or it ran
+    // to completion) — drop the banner rather than let it point at a
+    // decision that's already been made.
+    if (
+      (msg.type === "run_cancelled" || msg.type === "run_completed" || msg.type === "hop_failed") &&
+      pendingApproval?.runId === msg.runId
+    ) {
+      setPendingApproval(null);
     }
   });
 
@@ -383,10 +418,7 @@ export function HierarchyCanvas({
 
   function appendNode(node: AgentNode) {
     setGraph((g) => ({ ...g, nodes: [...g.nodes, node] }));
-    setNodes((nds) => [
-      ...nds,
-      { id: node.id, position: node.position, data: { label: `${ROLE_ICON[node.role] ?? ""}${node.name}\n${node.provider}:${node.model}` } },
-    ]);
+    setNodes((nds) => [...nds, { id: node.id, position: node.position, data: { label: nodeLabel(node) } }]);
   }
 
   /** Positions a new node below its chosen source, fanned out horizontally so multiple children don't stack on top of each other. */
@@ -494,6 +526,103 @@ export function HierarchyCanvas({
   const [lastRunId, setLastRunId] = useState<string | null>(null);
   const [openAgentPanel, setOpenAgentPanel] = useState<string | null>(null);
 
+  // --- Human-in-the-loop approval gate ---
+  interface PendingApproval {
+    runId: string;
+    nodeId: string;
+    nodeName: string;
+    instructions: string | null;
+    pendingInput: unknown;
+  }
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [approvalEditedInput, setApprovalEditedInput] = useState("");
+  const [approvalReason, setApprovalReason] = useState("");
+  const [approvalBusy, setApprovalBusy] = useState<"approve" | "cancel" | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+
+  function stringifyForEdit(value: unknown): string {
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+
+  useEffect(() => {
+    setApprovalEditedInput(pendingApproval ? stringifyForEdit(pendingApproval.pendingInput) : "");
+    setApprovalReason("");
+    setApprovalError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingApproval?.runId]);
+
+  // A WS event only reaches a browser that's open at the moment a run
+  // pauses — this is what surfaces a gate that tripped BEFORE this
+  // canvas was ever opened (a scheduled/webhook run, or just a page
+  // reload). The DB is the source of truth; this is a one-time catch-up
+  // read, not a poll.
+  useEffect(() => {
+    let cancelled = false;
+    listRuns(graph.id)
+      .then((runs) => {
+        if (cancelled) return;
+        const paused = runs.find((r) => r.status === "awaiting_approval");
+        if (!paused || !paused.currentNodeId) return;
+        const node = graph.nodes.find((n) => n.id === paused.currentNodeId);
+        setPendingApproval({
+          runId: paused.id,
+          nodeId: paused.currentNodeId,
+          nodeName: node?.name ?? paused.currentNodeId,
+          instructions: node?.approvalConfig?.instructions ?? null,
+          pendingInput: paused.input,
+        });
+        setNodeStatus(paused.currentNodeId, "node-awaiting-approval");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graph.id]);
+
+  async function approvePending() {
+    if (!pendingApproval) return;
+    setApprovalBusy("approve");
+    setApprovalError(null);
+    try {
+      const original = stringifyForEdit(pendingApproval.pendingInput);
+      let body: { input?: unknown } = {};
+      if (approvalEditedInput !== original) {
+        if (typeof pendingApproval.pendingInput === "string") {
+          body = { input: approvalEditedInput };
+        } else {
+          try {
+            body = { input: JSON.parse(approvalEditedInput) };
+          } catch {
+            body = { input: approvalEditedInput };
+          }
+        }
+      }
+      await approveRun(pendingApproval.runId, body);
+      setNodeStatus(pendingApproval.nodeId, "");
+      setPendingApproval(null);
+    } catch (err) {
+      setApprovalError(err instanceof Error ? err.message : "Approve failed");
+    } finally {
+      setApprovalBusy(null);
+    }
+  }
+
+  async function cancelPending() {
+    if (!pendingApproval) return;
+    setApprovalBusy("cancel");
+    setApprovalError(null);
+    try {
+      await cancelRun(pendingApproval.runId, approvalReason.trim() ? { reason: approvalReason.trim() } : {});
+      setNodeStatus(pendingApproval.nodeId, "");
+      setPendingApproval(null);
+    } catch (err) {
+      setApprovalError(err instanceof Error ? err.message : "Cancel failed");
+    } finally {
+      setApprovalBusy(null);
+    }
+  }
+
   function persistPosition(nodeId: string, position: { x: number; y: number }) {
     if (nodeId.startsWith(GATEWAY_NODE_PREFIX)) return;
     const current = graph.nodes.find((n) => n.id === nodeId);
@@ -568,13 +697,7 @@ export function HierarchyCanvas({
     const next = { ...graph, nodes: graph.nodes.map((n) => (n.id === updated.id ? updated : n)) };
     setGraph(next);
     setEdges((eds) => [...toFlowEdges(next), ...eds.filter((e) => e.id.startsWith(GATEWAY_EDGE_PREFIX))]);
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === updated.id
-          ? { ...n, data: { label: `${ROLE_ICON[updated.role] ?? ""}${updated.name}\n${updated.provider}:${updated.model}` } }
-          : n,
-      ),
-    );
+    setNodes((nds) => nds.map((n) => (n.id === updated.id ? { ...n, data: { label: nodeLabel(updated) } } : n)));
   }
 
   /** Stays on the canvas to watch the live pulse instead of navigating away — the whole point of the animation is seeing it happen here. */
@@ -600,6 +723,59 @@ export function HierarchyCanvas({
           {graph.warnings.map((w, i) => (
             <div key={i}>⚠️ {w}</div>
           ))}
+        </div>
+      )}
+
+      {pendingApproval && (
+        <div
+          style={{
+            background: "var(--bg-elevated)",
+            borderBottom: "2px solid var(--status-awaiting-approval)",
+            padding: 12,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <strong>🔒 Waiting on your approval — {pendingApproval.nodeName}</strong>
+            <span style={{ color: "var(--text-faint)", fontSize: 12 }}>
+              stopped before this node runs; the rest of the graph is untouched until you decide
+            </span>
+          </div>
+          {pendingApproval.instructions && (
+            <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)" }}>{pendingApproval.instructions}</p>
+          )}
+          {approvalError && <p style={{ color: "var(--danger)", margin: 0, fontSize: 13 }}>{approvalError}</p>}
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            Input this node is about to receive — edit it before approving if you need to
+            <textarea
+              rows={4}
+              value={approvalEditedInput}
+              onChange={(e) => setApprovalEditedInput(e.target.value)}
+              disabled={approvalBusy !== null}
+            />
+          </label>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button onClick={approvePending} disabled={approvalBusy !== null}>
+              {approvalBusy === "approve" ? "Approving…" : "✓ Approve"}
+            </button>
+            <input
+              placeholder="Reason for cancelling (optional)"
+              value={approvalReason}
+              onChange={(e) => setApprovalReason(e.target.value)}
+              disabled={approvalBusy !== null}
+              style={{ flex: 1, maxWidth: 320 }}
+            />
+            <button
+              type="button"
+              onClick={cancelPending}
+              disabled={approvalBusy !== null}
+              style={{ color: "var(--danger)", background: "transparent", border: "1px solid var(--border)" }}
+            >
+              {approvalBusy === "cancel" ? "Cancelling…" : "✕ Cancel run"}
+            </button>
+          </div>
         </div>
       )}
 

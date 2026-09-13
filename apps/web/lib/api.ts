@@ -113,6 +113,7 @@ export interface CreateNodeInput {
   dispatchTargets?: string[];
   sshTarget?: AgentNode["sshTarget"];
   mcpServers?: AgentNode["mcpServers"] | null;
+  approvalConfig?: AgentNode["approvalConfig"] | null;
   position: { x: number; y: number };
 }
 
@@ -351,7 +352,7 @@ export interface Run {
   id: string;
   graphId: string;
   mode: "pinned" | "live";
-  status: "pending" | "running" | "completed" | "error" | "cancelled";
+  status: "pending" | "running" | "awaiting_approval" | "completed" | "error" | "cancelled";
   currentNodeId: string | null;
   input: unknown;
   output: unknown;
@@ -440,6 +441,25 @@ export const fetchAgentConversations = (graphId: string, nodeId: string) =>
 
 export const listRuns = (graphId: string) => request<Run[]>(`/graphs/${graphId}/runs`);
 
+/**
+ * Resumes a run paused at an approval gate (AgentNode.approvalConfig).
+ * Optional `input` overwrites the gated node's input before it runs —
+ * approve-with-edit, not just a veto. Omit it entirely (not `undefined`
+ * as a value) to approve unedited, since the server distinguishes "no
+ * input field sent" from "sent an edited value" to decide whether to
+ * record an edit in the audit trail.
+ */
+export const approveRun = (runId: string, body: { input?: unknown } = {}) =>
+  request<Run>(`/runs/${runId}/approve`, { method: "POST", body: JSON.stringify(body) });
+
+/**
+ * Terminates a run — valid from awaiting_approval (this is reject) or
+ * pending/running (a plain stop). Only stops a run BETWEEN hops; an
+ * in-flight hop still finishes.
+ */
+export const cancelRun = (runId: string, body: { reason?: string } = {}) =>
+  request<Run>(`/runs/${runId}/cancel`, { method: "POST", body: JSON.stringify(body) });
+
 // --- Templates ---
 
 export interface TemplateSummary {
@@ -462,7 +482,13 @@ export const instantiateTemplate = (templateId: string) =>
 export interface RunEventMessage {
   runId: string;
   graphId: string;
-  type: "hop_dispatched" | "hop_succeeded" | "hop_failed" | "run_completed";
+  type:
+    | "hop_dispatched"
+    | "hop_succeeded"
+    | "hop_failed"
+    | "run_completed"
+    | "run_awaiting_approval"
+    | "run_cancelled";
   nodeId?: string;
   resolvedEdgeId?: string | null;
   payload?: unknown;

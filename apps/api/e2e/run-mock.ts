@@ -515,6 +515,37 @@ async function main() {
     assert(patch.status === 200, `expected the null clear to be accepted, got ${patch.status}: ${JSON.stringify(patch.body)}`);
   });
 
+  // --- web_fetch SSRF boundary (pure function, no model, no network) ---
+  // These are the only tools that reach arbitrary hosts, so the denylist
+  // is the whole safety story and belongs in the free tier where it runs
+  // on every PR. A real bypass was caught here during development:
+  // `new URL("http://[::ffff:127.0.0.1]").hostname` normalizes to the hex
+  // form `::ffff:7f00:1`, which a dotted-quad-only check never matched.
+  await test("security: the research URL guard blocks every internal address class", async () => {
+    const { assertPublicUrl } = await import("@openbots/providers");
+    const mustBlock = [
+      "http://169.254.169.254/latest/meta-data/", // cloud metadata
+      "http://127.0.0.1:4000/health", // loopback
+      "http://localhost:5432", // resolves to loopback
+      "http://10.0.0.5/admin", // RFC1918
+      "http://192.168.1.1",
+      "http://172.16.0.1",
+      "http://100.66.221.81", // CGNAT
+      "http://[::1]:80", // IPv6 loopback
+      "http://[::ffff:127.0.0.1]", // IPv4-mapped, normalized to hex
+      "http://[fd00::1]", // unique local
+      "file:///etc/passwd", // non-http scheme
+      "http://user:pw@example.com", // embedded credentials
+      "http://0.0.0.0",
+    ];
+    for (const url of mustBlock) {
+      const result = await assertPublicUrl(url);
+      assert(!result.ok, `expected ${url} to be refused, but it was allowed`);
+    }
+    const publicUrl = await assertPublicUrl("https://example.com");
+    assert(publicUrl.ok, `expected a public URL to be allowed, got: ${publicUrl.reason}`);
+  });
+
   await test("graph delete cascades cleanly", async () => {
     const g = await createGraph("Mock: delete me");
     const n = await createNode(g.id, mockNode({ name: "Doomed" }));

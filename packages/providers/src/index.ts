@@ -3,6 +3,8 @@ export * from "./registry.js";
 export * from "./pricing.js";
 export * from "./tools.js";
 export * from "./gitWorktree.js";
+export * from "./researchTools.js";
+export * from "./publicUrl.js";
 export * from "./sshExec.js";
 export * from "./redact.js";
 export * from "./sandboxTypes.js";

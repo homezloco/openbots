@@ -4,6 +4,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { tool, type Tool } from "ai";
 import { z } from "zod";
 import { redactSecrets } from "./redact.js";
+import { createWebFetchTool, createWebSearchTool, getSearchProvider } from "./researchTools.js";
 
 export type ToolName = "current_time" | "calculator" | "pc_telemetry";
 export const FILE_TOOL_NAMES = ["read_file", "list_directory", "search_knowledge"] as const;
@@ -436,6 +437,17 @@ export function resolveTools(
     if (name in registry) resolved[name] = registry[name as ToolName];
   }
 
+  // Research tools are dual-gated on an operator env var, like run_code:
+  // the tool name alone grants nothing unless WEB_SEARCH_PROVIDER names a
+  // configured backend. web_fetch rides the same gate rather than having
+  // its own — fetching arbitrary pages is the same capability grant as
+  // searching for them, and splitting the switch would let an operator
+  // enable the riskier half by accident.
+  if (getSearchProvider()) {
+    if (toolNames.includes("web_search")) resolved.web_search = createWebSearchTool();
+    if (toolNames.includes("web_fetch")) resolved.web_fetch = createWebFetchTool();
+  }
+
   if (options.fileAccessRoot) {
     const fileTools = createFileTools(options.fileAccessRoot);
     for (const name of FILE_TOOL_NAMES) {
@@ -541,6 +553,22 @@ export function listAvailableTools(): { name: string; description: string; requi
     {
       name: "run_code",
       description: "Run a short Python or JavaScript snippet in an isolated sandbox with no network access.",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "http_request",
+      description:
+        "Call one of the node's pre-authorized REST endpoints by slug (never by raw URL), with credentials attached server-side.",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "web_search",
+      description: "Search the public web for pages (requires an operator-configured search provider).",
+      requiresFileAccessRoot: false,
+    },
+    {
+      name: "web_fetch",
+      description: "Read one public web page as text; private/internal addresses are refused.",
       requiresFileAccessRoot: false,
     },
   ];

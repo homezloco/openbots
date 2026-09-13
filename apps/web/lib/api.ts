@@ -46,6 +46,10 @@ export const getMe = () => request<PublicUser>("/auth/me");
 export const createGraph = (name: string, description?: string) =>
   request<AgentGraph>("/graphs", { method: "POST", body: JSON.stringify({ name, description }) });
 
+/** "Promptable workflow generation": describe a team, get a whole graph back. See PLAN.md. */
+export const generateGraph = (description: string) =>
+  request<AgentGraph>("/graphs/generate", { method: "POST", body: JSON.stringify({ description }) });
+
 /** The README GIF as a real graph (Router → Support, Billing as the drop target). */
 export const createLiveRerouteExample = () =>
   request<AgentGraph>("/graphs/examples/live-reroute", { method: "POST" });

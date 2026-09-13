@@ -218,6 +218,46 @@ async function main() {
     }
   });
 
+  await test("POST /graphs/generate builds a runnable multi-node graph from a prompt", async () => {
+    const ownerCookie = sessionCookie;
+    sessionCookie = "";
+    const unauth = await api("/graphs/generate", { method: "POST", body: JSON.stringify({ description: "x" }) });
+    assert(unauth.status === 401, `expected 401 with no session, got ${unauth.status}: ${JSON.stringify(unauth.body)}`);
+    sessionCookie = ownerCookie;
+
+    const created = await api("/graphs/generate", {
+      method: "POST",
+      body: JSON.stringify({
+        description:
+          "A support triage team: a router that classifies an incoming request as either a billing issue or a technical issue, and one specialist for each.",
+      }),
+    });
+    assert(created.status === 201, `generate failed: ${created.status} ${JSON.stringify(created.body)}`);
+
+    // Structural assertions only — LLM output varies, don't assert on exact
+    // names/wording (learned this directly from a flaky content-regex e2e
+    // test diagnosed in the same session this feature was built).
+    const nodes = created.body.nodes as { id: string; name: string }[];
+    const edges = created.body.edges as { sourceNodeId: string; targetNodeId: string }[];
+    assert(nodes.length >= 2, `expected at least 2 nodes, got ${nodes.length}: ${JSON.stringify(nodes.map((n) => n.name))}`);
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    for (const edge of edges) {
+      assert(nodeIds.has(edge.sourceNodeId), `edge sourceNodeId ${edge.sourceNodeId} not in returned nodes`);
+      assert(nodeIds.has(edge.targetNodeId), `edge targetNodeId ${edge.targetNodeId} not in returned nodes`);
+    }
+    assert(created.body.entryNodeId && nodeIds.has(created.body.entryNodeId), "entryNodeId missing or not one of the generated nodes");
+    assert(created.body.ownerId, "generated graph has no ownerId");
+
+    // Prove it's not just structurally valid but genuinely executable.
+    const run = await api("/runs", {
+      method: "POST",
+      body: JSON.stringify({ graphId: created.body.id, input: "My card was charged twice this month." }),
+    });
+    assert(run.status === 201, `run create on generated graph failed: ${JSON.stringify(run.body)}`);
+    const finished = await waitForRun(run.body.id);
+    assert(finished.status === "completed", `generated graph's run did not complete: ${finished.status} ${JSON.stringify(finished.events)}`);
+  });
+
   // --- Basic explicit pipeline + regression check for the position-shape bug ---
   let basicGraphId = "";
   let nodeA = "";

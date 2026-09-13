@@ -1119,6 +1119,37 @@ Real open gaps before this is buildable, not just hand-waved:
   mutating it (not just generate-once), the same fresh-read discipline
   `dispatch_to_graph`'s ownership check already follows.
 
+**Shipped 2026-09-13 — as a one-shot `generateObject` call, not the
+`manage_target_graphs`-loop sketch above.** `POST /graphs/generate`
+(`routes/generateGraph.ts`) turns a description into a whole graph via a
+single bounded structured-output call — the multi-node sibling of
+quick-add's own `generateObject` mechanism — validated in memory (node/edge
+name references, checked case/whitespace-normalized) then written
+server-side in one sequence, landing on `/hierarchy` like any other graph.
+Chosen over the tool-loop sketch for two reasons found in review: a loop
+can stop halfway, leaving a genuinely half-built graph live on the canvas,
+where the one-shot call is atomic at the planning stage (validate the
+whole plan or write nothing); and it makes the "guardrails" gap above moot
+by construction rather than by a review step — the generation schema
+structurally never contains `fileAccessRoot`/`dispatchTargets`/`sshTarget`/
+`mcpServers`/`httpEndpoints`/`consensusGroup`/`mapConfig`/`approvalConfig`
+at all. The cost, confirmed real: multi-turn correction is harder to bolt
+onto a locked one-shot schema than a tool loop, so it stays out of scope
+(regenerate-from-scratch only) for the same reason it was already listed
+above. Data/file ingestion remains unstarted, as scoped above.
+
+**Known gap, found immediately in testing (2026-09-13)**: both this route
+and quick-add call `pickEnvProvider()` — a single hardcoded provider pick
+(anthropic → openai → xai → openrouter → openai-compatible) with **no
+fallback on failure**. Confirmed via direct parity testing: forcing both
+routes onto OpenRouter (`anthropic/claude-sonnet-4`, no `structuredOutputs`
+support in that path) made both fail identically ("No object generated:
+could not parse the response") with no retry attempted. A configurable,
+multi-provider fallback chain for this generation path specifically (not
+just the existing per-node `AgentNode.fallbackChain`, which already has UI
+in `AgentSettingsForm.tsx`) is a real, user-identified follow-up — scope
+separately.
+
 ### MCP marketplace/registry landscape for the "bet on MCP" plan (researched 2026-09-11)
 
 Concrete follow-up on what to actually integrate with. The **official

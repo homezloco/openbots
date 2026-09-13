@@ -64,5 +64,23 @@ export function computeWarnings(graph: AgentGraph): string[] {
     }
   }
 
+  // A node with no edge touching it at all (as source or target) never
+  // runs unless it's the entry node — silently dead weight on the canvas.
+  // Most likely to happen from generated graphs (see routes/generateGraph.ts):
+  // an LLM that names every node correctly but drops an edge for one of
+  // them produces exactly this. Soft nudge only, same as every other check
+  // here — the user can always wire it by hand on the live canvas.
+  const touchedNodeIds = new Set<string>();
+  for (const edge of graph.edges) {
+    touchedNodeIds.add(edge.sourceNodeId);
+    touchedNodeIds.add(edge.targetNodeId);
+  }
+  for (const node of graph.nodes) {
+    if (node.id === graph.entryNodeId) continue;
+    if (!touchedNodeIds.has(node.id)) {
+      warnings.push(`"${node.name}" has no routing edges connecting it — it will never run.`);
+    }
+  }
+
   return warnings;
 }

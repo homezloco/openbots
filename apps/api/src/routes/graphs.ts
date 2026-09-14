@@ -3,8 +3,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { FallbackTarget } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
-import { agentGraphs, agentNodes, routingEdges, runs, scheduledTriggers } from "../db/schema.js";
-import { recordChange } from "../db/routingChanges.js";
+import { agentGraphs, agentNodes, runs, scheduledTriggers } from "../db/schema.js";
 import { loadLiveGraph } from "../orchestrator/engine.js";
 import { requireAuth } from "../auth/middleware.js";
 import { unregisterSchedule } from "../queue/scheduleQueue.js";
@@ -16,9 +15,10 @@ import {
   insertAgentNodeValidated,
   insertRoutingEdge,
   updateAgentNode,
+  updateEdgeBody,
   updateNodeBody,
+  updateRoutingEdge,
 } from "../orchestrator/graphMutations.js";
-import { checkEdgeRetargetGateCompatible } from "../validation/approvalGate.js";
 import { createAgencyExample, createLiveRerouteExample } from "../orchestrator/exampleGraphs.js";
 
 const createGraphBody = z.object({
@@ -29,10 +29,6 @@ const createGraphBody = z.object({
 const fromExistingNodeBody = z.object({
   sourceNodeId: z.string().uuid(),
   position: z.object({ x: z.number(), y: z.number() }),
-});
-
-const rerouteEdgeBody = z.object({
-  targetNodeId: z.string().uuid(),
 });
 
 const updateGraphBody = z.object({
@@ -244,7 +240,7 @@ export async function graphRoutes(app: FastifyInstance) {
   app.delete("/graphs/:id/nodes/:nodeId", { preHandler: requireAuth }, async (req, reply) => {
     const { id: graphId, nodeId } = req.params as { id: string; nodeId: string };
     if (!(await requireGraphOwner(req, reply, graphId))) return;
-    const result = await deleteAgentNode(graphId, nodeId);
+    const result = await deleteAgentNode(graphId, nodeId, req.userId);
     if (!result.ok) return reply.code(result.status).send({ error: result.error });
     return reply.code(204).send();
   });
@@ -253,7 +249,7 @@ export async function graphRoutes(app: FastifyInstance) {
     const { id: graphId } = req.params as { id: string };
     if (!(await requireGraphOwner(req, reply, graphId))) return;
     const body = createEdgeBody.parse(req.body);
-    const result = await insertRoutingEdge(graphId, body);
+    const result = await insertRoutingEdge(graphId, body, req.userId);
     if (!result.ok) return reply.code(result.status).send({ error: result.error });
     return reply.code(201).send(result.value);
   });
@@ -263,35 +259,22 @@ export async function graphRoutes(app: FastifyInstance) {
    * target node calls this. It never touches a running orchestration
    * loop directly — it just updates the row that resolveNextHop() will
    * read on the affected run's next hop (see orchestrator/resolve.ts).
+   * Every field is optional, so this doubles as the endpoint for editing
+   * an explicit edge's condition/priority/label without retargeting it.
    */
   app.patch("/graphs/:id/edges/:edgeId", { preHandler: requireAuth }, async (req, reply) => {
     const { id: graphId, edgeId } = req.params as { id: string; edgeId: string };
     if (!(await requireGraphOwner(req, reply, graphId))) return;
-    const body = rerouteEdgeBody.parse(req.body);
-
-    // graphId scoped here too — same IDOR class as the node PATCH above.
-    const before = await db.query.routingEdges.findFirst({
-      where: and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)),
-    });
-    if (!before) return reply.code(404).send({ error: "Edge not found" });
-
-    const gateError = await checkEdgeRetargetGateCompatible(graphId, edgeId, body.targetNodeId);
-    if (gateError) return reply.code(400).send({ error: gateError });
-
-    const [after] = await db
-      .update(routingEdges)
-      .set({ targetNodeId: body.targetNodeId, updatedAt: new Date() })
-      .where(and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)))
-      .returning();
-
-    await recordChange(before.graphId, "edge_rerouted", before, after);
-    return after;
+    const body = updateEdgeBody.parse(req.body);
+    const result = await updateRoutingEdge(graphId, edgeId, body, req.userId);
+    if (!result.ok) return reply.code(result.status).send({ error: result.error });
+    return result.value;
   });
 
   app.delete("/graphs/:id/edges/:edgeId", { preHandler: requireAuth }, async (req, reply) => {
     const { id: graphId, edgeId } = req.params as { id: string; edgeId: string };
     if (!(await requireGraphOwner(req, reply, graphId))) return;
-    const result = await deleteRoutingEdge(graphId, edgeId);
+    const result = await deleteRoutingEdge(graphId, edgeId, req.userId);
     if (!result.ok) return reply.code(result.status).send({ error: result.error });
     return reply.code(204).send();
   });

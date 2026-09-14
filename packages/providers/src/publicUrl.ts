@@ -40,7 +40,11 @@ function isPrivateIPv4(ip: string): boolean {
   if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
   if (a === 192 && b === 168) return true; // RFC1918
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT (RFC6598) — Tailscale et al.
-  if (a === 192 && b === 0) return true; // IETF protocol assignments
+  if (a === 192 && b === 0) return true; // IETF protocol assignments (192.0.0.0/16 — includes TEST-NET-1)
+  if (a === 192 && b === 88 && parts[2] === 99) return true; // deprecated 6to4 relay anycast
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking (RFC2544) — never routable
+  if (a === 198 && b === 51 && parts[2] === 100) return true; // TEST-NET-2
+  if (a === 203 && b === 0 && parts[2] === 113) return true; // TEST-NET-3
   if (a >= 224) return true; // multicast + reserved + broadcast
   return false;
 }
@@ -50,6 +54,7 @@ function isPrivateIPv6(ip: string): boolean {
   if (addr === "::1" || addr === "::") return true; // loopback / unspecified
   if (addr.startsWith("fe80")) return true; // link-local
   if (addr.startsWith("fc") || addr.startsWith("fd")) return true; // unique local
+  if (addr.startsWith("2001:db8") || addr.startsWith("2001:0db8")) return true; // documentation range
 
   // IPv4-mapped addresses must defer to the v4 rules, or ::ffff:127.0.0.1
   // sails through as "some opaque v6 address" and reaches loopback.

@@ -22,7 +22,13 @@ export async function getCredentials(
       eq(providerCredentials.provider, providerId),
       or(eq(providerCredentials.nodeId, nodeId), isNull(providerCredentials.nodeId)),
     ),
-    orderBy: (t, { desc }) => [desc(t.nodeId)], // non-null (node-specific) sorts first
+    // Node-specific (non-null nodeId) must sort first. `desc(nodeId)` looks
+    // right but Postgres defaults DESC to NULLS FIRST, so it actually put
+    // the graph-wide row first — the exact opposite of the intended
+    // precedence, silently: a node with BOTH a node-specific and a
+    // graph-wide stored credential always used the graph-wide one. `asc`
+    // defaults to NULLS LAST, which is the ordering actually wanted here.
+    orderBy: (t, { asc }) => [asc(t.nodeId)],
   });
 
   if (stored) {

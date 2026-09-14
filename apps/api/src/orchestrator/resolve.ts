@@ -22,6 +22,46 @@ export function aggregatorNodeIds(graph: AgentGraph): Set<string> {
   return ids;
 }
 
+export interface ResolveContext {
+  /**
+   * Whether THIS hop's model call actually invoked at least one tool —
+   * see engine.ts::AgentCallResult.toolCalled. Drives `on_tool_call`
+   * explicit edges; irrelevant to every other condition.
+   */
+  toolCalled?: boolean;
+}
+
+/**
+ * Whether an explicit edge's `condition` currently holds — see
+ * RoutingCondition's doc comment in @openbots/graph-schema for what each
+ * value means. Only ever consulted for `kind: "explicit"` edges; auto and
+ * consensus edges are resolved by entirely separate mechanisms below and
+ * never call this.
+ */
+function isConditionSatisfied(edge: RoutingEdge, lastOutput: unknown, context: ResolveContext): boolean {
+  switch (edge.condition) {
+    case "default":
+      return true;
+    case "manual":
+      return false;
+    case "on_tool_call":
+      return Boolean(context.toolCalled);
+    case "on_classifier_result": {
+      // Save-time validation (checkEdgeConditionValid) requires a label
+      // on every edge with this condition, but fail closed rather than
+      // trust that every past/future write path enforced it.
+      if (!edge.label) return false;
+      const text = (typeof lastOutput === "string" ? lastOutput : JSON.stringify(lastOutput ?? "")).trim().toLowerCase();
+      // Plain case-insensitive prefix match, not startsWithSentinel's
+      // regex — `label` is free-text an operator can set to anything
+      // (parens, punctuation, whatever), and interpolating it into a
+      // RegExp would let a label containing regex metacharacters throw
+      // or match in surprising ways.
+      return text.startsWith(edge.label.trim().toLowerCase());
+    }
+  }
+}
+
 /**
  * Core de-risking move for drag-and-drop rerouting: this is called fresh
  * before every hop, never planned ahead for a whole run. A canvas edit just
@@ -35,6 +75,7 @@ export function resolveNextHop(
   graph: AgentGraph,
   currentNodeId: string,
   lastOutput: unknown,
+  context: ResolveContext = {},
 ): { edge: RoutingEdge | null; nextNodeId: string | null } {
   const outgoing = graph.edges.filter((e) => e.sourceNodeId === currentNodeId);
   if (outgoing.length === 0) {
@@ -43,8 +84,16 @@ export function resolveNextHop(
 
   const aggregators = aggregatorNodeIds(graph);
 
+  // Only explicit edges whose condition currently holds are candidates —
+  // a node with nothing but "default" edges (the common case) sees every
+  // one of them satisfied, identical to the original unconditional
+  // behavior. If a node HAS explicit edges but none are satisfied right
+  // now (e.g. all `on_tool_call` and no tool ran this hop), fall through
+  // to its `auto` edges below instead of dead-ending — a gated explicit
+  // edge is a routing REFINEMENT, not a guarantee this node has no other
+  // way to proceed.
   const explicit = outgoing
-    .filter((e) => e.kind === "explicit")
+    .filter((e) => e.kind === "explicit" && isConditionSatisfied(e, lastOutput, context))
     .sort((a, b) => b.priority - a.priority);
   if (explicit.length > 0) {
     const chosen = explicit[0];

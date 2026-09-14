@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import { z } from "zod";
 import { AgentRole, ApprovalConfig, ConsensusGroup, FallbackTarget, HttpEndpoint, MapConfig, McpServer, ModelTier, ProviderId, RoutingEdgeKind, RoutingCondition, SshTarget } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
@@ -10,7 +10,7 @@ import { checkDispatchTargetsOwned } from "../validation/dispatchTargets.js";
 import { checkSshTargetAllowed } from "../validation/sshTarget.js";
 import { checkMcpServersAllowed } from "../validation/mcpServer.js";
 import { checkHttpEndpointsAllowed } from "../validation/httpEndpoint.js";
-import { checkApprovalGateCompatible } from "../validation/approvalGate.js";
+import { checkApprovalGateCompatible, checkEdgeRetargetGateCompatible } from "../validation/approvalGate.js";
 import { checkNotificationWebhookAllowed } from "../validation/notificationWebhook.js";
 import { checkConsensusGroupNotSelfReferential, checkMapConfigNotSelfReferential } from "../validation/mapConfig.js";
 
@@ -77,7 +77,33 @@ export const createEdgeBody = z.object({
   kind: RoutingEdgeKind.default("explicit"),
   condition: RoutingCondition.optional(),
   priority: z.number().int().optional(),
+  label: z.string().optional(),
 });
+
+/** PATCH /graphs/:id/edges/:edgeId — every field optional, so a caller can retarget, re-condition, or both in one call. */
+export const updateEdgeBody = z.object({
+  targetNodeId: z.string().uuid().optional(),
+  condition: RoutingCondition.optional(),
+  priority: z.number().int().optional(),
+  label: z.string().optional(),
+});
+export type UpdateEdgeBody = z.infer<typeof updateEdgeBody>;
+
+/**
+ * `condition: "on_classifier_result"` is meaningless without a label to
+ * match the hop's output against (see resolve.ts::isConditionSatisfied,
+ * which fails closed — never satisfied — on a missing one). Checked
+ * against the EFFECTIVE (post-merge) label, same reasoning as
+ * updateAgentNode's effective-value checks below: a PATCH that only
+ * changes `condition` and not `label` must still be validated against
+ * whatever label the edge already has.
+ */
+function checkEdgeConditionValid(condition: RoutingCondition | undefined, label: string | undefined): string | null {
+  if (condition === "on_classifier_result" && !label?.trim()) {
+    return 'condition "on_classifier_result" requires a non-empty label to match the hop\'s output against.';
+  }
+  return null;
+}
 
 export type CreateNodeBody = z.infer<typeof createNodeBody>;
 export type UpdateNodeBody = z.infer<typeof updateNodeBody>;
@@ -86,7 +112,7 @@ export type CreateEdgeBody = z.infer<typeof createEdgeBody>;
 export type MutationResult<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
 
 /** Shared by the manual "+ Add agent" form, natural-language quick-add, and now cross-graph node creation — one insert path, one place to keep in sync with the schema. */
-export async function insertAgentNode(graphId: string, body: CreateNodeBody) {
+export async function insertAgentNode(graphId: string, body: CreateNodeBody, changedBy?: string | null) {
   const [node] = await db
     .insert(agentNodes)
     .values({
@@ -112,7 +138,7 @@ export async function insertAgentNode(graphId: string, body: CreateNodeBody) {
       positionY: body.position.y,
     })
     .returning();
-  await recordChange(graphId, "node_added", null, node);
+  await recordChange(graphId, "node_added", null, node, changedBy);
   return nodeRowToAgentNode(node);
 }
 
@@ -151,7 +177,7 @@ export async function insertAgentNodeValidated(
   if (approvalError) return { ok: false, status: 400, error: approvalError };
   const webhookError = checkNotificationWebhookAllowed(body.approvalConfig);
   if (webhookError) return { ok: false, status: 400, error: webhookError };
-  return { ok: true, value: await insertAgentNode(graphId, body) };
+  return { ok: true, value: await insertAgentNode(graphId, body, userId) };
 }
 
 export async function updateAgentNode(
@@ -233,18 +259,71 @@ export async function updateAgentNode(
   // records as before.
   const configKeys = Object.keys(rest).filter((k) => (rest as Record<string, unknown>)[k] !== undefined);
   if (configKeys.length > 0) {
-    await recordChange(graphId, "node_updated", before, after);
+    await recordChange(graphId, "node_updated", before, after, userId);
   }
   return { ok: true, value: nodeRowToAgentNode(after) };
 }
 
-export async function deleteAgentNode(graphId: string, nodeId: string): Promise<MutationResult<null>> {
+/**
+ * consensusGroup.edgeIds and mapConfig.{targetNodeId,aggregatorNodeId} are
+ * plain JSON on OTHER nodes, not real foreign keys — deleting the node or
+ * edge they point at leaves a stale reference behind, which the engine
+ * only discovers at dispatch time (see engine.ts's dispatchConsensus/
+ * dispatchMap "not found" throws, previously able to strand a run — see
+ * PLAN.md). Scrubbed here, at the same moment the thing being referenced
+ * actually disappears, rather than trusting every future runtime path to
+ * defend against a graph that can no longer describe itself consistently.
+ */
+async function scrubConsensusReferences(graphId: string, removedEdgeIds: Set<string>, removedNodeIds: Set<string>): Promise<void> {
+  if (removedEdgeIds.size === 0 && removedNodeIds.size === 0) return;
+  const siblings = await db.query.agentNodes.findMany({ where: eq(agentNodes.graphId, graphId) });
+  for (const sibling of siblings) {
+    const group = sibling.consensusGroup as { edgeIds: string[]; aggregatorNodeId: string } | null;
+    if (!group) continue;
+    const aggregatorGone = removedNodeIds.has(group.aggregatorNodeId);
+    const remainingEdgeIds = group.edgeIds.filter((id) => !removedEdgeIds.has(id));
+    if (aggregatorGone || remainingEdgeIds.length === 0) {
+      // Nothing left to fan out to, or nothing left to fan out INTO —
+      // either way this is no longer a usable consensus group. Clear it
+      // entirely rather than leaving a group with an empty edgeIds list,
+      // which dispatchConsensus's "every branch failed" path would treat
+      // as a run-level error the next time this node dispatches.
+      await db.update(agentNodes).set({ consensusGroup: null, updatedAt: new Date() }).where(eq(agentNodes.id, sibling.id));
+    } else if (remainingEdgeIds.length !== group.edgeIds.length) {
+      await db
+        .update(agentNodes)
+        .set({ consensusGroup: { ...group, edgeIds: remainingEdgeIds }, updatedAt: new Date() })
+        .where(eq(agentNodes.id, sibling.id));
+    }
+  }
+}
+
+/** Same idea as scrubConsensusReferences, for mapConfig's two node references. */
+async function scrubMapConfigReferences(graphId: string, removedNodeIds: Set<string>): Promise<void> {
+  if (removedNodeIds.size === 0) return;
+  const siblings = await db.query.agentNodes.findMany({ where: eq(agentNodes.graphId, graphId) });
+  for (const sibling of siblings) {
+    const config = sibling.mapConfig as { targetNodeId: string; aggregatorNodeId?: string } | null;
+    if (!config) continue;
+    if (removedNodeIds.has(config.targetNodeId) || (config.aggregatorNodeId && removedNodeIds.has(config.aggregatorNodeId))) {
+      await db.update(agentNodes).set({ mapConfig: null, updatedAt: new Date() }).where(eq(agentNodes.id, sibling.id));
+    }
+  }
+}
+
+export async function deleteAgentNode(graphId: string, nodeId: string, changedBy?: string | null): Promise<MutationResult<null>> {
   const before = await db.query.agentNodes.findFirst({
     where: and(eq(agentNodes.id, nodeId), eq(agentNodes.graphId, graphId)),
   });
   if (!before) return { ok: false, status: 404, error: "Node not found" };
 
-  // routingEdges.sourceNodeId/targetNodeId cascade on delete, but
+  // Collected BEFORE the delete below, since routingEdges.sourceNodeId/
+  // targetNodeId cascade — by the time scrubConsensusReferences runs
+  // these rows would already be gone and their ids unrecoverable.
+  const cascadingEdges = await db.query.routingEdges.findMany({
+    where: and(eq(routingEdges.graphId, graphId), or(eq(routingEdges.sourceNodeId, nodeId), eq(routingEdges.targetNodeId, nodeId))),
+  });
+
   // agentGraphs.entryNodeId is not a real FK — clear it explicitly so a
   // deleted node never leaves the graph pointing at a dangling entry node.
   await db
@@ -253,11 +332,18 @@ export async function deleteAgentNode(graphId: string, nodeId: string): Promise<
     .where(and(eq(agentGraphs.id, graphId), eq(agentGraphs.entryNodeId, nodeId)));
 
   await db.delete(agentNodes).where(and(eq(agentNodes.id, nodeId), eq(agentNodes.graphId, graphId)));
-  await recordChange(graphId, "node_removed", before, null);
+  await recordChange(graphId, "node_removed", before, null, changedBy);
+
+  await scrubConsensusReferences(graphId, new Set(cascadingEdges.map((e) => e.id)), new Set([nodeId]));
+  await scrubMapConfigReferences(graphId, new Set([nodeId]));
   return { ok: true, value: null };
 }
 
-export async function insertRoutingEdge(graphId: string, body: CreateEdgeBody): Promise<MutationResult<typeof routingEdges.$inferSelect>> {
+export async function insertRoutingEdge(
+  graphId: string,
+  body: CreateEdgeBody,
+  changedBy?: string | null,
+): Promise<MutationResult<typeof routingEdges.$inferSelect>> {
   // graphId-scoped lookups, not just an ownership check the caller may have
   // already done — same IDOR class as updateAgentNode's node lookup above:
   // without this, a caller's own graphId paired with another graph's node
@@ -270,6 +356,9 @@ export async function insertRoutingEdge(graphId: string, body: CreateEdgeBody): 
   ]);
   if (!source) return { ok: false, status: 404, error: "sourceNodeId not found in this graph" };
   if (!target) return { ok: false, status: 404, error: "targetNodeId not found in this graph" };
+
+  const conditionError = checkEdgeConditionValid(body.condition, body.label);
+  if (conditionError) return { ok: false, status: 400, error: conditionError };
 
   // A new `auto` edge on an already-hybrid source gets auto-synced into
   // its consensusGroup.edgeIds below, making the target an immediate
@@ -295,9 +384,10 @@ export async function insertRoutingEdge(graphId: string, body: CreateEdgeBody): 
       kind: body.kind,
       condition: body.condition ?? "default",
       priority: body.priority ?? 0,
+      label: body.label,
     })
     .returning();
-  await recordChange(graphId, "edge_added", null, edge);
+  await recordChange(graphId, "edge_added", null, edge, changedBy);
 
   // A hybrid node's ALL fan-out (see engine.ts) is a fixed edgeIds list,
   // not derived live from the graph — without this, adding a new
@@ -321,13 +411,64 @@ export async function insertRoutingEdge(graphId: string, body: CreateEdgeBody): 
   return { ok: true, value: edge };
 }
 
-export async function deleteRoutingEdge(graphId: string, edgeId: string): Promise<MutationResult<null>> {
+/**
+ * Handles both drag-and-drop rerouting (targetNodeId) and editing an
+ * edge's condition/priority/label — one path so both go through the same
+ * gate-compatibility and condition-validity checks rather than the PATCH
+ * route hand-rolling its own subset of them (the same "one code path"
+ * reasoning this file's own header comment gives for node mutations).
+ */
+export async function updateRoutingEdge(
+  graphId: string,
+  edgeId: string,
+  body: UpdateEdgeBody,
+  changedBy?: string | null,
+): Promise<MutationResult<typeof routingEdges.$inferSelect>> {
+  const before = await db.query.routingEdges.findFirst({
+    where: and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)),
+  });
+  if (!before) return { ok: false, status: 404, error: "Edge not found" };
+
+  if (body.targetNodeId) {
+    const gateError = await checkEdgeRetargetGateCompatible(graphId, edgeId, body.targetNodeId);
+    if (gateError) return { ok: false, status: 400, error: gateError };
+  }
+
+  const effectiveCondition = (body.condition ?? before.condition) as RoutingCondition;
+  const effectiveLabel = body.label !== undefined ? body.label : (before.label ?? undefined);
+  const conditionError = checkEdgeConditionValid(effectiveCondition, effectiveLabel);
+  if (conditionError) return { ok: false, status: 400, error: conditionError };
+
+  const [after] = await db
+    .update(routingEdges)
+    .set({
+      ...(body.targetNodeId ? { targetNodeId: body.targetNodeId } : {}),
+      ...(body.condition !== undefined ? { condition: body.condition } : {}),
+      ...(body.priority !== undefined ? { priority: body.priority } : {}),
+      ...(body.label !== undefined ? { label: body.label } : {}),
+      updatedAt: new Date(),
+    })
+    .where(and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)))
+    .returning();
+
+  // "edge_rerouted" is reserved for an actual target change — editing
+  // just the condition/priority/label is a distinct audit entry so the
+  // routing-changes trail can tell "this edge now points somewhere else"
+  // apart from "this edge behaves differently but still points the same
+  // place", which matter differently to someone reviewing the history.
+  await recordChange(graphId, body.targetNodeId ? "edge_rerouted" : "edge_updated", before, after, changedBy);
+  return { ok: true, value: after };
+}
+
+export async function deleteRoutingEdge(graphId: string, edgeId: string, changedBy?: string | null): Promise<MutationResult<null>> {
   const before = await db.query.routingEdges.findFirst({
     where: and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)),
   });
   if (!before) return { ok: false, status: 404, error: "Edge not found" };
 
   await db.delete(routingEdges).where(and(eq(routingEdges.id, edgeId), eq(routingEdges.graphId, graphId)));
-  await recordChange(before.graphId, "edge_removed", before, null);
+  await recordChange(before.graphId, "edge_removed", before, null, changedBy);
+
+  await scrubConsensusReferences(graphId, new Set([edgeId]), new Set());
   return { ok: true, value: null };
 }

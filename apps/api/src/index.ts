@@ -43,6 +43,13 @@ app.setErrorHandler((err, _req, reply) => {
   if (err instanceof ZodError) {
     return reply.code(400).send({ error: "Invalid request body", issues: err.issues });
   }
+  // Postgres unique_violation (e.g. provider_credentials' node/graph-scope
+  // indexes) — surfaced as a 409, not a bare 500, since it's a real
+  // "someone else already did this" condition a caller can act on rather
+  // than a server bug.
+  if ((err as { code?: string }).code === "23505") {
+    return reply.code(409).send({ error: "A conflicting record already exists" });
+  }
   app.log.error(err);
   return reply.code(500).send({ error: "Internal server error" });
 });

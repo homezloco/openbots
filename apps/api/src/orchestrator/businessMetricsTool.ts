@@ -5,6 +5,7 @@ import { redactDeep } from "@openbots/providers";
 import { db } from "../db/client.js";
 import { userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
+import { isHttpEndpointUrlAllowed } from "../validation/httpEndpoint.js";
 
 /**
  * Read-only sources only — the same "read-only wire protocol in, no
@@ -194,6 +195,21 @@ export function createBusinessMetricsTool(ownerId: string | null): Tool {
       }
       const creds = parseStoredLogin(parsed);
       if ("error" in creds) return creds;
+
+      // The one outbound tool that POSTs stored credentials to its target
+      // — more sensitive than http_request, not less — yet it was the only
+      // URL-bearing capability with no operator gate at all: any signed-up
+      // user could point a source at an internal host (169.254.169.254, a
+      // LAN service) and read its response through run output. Re-checked
+      // here at fetch time (not just when the credential was saved),
+      // matching the same save-time-convenience-vs-runtime-boundary
+      // pattern every other allowlisted capability follows.
+      if (!isHttpEndpointUrlAllowed(creds.baseUrl)) {
+        return {
+          error: `The "${provider}" source's baseUrl isn't within an operator-allowed prefix — the operator needs to add its host to ALLOWED_HTTP_ENDPOINTS.`,
+          kind: "config",
+        };
+      }
 
       try {
         return await fetchMetrics(creds, days);

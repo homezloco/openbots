@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX "provider_credentials_node_scope_unique" ON "provider_credentials" USING btree ("graph_id","provider","node_id") WHERE "provider_credentials"."node_id" is not null;--> statement-breakpoint
+CREATE UNIQUE INDEX "provider_credentials_graph_scope_unique" ON "provider_credentials" USING btree ("graph_id","provider") WHERE "provider_credentials"."node_id" is null;

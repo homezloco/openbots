@@ -1952,6 +1952,104 @@ config, `useBotChat` not handling `awaiting_approval`/`cancelled`) —
 those are real, worth tracking, but distinct from the three "confirmed,
 fix before relying on this" items this pass focused on closing first.
 
+## Full-codebase audit: three high + four medium findings fixed (2026-09-13)
+
+A fresh security/correctness audit of the whole repo (the 2026-09-11
+audit covered specific subsystems; this pass went wall-to-wall —
+auth, routes, orchestrator, tools, providers, web) found the security
+architecture itself holding up well (graph-scoped ownership checks on
+every route examined, dual-gated tools, worktree isolation, AES-256-GCM
+credentials, honest SSRF boundary) but surfaced seven real bugs in
+less-tested paths. All fixed and verified with typecheck/build/lint
+green:
+
+**High:**
+1. **Node-specific credentials silently lost to graph-wide ones.**
+   `getCredentials` ordered by `desc(nodeId)` — Postgres `DESC` defaults
+   to `NULLS FIRST`, so the `nodeId IS NULL` (graph-wide) row always won,
+   inverting the documented node → graph → env precedence. Fixed to
+   `asc(nodeId)` (NULLS LAST) plus two partial unique indexes
+   (`provider_credentials_{node,graph}_scope_unique`, migration 0019) so
+   duplicate same-scope rows — previously allowed and picked between
+   nondeterministically — can't exist at all. `23505` maps to a 409 in
+   the global error handler.
+2. **A failed hop job stranded the run in `running` forever.** BullMQ
+   jobs are `attempts: 1` and the worker's `failed` handler only logged;
+   several throws escaped `dispatchHop`'s own error handling (deleted
+   consensus edge/aggregator resolved before the try block, a Redis
+   failure after `advanceRun` persisted the next node but before
+   enqueue, DB/Redis outages). `dispatchHop` is now a wrapper around the
+   original body (`dispatchHopInner`) with a `failRunOnUnexpectedError`
+   backstop that force-transitions the run to `error` and publishes
+   `hop_failed`, guarded so it never resurrects a terminal or
+   awaiting-approval run.
+3. **`/push` and `/pr` broke after worktree pruning while claiming the
+   opposite.** `getCommitDiff` had the pruned-worktree fallback; the
+   other two worktree-path consumers ran `git` with `cwd` pointing at a
+   deleted directory. The fallback is now shared (`repoCwdFor`) and all
+   three use it — the `openbots/*` branch survives pruning in the object
+   store, so push/diff work from the repo root.
+
+**Medium:**
+4. **No referential cleanup on node/edge delete.** Deleting an edge left
+   it in `consensusGroup.edgeIds`; deleting a node left it as
+   `aggregatorNodeId`, in `mapConfig`, and as `entryNodeId` — several of
+   which became finding #2's stranded runs. `deleteAgentNode`/
+   `deleteRoutingEdge` now collect cascade-deleted edge ids *before* the
+   delete and scrub siblings' `consensusGroup`/`mapConfig` and the
+   graph's `entryNodeId`; a group left with no branches or no aggregator
+   is cleared entirely.
+5. **Edge `condition` was dead config** — parsed, persisted, documented
+   as affecting explicit-edge resolution, and never read by
+   `resolveNextHop`. Now wired for real (`isConditionSatisfied`):
+   `default` always, `on_tool_call` when the hop invoked a tool
+   (`AgentCallResult.toolCalled`), `on_classifier_result` when the
+   output starts with the edge's required `label` (plain prefix match,
+   case-insensitive — deliberately not a model call), `manual` never
+   (canvas-only structural edge). No satisfied explicit edge → falls
+   through to `auto` matching rather than dead-ending. `PATCH
+   /graphs/:id/edges/:edgeId` became a shared `updateRoutingEdge`
+   mutation accepting condition/priority/label as well as retarget,
+   with a distinct `edge_updated` audit type.
+6. **Open signup + no auth rate limiting** = a stranger on an
+   internet-exposed instance could burn the operator's env provider
+   keys. `DISABLE_SIGNUP=true` (documented in `.env.example`, read
+   per-request) plus per-IP sliding-window limits: signup 5/min, login
+   10/min.
+7. **`business_metrics` `baseUrl` bypassed the allowlist model** — the
+   one outbound tool that POSTs stored credentials to its target had no
+   operator gate at all. Now rechecked against `ALLOWED_HTTP_ENDPOINTS`
+   at fetch time, same list as `http_request`. **Operator action needed
+   on upgrade:** add each metrics source's host to
+   `ALLOWED_HTTP_ENDPOINTS` or the tool returns `kind: "config"` errors.
+
+**Also fixed along the way** (the audit's low-severity list): indexes
+on every hot lookup column (`run_events.run_id`, `agent_nodes.graph_id`,
+`routing_edges.graph_id`, `runs.graph_id`, `usage_events.run_id`,
+`agent_commits`, `routing_changes`, `scheduled_triggers`,
+`webhook_triggers` — several previously full-scanned on every hop);
+a unique `run_events(run_id, sequence)` index turning the
+`nextSequence` read-then-write race into a loud failure instead of
+silent history corruption (consensus/map branches allocate via
+`baseSequence + index`, verified safe); bounded-memory sweeps on both
+in-memory rate-limit maps (auth + webhook fire log); the missing
+reserved IPv4 ranges in `assertPublicUrl` (198.18/15 benchmark,
+TEST-NET-2/3, 6to4 anycast) and IPv6 `2001:db8::/32`; canvas edge ops
+that previously failed *silently* — a failed reroute looked identical
+to a successful one while a live run kept routing the old way — now
+revert the optimistic change and show a dismissible banner; and
+`recordChange`/`graphMutations` now thread `changedBy` (the mutating
+user's id) through every route and cross-graph tool, replacing the
+hardcoded `null`.
+
+**Deliberately left open:** stateless HMAC sessions still can't revoke
+a stolen cookie inside its 7-day lifetime (needs a session store — a
+design change, not a bug); the GitHub PAT still travels via
+`git -c http.extraheader` (visible in the process list during a push —
+a credential-helper approach would fix it at real complexity cost); and
+the documented DNS-rebinding TOCTOU in `assertPublicUrl` stands as
+before.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

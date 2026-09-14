@@ -141,14 +141,14 @@ export async function generateGraphRoutes(app: FastifyInstance) {
         description: node.description,
         tools: node.tools,
         position: { x: 250, y: 100 + i * 150 },
-      });
+      }, req.userId);
       nameToId.set(normalize(node.name), inserted.id);
     }
 
     for (const edge of plan.edges) {
       const sourceNodeId = nameToId.get(normalize(edge.sourceName))!;
       const targetNodeId = nameToId.get(normalize(edge.targetName))!;
-      const result = await insertRoutingEdge(graph.id, { sourceNodeId, targetNodeId, kind: edge.kind });
+      const result = await insertRoutingEdge(graph.id, { sourceNodeId, targetNodeId, kind: edge.kind }, req.userId);
       if (!result.ok) {
         // Only reachable if two generated nodes collide in a way the
         // validation above didn't catch (e.g. a future edge-compatibility

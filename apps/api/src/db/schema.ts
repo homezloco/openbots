@@ -1,6 +1,8 @@
+import { isNotNull, isNull } from "drizzle-orm";
 import {
   type AnyPgColumn,
   boolean,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -8,6 +10,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -63,7 +66,11 @@ export const agentNodes = pgTable("agent_nodes", {
   positionY: real("position_y").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  // loadLiveGraph SELECTs all nodes by graphId on every hop of every
+  // live run — the hottest lookup in the schema.
+  index("agent_nodes_graph_id_idx").on(table.graphId),
+]);
 
 export const routingEdges = pgTable("routing_edges", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -82,7 +89,9 @@ export const routingEdges = pgTable("routing_edges", {
   label: text("label"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("routing_edges_graph_id_idx").on(table.graphId),
+]);
 
 export const routingChanges = pgTable("routing_changes", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -95,7 +104,9 @@ export const routingChanges = pgTable("routing_changes", {
   graphVersion: integer("graph_version").notNull(),
   changedBy: text("changed_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("routing_changes_graph_id_idx").on(table.graphId),
+]);
 
 export const runs = pgTable("runs", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -134,7 +145,9 @@ export const runs = pgTable("runs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   completedAt: timestamp("completed_at", { withTimezone: true }),
-});
+}, (table) => [
+  index("runs_graph_id_idx").on(table.graphId),
+]);
 
 export const runEvents = pgTable("run_events", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -151,7 +164,18 @@ export const runEvents = pgTable("run_events", {
   error: text("error"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
-});
+}, (table) => [
+  index("run_events_run_id_idx").on(table.runId),
+  // nextSequence() is a read-then-write (SELECT max(sequence)+1, then
+  // insert), so two concurrent writers — e.g. an approve/cancel event
+  // racing a hop completion — could previously land on the same sequence
+  // and silently duplicate it. This constraint turns that race into a
+  // loud insert failure (surfaced through dispatchHop's error backstop)
+  // rather than silent history corruption. Consensus branches are safe:
+  // they allocate sequences via baseSequence + index, never racing each
+  // other within one job.
+  uniqueIndex("run_events_run_id_sequence_unique").on(table.runId, table.sequence),
+]);
 
 export const fanoutBatches = pgTable("fanout_batches", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -165,19 +189,38 @@ export const fanoutBatches = pgTable("fanout_batches", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const providerCredentials = pgTable("provider_credentials", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  graphId: uuid("graph_id")
-    .notNull()
-    .references(() => agentGraphs.id, { onDelete: "cascade" }),
-  /** Null = applies to any node in the graph using this provider; set = overrides for one node only. */
-  nodeId: uuid("node_id").references(() => agentNodes.id, { onDelete: "cascade" }),
-  provider: text("provider").notNull(),
-  label: text("label").notNull().default(""),
-  /** AES-256-GCM ciphertext, base64 — see auth/crypto.ts. Never returned by any API response. */
-  encryptedKey: text("encrypted_key").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const providerCredentials = pgTable(
+  "provider_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    graphId: uuid("graph_id")
+      .notNull()
+      .references(() => agentGraphs.id, { onDelete: "cascade" }),
+    /** Null = applies to any node in the graph using this provider; set = overrides for one node only. */
+    nodeId: uuid("node_id").references(() => agentNodes.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    label: text("label").notNull().default(""),
+    /** AES-256-GCM ciphertext, base64 — see auth/crypto.ts. Never returned by any API response. */
+    encryptedKey: text("encrypted_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // At most one node-specific credential per (graph, provider, node) —
+    // a plain unique() would also dedupe this, but is expressed as a
+    // partial index alongside the graph-wide one below for symmetry.
+    uniqueIndex("provider_credentials_node_scope_unique")
+      .on(table.graphId, table.provider, table.nodeId)
+      .where(isNotNull(table.nodeId)),
+    // At most one graph-wide (nodeId IS NULL) credential per (graph,
+    // provider) — a plain unique() constraint does NOT achieve this since
+    // Postgres treats every NULL as distinct, which is exactly how
+    // getCredentials() in orchestrator/credentials.ts could previously
+    // pick between two graph-wide rows nondeterministically.
+    uniqueIndex("provider_credentials_graph_scope_unique")
+      .on(table.graphId, table.provider)
+      .where(isNull(table.nodeId)),
+  ],
+);
 
 export const usageEvents = pgTable("usage_events", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -193,7 +236,10 @@ export const usageEvents = pgTable("usage_events", {
   cacheWriteTokens: integer("cache_write_tokens").notNull().default(0),
   estimatedCostUsd: real("estimated_cost_usd").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  // GET /runs/:id aggregates usage by runId on every run-detail fetch.
+  index("usage_events_run_id_idx").on(table.runId),
+]);
 
 export const agentTemplates = pgTable("agent_templates", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -219,7 +265,10 @@ export const agentCommits = pgTable("agent_commits", {
   commitSha: text("commit_sha").notNull(),
   pushedAt: timestamp("pushed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("agent_commits_graph_id_idx").on(table.graphId),
+  index("agent_commits_run_id_idx").on(table.runId),
+]);
 
 export const remoteCommandRuns = pgTable("remote_command_runs", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -301,7 +350,9 @@ export const scheduledTriggers = pgTable("scheduled_triggers", {
   lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("scheduled_triggers_graph_id_idx").on(table.graphId),
+]);
 
 /**
  * The first row in this schema reachable by an anonymous HTTP caller —
@@ -329,4 +380,6 @@ export const webhookTriggers = pgTable("webhook_triggers", {
   lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("webhook_triggers_graph_id_idx").on(table.graphId),
+]);

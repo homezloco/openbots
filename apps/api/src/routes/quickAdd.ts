@@ -104,7 +104,7 @@ export async function quickAddRoutes(app: FastifyInstance) {
       fileAccessRoot: body.fileAccessRoot,
       dispatchTargets: body.dispatchTargets,
       position: body.position ?? { x: 100 + Math.random() * 400, y: 100 + Math.random() * 300 },
-    });
+    }, req.userId);
 
     return reply.code(201).send(node);
   });

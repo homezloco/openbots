@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { generateText, stepCountIs, type ModelMessage, type Tool } from "ai";
-import { eq, desc, and, ne } from "drizzle-orm";
+import { eq, desc, and, ne, inArray } from "drizzle-orm";
 import {
   commitWorktreeChanges,
   ensureWorktree,
@@ -63,6 +63,8 @@ interface AgentCallResult {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** Whether this hop's generation loop actually invoked at least one tool — drives resolve.ts's `on_tool_call` explicit-edge condition. */
+  toolCalled: boolean;
 }
 
 /**
@@ -351,7 +353,47 @@ async function completeRun(runId: string, graphId: string, output: unknown, crea
  * exception is a consensus fan-out (see dispatchConsensus below), where
  * branches run concurrently within a single job by design.
  */
+/**
+ * Last-resort backstop for anything dispatchHopInner doesn't already
+ * handle itself — e.g. dispatchConsensus/dispatchMap resolving a deleted
+ * edge/node/aggregator and throwing before their own try/catch even
+ * starts, or a DB/Redis blip between "mark running" and "advance". Those
+ * previously escaped straight to the BullMQ job's "failed" handler
+ * (worker.ts), which only logs — the run row was already "running" and
+ * nothing ever moved it out of that state again, so it looked eternally
+ * in-progress to every client watching it. Guarded to pending/running
+ * only: a run that's already terminal, or paused awaiting approval, must
+ * not be resurrected into "error" by a stray exception racing against a
+ * legitimate concurrent transition.
+ */
+async function failRunOnUnexpectedError(runId: string, err: unknown): Promise<void> {
+  const error = err instanceof Error ? err.message : String(err);
+  const [failed] = await db
+    .update(runs)
+    .set({ status: "error", updatedAt: new Date() })
+    .where(and(eq(runs.id, runId), inArray(runs.status, ["pending", "running"])))
+    .returning({ id: runs.id, graphId: runs.graphId, currentNodeId: runs.currentNodeId, createdAt: runs.createdAt });
+  if (!failed) return;
+  publishRunEvent({
+    runId,
+    graphId: failed.graphId,
+    type: "hop_failed",
+    nodeId: failed.currentNodeId ?? undefined,
+    payload: { error },
+  });
+  recordRunFinished({ runId, graphId: failed.graphId, status: "error", createdAt: failed.createdAt });
+}
+
 export async function dispatchHop(runId: string): Promise<void> {
+  try {
+    await dispatchHopInner(runId);
+  } catch (err) {
+    await failRunOnUnexpectedError(runId, err);
+    throw err; // still surfaces in the worker's own "failed" log/metrics
+  }
+}
+
+async function dispatchHopInner(runId: string): Promise<void> {
   const run = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
   if (!run) throw new Error(`Run ${runId} not found`);
   if (isTerminalStatus(run.status)) {
@@ -552,7 +594,7 @@ export async function dispatchHop(runId: string): Promise<void> {
     // routing so the source's own output becomes the answer.
   }
 
-  const { edge, nextNodeId } = resolveNextHop(graphNow, nodeNow.id, output);
+  const { edge, nextNodeId } = resolveNextHop(graphNow, nodeNow.id, output, { toolCalled: result.toolCalled });
 
   await db.insert(runEvents).values({
     runId,
@@ -1638,6 +1680,7 @@ async function callAgent(
         // openai-compatible today), which is exactly today's behavior.
         cacheReadTokens: result?.usage.inputTokenDetails?.cacheReadTokens ?? 0,
         cacheWriteTokens: result?.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+        toolCalled: usedTools,
       };
     } catch (err) {
       lastError = err;

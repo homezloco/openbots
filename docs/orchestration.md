@@ -189,8 +189,18 @@ intended pattern is a node whose only job is to send.
 
 ## `explicit` vs `auto` edges
 
-- `explicit`: hard-wired. Highest-`priority` explicit edge out of a node
-  wins.
+- `explicit`: hard-wired. The engine follows the highest-`priority`
+  explicit edge whose `condition` is currently satisfied
+  (`isConditionSatisfied` in `resolve.ts`): `"default"` always holds;
+  `"on_tool_call"` holds when this hop's model call invoked at least one
+  tool; `"on_classifier_result"` holds when the hop's output starts with
+  the edge's `label` (required for that condition, case-insensitive
+  prefix match — a deterministic classifier contract instead of fuzzy
+  keyword scoring); `"manual"` never holds automatically — it exists as
+  a structural edge on the canvas, e.g. a sanctioned drop target for a
+  drag-reroute. If NO explicit edge's condition is satisfied, resolution
+  falls through to `auto` matching below rather than dead-ending the
+  run.
 - `auto`: resolved by matching the run's output against candidate target
   node **name + description** (mirrors Grok Bot's implicit delegation).
   The specialist then receives the **original user request**, not the
@@ -413,9 +423,18 @@ anywhere;
 `GIT_AUTHOR_NAME`/`_EMAIL`/`GIT_COMMITTER_NAME`/`_EMAIL` are set per
 `git commit` child-process call instead. Files the container creates end
 up root-owned on the host afterward (harmless in CI; may need `sudo` to
-clean up a stale worktree locally) — cleanup is deliberately manual in
-v1, since the failure mode of a background job deleting unreviewed agent
-work is worse than directories accumulating.
+clean up a stale worktree locally).
+
+**Worktree pruning.** The worker prunes clean worktrees older than
+`WORKTREE_RETENTION_HOURS` (default 168) on boot — one full checkout per
+(node, run) adds up fast on an active install. Pruning only removes the
+*directory*: the `openbots/*` branch and its commits live in the repo's
+object store, so nothing committed is ever lost — `git log
+openbots/<name>` still shows it, and `getCommitDiff`/`getRemoteUrl`/
+`pushBranch` all fall back to the repository root (via `repoCwdFor`)
+when the worktree directory is gone, so `/diff`, `/push`, and `/pr`
+still work after pruning. A worktree with uncommitted changes is never
+pruned — that's the one state deletion couldn't undo.
 
 **Not check-then-act.** `git worktree add` is called unconditionally,
 never guarded by an existence check first — with `WORKER_CONCURRENCY`

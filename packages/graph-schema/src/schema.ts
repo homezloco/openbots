@@ -320,8 +320,14 @@ export const AgentNode = z.object({
 export type AgentNode = z.infer<typeof AgentNode>;
 
 /**
- * "explicit" edges are hard-wired: the engine always takes them (subject to
- * `condition`/`priority` tie-breaking against sibling explicit edges).
+ * "explicit" edges are hard-wired: the engine takes the highest-priority
+ * one among its outgoing explicit edges whose `condition` is currently
+ * satisfied (see resolve.ts::resolveNextHop) — a node with only
+ * "default"-condition explicit edges keeps the original unconditional
+ * behavior, since "default" is always satisfied. If NONE of a node's
+ * explicit edges are satisfied (e.g. all are `on_tool_call` and no tool
+ * ran this hop), resolution falls through to that node's `auto` edges
+ * exactly as if it had no explicit edges at all, rather than dead-ending.
  * "auto" edges are resolved at dispatch time by matching the run's current
  * output against candidate target descriptions (Grok-style implicit
  * delegation). "consensus" edges only fire as part of their source node's
@@ -331,6 +337,24 @@ export type AgentNode = z.infer<typeof AgentNode>;
 export const RoutingEdgeKind = z.enum(["explicit", "auto", "consensus"]);
 export type RoutingEdgeKind = z.infer<typeof RoutingEdgeKind>;
 
+/**
+ * Only meaningful on `kind: "explicit"` edges — auto/consensus edges are
+ * resolved by their own separate mechanisms and never consult this field.
+ * See resolve.ts's `isConditionSatisfied` for the exact runtime check
+ * each value maps to:
+ *  - "default": always satisfied — the original unconditional behavior.
+ *  - "on_tool_call": satisfied only when this hop's model call actually
+ *    invoked at least one tool (see engine.ts::AgentCallResult.toolCalled).
+ *  - "on_classifier_result": satisfied only when the hop's output text
+ *    STARTS WITH this edge's (required) `label`, case-insensitively —
+ *    lets one node have several explicit edges disambiguated by a fixed
+ *    classification label, in addition to / instead of fuzzy `auto`
+ *    keyword matching.
+ *  - "manual": never satisfied automatically. Exists on the canvas as a
+ *    structural connection a human wires up — e.g. so a drag-reroute has
+ *    somewhere sanctioned to land — never something the engine follows
+ *    on its own.
+ */
 export const RoutingCondition = z.enum([
   "default",
   "on_tool_call",
@@ -397,6 +421,8 @@ export const RoutingChangeType = z.enum([
   "edge_added",
   "edge_removed",
   "edge_rerouted",
+  /** condition/label/priority edited without changing targetNodeId — see PATCH /graphs/:id/edges/:edgeId. */
+  "edge_updated",
 ]);
 export type RoutingChangeType = z.infer<typeof RoutingChangeType>;
 

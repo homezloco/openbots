@@ -40,7 +40,7 @@ export async function createLiveRerouteExample(ownerId: string): Promise<AgentGr
       "You are the intake router. Read the user's request and write one short sentence saying whether it sounds like a support issue or a billing issue. Do not solve it yourself — a specialist handles it next.",
     description: "Classifies the request, then the outgoing edge decides who runs next",
     position: { x: 280, y: 40 },
-  });
+  }, ownerId);
 
   const support = await insertAgentNode(graph.id, {
     name: "Support Specialist",
@@ -50,7 +50,7 @@ export async function createLiveRerouteExample(ownerId: string): Promise<AgentGr
     systemPrompt: "You are the Support specialist. Answer the user's request as a support agent. Be concise.",
     description: "Handles support and technical requests",
     position: { x: 80, y: 280 },
-  });
+  }, ownerId);
 
   await insertAgentNode(graph.id, {
     name: "Billing Specialist",
@@ -60,13 +60,13 @@ export async function createLiveRerouteExample(ownerId: string): Promise<AgentGr
     systemPrompt: "You are the Billing specialist. Answer the user's request as a billing agent. Be concise.",
     description: "Handles invoices, charges, and refunds",
     position: { x: 480, y: 280 },
-  });
+  }, ownerId);
 
   await insertRoutingEdge(graph.id, {
     sourceNodeId: router.id,
     targetNodeId: support.id,
     kind: "explicit",
-  });
+  }, ownerId);
 
   await db.update(agentGraphs).set({ entryNodeId: router.id, updatedAt: new Date() }).where(eq(agentGraphs.id, graph.id));
 
@@ -153,7 +153,7 @@ async function createTeamGraph(
     systemPrompt: opts.leadPrompt,
     description: `Routes ${opts.domain} work to Backend, Frontend, or Reviewer`,
     position: { x: 280, y: 40 },
-  });
+  }, ownerId);
 
   const backend = await insertAgentNode(graph.id, {
     name: "Backend Specialist",
@@ -163,7 +163,7 @@ async function createTeamGraph(
     systemPrompt: `You are the ${opts.domain} Backend specialist. Answer from that team's server/API side. Be concise.`,
     description: `${opts.domain} APIs, services, and data`,
     position: { x: 40, y: 280 },
-  });
+  }, ownerId);
   const frontend = await insertAgentNode(graph.id, {
     name: "Frontend Specialist",
     role: "worker",
@@ -172,7 +172,7 @@ async function createTeamGraph(
     systemPrompt: `You are the ${opts.domain} Frontend specialist. Answer from that team's UI/UX side. Be concise.`,
     description: `${opts.domain} UI and client experience`,
     position: { x: 280, y: 280 },
-  });
+  }, ownerId);
   const reviewer = await insertAgentNode(graph.id, {
     name: "Reviewer",
     role: "reviewer",
@@ -181,11 +181,11 @@ async function createTeamGraph(
     systemPrompt: `You are the ${opts.domain} Reviewer. Check the request for correctness and risk. Be concise.`,
     description: `${opts.domain} correctness and risk review`,
     position: { x: 520, y: 280 },
-  });
+  }, ownerId);
 
-  await insertRoutingEdge(graph.id, { sourceNodeId: lead.id, targetNodeId: backend.id, kind: "auto" });
-  await insertRoutingEdge(graph.id, { sourceNodeId: lead.id, targetNodeId: frontend.id, kind: "auto" });
-  await insertRoutingEdge(graph.id, { sourceNodeId: lead.id, targetNodeId: reviewer.id, kind: "auto" });
+  await insertRoutingEdge(graph.id, { sourceNodeId: lead.id, targetNodeId: backend.id, kind: "auto" }, ownerId);
+  await insertRoutingEdge(graph.id, { sourceNodeId: lead.id, targetNodeId: frontend.id, kind: "auto" }, ownerId);
+  await insertRoutingEdge(graph.id, { sourceNodeId: lead.id, targetNodeId: reviewer.id, kind: "auto" }, ownerId);
 
   await db.update(agentGraphs).set({ entryNodeId: lead.id, updatedAt: new Date() }).where(eq(agentGraphs.id, graph.id));
   return loadLiveGraph(graph.id);

@@ -54,6 +54,14 @@ function isRateLimited(triggerId: string): boolean {
   const recent = (fireLog.get(triggerId) ?? []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
   recent.push(now);
   fireLog.set(triggerId, recent);
+  // Bounded memory: deleted triggers' entries would otherwise persist
+  // forever. Same sweep as auth/routes.ts's rate limiter — only worth
+  // running once the map is actually large.
+  if (fireLog.size > 10_000) {
+    for (const [key, times] of fireLog) {
+      if (times[times.length - 1] < now - RATE_LIMIT_WINDOW_MS) fireLog.delete(key);
+    }
+  }
   return recent.length > RATE_LIMIT_MAX_PER_MINUTE;
 }
 

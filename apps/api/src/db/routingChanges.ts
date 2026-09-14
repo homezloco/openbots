@@ -13,6 +13,7 @@ export async function recordChange(
   changeType: RoutingChangeType,
   before: unknown,
   after: unknown,
+  changedBy?: string | null,
 ): Promise<number> {
   const [graph] = await db
     .update(agentGraphs)
@@ -26,7 +27,10 @@ export async function recordChange(
     before,
     after,
     graphVersion: graph.version,
-    changedBy: null, // self-hosted single-user default; wire to auth in Phase 3
+    // The mutating user's id where the caller has one (HTTP routes and
+    // cross-graph tools always do); null for system-seeded changes like
+    // example graphs — still nullable for any future non-user actor.
+    changedBy: changedBy ?? null,
   });
 
   return graph.version;

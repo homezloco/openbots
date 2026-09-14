@@ -61,7 +61,8 @@ export function parseGithubRepo(remoteUrl: string): { owner: string; repo: strin
 }
 
 export async function getRemoteUrl(worktreePath: string): Promise<string> {
-  return (await git(["remote", "get-url", "origin"], worktreePath)).trim();
+  const cwd = await repoCwdFor(worktreePath);
+  return (await git(["remote", "get-url", "origin"], cwd)).trim();
 }
 
 /**
@@ -76,25 +77,33 @@ function rootFromWorktreePath(worktreePath: string): string | null {
 }
 
 /**
- * Full diff for one commit, for the GitHub tab's "view diff" expander.
- *
- * Falls back to the repo ROOT when the worktree directory is gone — now a
- * normal, expected state rather than corruption, since `pruneWorktrees`
- * reclaims old worktree directories. A commit survives that entirely:
- * verified directly that `git worktree remove` deletes the working
- * directory and its admin files but leaves the branch and every object
- * intact, so `git show <sha>` from the root returns the same diff.
- * Without this fallback, pruning would have silently broken the diff
- * viewer for every historical commit.
+ * Resolves the directory any git command against a stored worktree path
+ * should actually run in. Falls back to the repo ROOT when the worktree
+ * directory itself is gone — now a normal, expected state rather than
+ * corruption, since `pruneWorktrees` reclaims old worktree directories on
+ * a schedule while every commit made in them stays on its `openbots/*`
+ * branch. Verified directly that `git worktree remove` deletes the
+ * working directory and its admin files but leaves the branch and every
+ * object intact, so `git show`/`git push`/`git remote` all behave
+ * identically run from the root instead. Shared by getCommitDiff,
+ * getRemoteUrl, and pushBranch — every caller that previously assumed the
+ * worktree directory still exists.
  */
-export async function getCommitDiff(worktreePath: string, sha: string): Promise<string> {
+async function repoCwdFor(worktreePath: string): Promise<string> {
   const worktreeExists = await stat(worktreePath)
     .then(() => true)
     .catch(() => false);
-  const cwd = worktreeExists ? worktreePath : rootFromWorktreePath(worktreePath);
-  if (!cwd) {
+  if (worktreeExists) return worktreePath;
+  const root = rootFromWorktreePath(worktreePath);
+  if (!root) {
     throw new Error(`Worktree ${worktreePath} is gone and its repo root could not be derived from the path.`);
   }
+  return root;
+}
+
+/** Full diff for one commit, for the GitHub tab's "view diff" expander. See repoCwdFor for the pruned-worktree fallback. */
+export async function getCommitDiff(worktreePath: string, sha: string): Promise<string> {
+  const cwd = await repoCwdFor(worktreePath);
   await ensureSafeDirectory(cwd);
   return git(["show", "--no-color", sha], cwd);
 }
@@ -317,8 +326,17 @@ export async function commitWorktreeChanges(worktree: Worktree, nodeName: string
   return sha.trim();
 }
 
+/**
+ * Pushes a worktree's branch. Resolves its cwd through repoCwdFor rather
+ * than assuming `worktree.path` still exists — `worktree.branch` is a
+ * real branch in the repo's object store regardless of whether its
+ * worktree directory was ever created this process or was already
+ * reclaimed by `pruneWorktrees`, so a push (unlike a write, which needs
+ * the checked-out files) works identically from the repo root.
+ */
 export async function pushBranch(worktree: Worktree, credentials?: PushCredentials): Promise<{ remote: string; message: string }> {
-  const remote = (await git(["remote", "get-url", "origin"], worktree.path)).trim();
+  const cwd = await repoCwdFor(worktree.path);
+  const remote = (await git(["remote", "get-url", "origin"], cwd)).trim();
   if (!remote) throw new Error("No origin remote configured");
 
   if (remote.startsWith("https://")) {
@@ -327,7 +345,7 @@ export async function pushBranch(worktree: Worktree, credentials?: PushCredentia
     }
     const auth = Buffer.from(`x-access-token:${credentials.token}`).toString("base64");
     const header = `AUTHORIZATION: basic ${auth}`;
-    await git(["-c", `http.extraheader=${header}`, "push", "origin", worktree.branch], worktree.path);
+    await git(["-c", `http.extraheader=${header}`, "push", "origin", worktree.branch], cwd);
   } else if (remote.startsWith("ssh://") || remote.startsWith("git@")) {
     if (!isGithubSshRemote(remote)) {
       throw new Error(
@@ -338,7 +356,7 @@ export async function pushBranch(worktree: Worktree, credentials?: PushCredentia
       throw new Error("SSH origin requires a GitHub SSH private key — save one via POST /me/credentials (provider: github_ssh_key)");
     }
     await withEphemeralSshKey(credentials.sshKey, GITHUB_KNOWN_HOSTS, ({ keyPath, knownHostsPath }) =>
-      git(["push", "origin", worktree.branch], worktree.path, {
+      git(["push", "origin", worktree.branch], cwd, {
         ...process.env,
         GIT_SSH_COMMAND: sshCommandFor(keyPath, knownHostsPath),
       }),
@@ -352,7 +370,7 @@ export async function pushBranch(worktree: Worktree, credentials?: PushCredentia
     // the container runs as (root) — most commonly the host UID, via a bind
     // mount.
     await ensureSafeDirectory(remote);
-    await git(["push", "origin", worktree.branch], worktree.path);
+    await git(["push", "origin", worktree.branch], cwd);
   }
 
   return { remote, message: `Pushed ${worktree.branch} to ${remote}` };

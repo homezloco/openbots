@@ -169,7 +169,7 @@ export function createDeleteTargetNodeTool(ownerId: string | null, dispatchTarge
       const node = findNodeByName(graph.nodes, nodeName);
       if (!node) return { error: `No node named "${nodeName}" in "${resolved.target.name}".` };
 
-      const result = await deleteAgentNode(resolved.target.id, node.id);
+      const result = await deleteAgentNode(resolved.target.id, node.id, ownerId);
       if (!result.ok) return { error: result.error };
       return { deleted: nodeName, graph: resolved.target.name };
     },
@@ -195,11 +195,15 @@ export function createCreateTargetEdgeTool(ownerId: string | null, dispatchTarge
       if (!source) return { error: `No node named "${sourceNodeName}" in "${resolved.target.name}".` };
       if (!target) return { error: `No node named "${targetNodeName}" in "${resolved.target.name}".` };
 
-      const result = await insertRoutingEdge(resolved.target.id, {
-        sourceNodeId: source.id,
-        targetNodeId: target.id,
-        kind: kind ?? "explicit",
-      });
+      const result = await insertRoutingEdge(
+        resolved.target.id,
+        {
+          sourceNodeId: source.id,
+          targetNodeId: target.id,
+          kind: kind ?? "explicit",
+        },
+        ownerId,
+      );
       if (!result.ok) return { error: result.error };
       return { created: `${sourceNodeName} -> ${targetNodeName}`, kind: result.value.kind, graph: resolved.target.name };
     },
@@ -227,7 +231,7 @@ export function createDeleteTargetEdgeTool(ownerId: string | null, dispatchTarge
       const edge = graph.edges.find((e) => e.sourceNodeId === source.id && e.targetNodeId === target.id);
       if (!edge) return { error: `No edge from "${sourceNodeName}" to "${targetNodeName}" in "${resolved.target.name}".` };
 
-      const result = await deleteRoutingEdge(resolved.target.id, edge.id);
+      const result = await deleteRoutingEdge(resolved.target.id, edge.id, ownerId);
       if (!result.ok) return { error: result.error };
       return { deleted: `${sourceNodeName} -> ${targetNodeName}`, graph: resolved.target.name };
     },

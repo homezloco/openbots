@@ -167,6 +167,10 @@ export function HierarchyCanvas({
   const [existingAgents, setExistingAgents] = useState<(AgentNode & { graphName: string })[] | null>(null);
   const [existingAgentId, setExistingAgentId] = useState("");
   const [existingBusy, setExistingBusy] = useState(false);
+  // Surfaced over the canvas when a graph-mutating API call fails —
+  // without it a failed reroute looked identical to a successful one
+  // while a live run kept routing the old way.
+  const [canvasError, setCanvasError] = useState<string | null>(null);
   const [form, setForm] = useState({
     name: "",
     role: "worker" as AgentNode["role"],
@@ -455,10 +459,23 @@ export function HierarchyCanvas({
       // overwrites .data with { pulses } on every render, so a data-based
       // check here would never see isConsensusGather/isGatewayEdge.
       if (oldEdge.id.startsWith("consensus-gather-") || oldEdge.id.startsWith(GATEWAY_EDGE_PREFIX)) return;
+      setCanvasError(null);
       setEdges((eds) => reconnectEdge(oldEdge, newConnection, eds));
       if (newConnection.target) {
         rerouteEdge(graph.id, oldEdge.id, newConnection.target).catch((err) => {
           console.error("Failed to persist reroute:", err);
+          // A silent console.error here is the worst failure mode for the
+          // flagship feature: the edge LOOKS rerouted while the next hop
+          // of any live run still resolves the old target. Restore the
+          // edge's original endpoints and surface the failure.
+          setEdges((eds) =>
+            eds.map((e) =>
+              e.id === oldEdge.id
+                ? { ...e, source: oldEdge.source, target: oldEdge.target, sourceHandle: oldEdge.sourceHandle, targetHandle: oldEdge.targetHandle }
+                : e,
+            ),
+          );
+          setCanvasError(err instanceof Error ? err.message : "Failed to save the reroute — the edge was restored.");
         });
       }
     },
@@ -469,6 +486,7 @@ export function HierarchyCanvas({
     (connection: Connection) => {
       if (!connection.source || !connection.target) return;
       if (connection.source.startsWith(GATEWAY_NODE_PREFIX) || connection.target.startsWith(GATEWAY_NODE_PREFIX)) return;
+      setCanvasError(null);
       createEdge(graph.id, { sourceNodeId: connection.source, targetNodeId: connection.target, kind: newEdgeKind })
         .then((edge) => {
           setGraph((g) => ({ ...g, edges: [...g.edges, edge] }));
@@ -485,7 +503,10 @@ export function HierarchyCanvas({
             ),
           );
         })
-        .catch((err) => console.error("Failed to create edge:", err));
+        .catch((err) => {
+          console.error("Failed to create edge:", err);
+          setCanvasError(err instanceof Error ? err.message : "Failed to create the edge — it was not saved.");
+        });
     },
     [graph.id, newEdgeKind, setEdges],
   );
@@ -729,6 +750,7 @@ export function HierarchyCanvas({
       } catch (err) {
         console.error("Failed to delete node:", err);
         setNodes((nds) => (nds.some((x) => x.id === n.id) ? nds : [...nds, n]));
+        setCanvasError(err instanceof Error ? err.message : "Failed to delete the node — it was restored.");
       }
     }
   }
@@ -749,6 +771,7 @@ export function HierarchyCanvas({
         }
         console.error("Failed to delete edge:", err);
         setEdges((eds) => (eds.some((x) => x.id === e.id) ? eds : [...eds, e]));
+        setCanvasError(err instanceof Error ? err.message : "Failed to delete the edge — it was restored.");
       }
     }
   }
@@ -1207,6 +1230,28 @@ export function HierarchyCanvas({
           <Background />
           <Controls />
         </ReactFlow>
+        {canvasError && (
+          <div
+            role="alert"
+            style={{
+              position: "absolute",
+              top: 12,
+              left: "50%",
+              transform: "translateX(-50%)",
+              background: "var(--danger)",
+              color: "#fff",
+              padding: "6px 14px",
+              borderRadius: 6,
+              fontSize: 13,
+              zIndex: 10,
+              cursor: "pointer",
+            }}
+            onClick={() => setCanvasError(null)}
+            title="Dismiss"
+          >
+            {canvasError}
+          </div>
+        )}
         {openAgentNode && (
           <AgentConversationPanel
             graphId={graph.id}

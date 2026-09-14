@@ -1,5 +1,7 @@
 # OpenBots
 
+[![e2e](https://github.com/homezloco/openbots/actions/workflows/e2e.yml/badge.svg)](https://github.com/homezloco/openbots/actions/workflows/e2e.yml)
+
 Watch your agents think on a live canvas, steer them mid-run by dragging
 an edge, and trust them with real write access.
 

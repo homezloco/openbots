@@ -40,10 +40,15 @@ function makeRateLimiter(maxPerWindow: number, windowMs: number) {
   };
 }
 
-const signupLimited = makeRateLimiter(5, 60_000);
+// Limits are env-overridable because a legitimate single source can blow
+// through the defaults: the e2e suite signs up a fresh throwaway user per
+// IDOR/security case, all from one IP inside a few seconds — which was a
+// real CI failure (a 429'd signup → no session cookie → a 60-test cascade
+// of 401s). Production posture stays strict; only the limit moves.
+const signupLimited = makeRateLimiter(Number(process.env.SIGNUP_RATE_LIMIT_PER_MINUTE ?? 5), 60_000);
 // Looser than signup since a legit user typos a few passwords; still
 // bounds online guessing to ~10/min per IP on top of scrypt's own cost.
-const loginLimited = makeRateLimiter(10, 60_000);
+const loginLimited = makeRateLimiter(Number(process.env.LOGIN_RATE_LIMIT_PER_MINUTE ?? 10), 60_000);
 
 function toPublicUser(user: { id: string; email: string; createdAt: Date }) {
   return { id: user.id, email: user.email, createdAt: user.createdAt.toISOString() };

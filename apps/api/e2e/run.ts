@@ -103,6 +103,13 @@ const results: TestResult[] = [];
 
 async function test(name: string, fn: () => Promise<void>) {
   const start = Date.now();
+  // Tests switch users mid-flight (clear the cookie, sign up a second
+  // user) to check auth/ownership boundaries. A throw before their manual
+  // restore would leave sessionCookie empty and turn one real failure
+  // into a cascade of 401s across every later test — seen in CI when a
+  // rate-limited signup produced exactly that. The signup test itself is
+  // safe: it starts with an empty cookie, so there's nothing to restore.
+  const cookieAtStart = sessionCookie;
   try {
     await fn();
     const durationMs = Date.now() - start;
@@ -113,6 +120,8 @@ async function test(name: string, fn: () => Promise<void>) {
     const message = err instanceof Error ? err.message : String(err);
     results.push({ name, passed: false, error: message, durationMs });
     console.log(`❌ ${name} (${durationMs}ms): ${message}`);
+  } finally {
+    if (cookieAtStart) sessionCookie = cookieAtStart;
   }
 }
 
@@ -124,6 +133,10 @@ async function test(name: string, fn: () => Promise<void>) {
  * graph rather than growing the prompt indefinitely to chase reliability.
  */
 async function testWithRetries(name: string, fn: () => Promise<void>, attempts = 3) {
+  // Same mid-test user-switching hazard as test() above — restored after
+  // every attempt, not just at the end, so a failed attempt can't carry
+  // an empty cookie into the retry.
+  const cookieAtStart = sessionCookie;
   for (let i = 1; i <= attempts; i++) {
     try {
       await fn();
@@ -138,6 +151,8 @@ async function testWithRetries(name: string, fn: () => Promise<void>, attempts =
         return;
       }
       console.log(`   (attempt ${i}/${attempts} lost the timing race, retrying: ${err instanceof Error ? err.message : err})`);
+    } finally {
+      if (cookieAtStart) sessionCookie = cookieAtStart;
     }
   }
 }

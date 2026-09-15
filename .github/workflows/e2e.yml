@@ -47,6 +47,11 @@ jobs:
           ALLOWED_NOTIFICATION_WEBHOOKS=http://mcp-echo:3930,http://127.0.0.1:3930
           SSH_KNOWN_HOSTS=203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
           COOKIE_SECURE=false
+          # The suite signs up a throwaway user per IDOR/security case —
+          # all from one IP in seconds, far past the 5/min production
+          # default. Raise the cap for the e2e environment only.
+          SIGNUP_RATE_LIMIT_PER_MINUTE=1000
+          LOGIN_RATE_LIMIT_PER_MINUTE=1000
           # Low on purpose: makes dispatch_to_graph's timeout-fallback e2e
           # case deterministic. Comfortably above a trivial single-hop
           # dispatch's real latency, comfortably below the mcp-echo delay

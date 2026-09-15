@@ -43,7 +43,13 @@ export async function generateStructuredWithFallback<S extends z.ZodTypeAny>(
     try {
       const credentials = getCredentialsFromEnv(candidate.provider);
       const model = getModel(candidate.provider, candidate.model, credentials);
-      const result = await generateObject({ model, schema, system, prompt });
+      // OpenAI-compatible json_object mode (which generateObject uses for
+      // providers like Groq) hard-rejects the call unless the word "json"
+      // literally appears in messages — a provider-side validation, not
+      // ours. Appending it here covers every caller; providers that don't
+      // require it are unaffected by one extra accurate instruction.
+      const systemText = /\bjson\b/i.test(system) ? system : `${system}\n\nRespond with a single JSON object matching the required schema.`;
+      const result = await generateObject({ model, schema, system: systemText, prompt });
       return { object: result.object, provider: candidate.provider, model: candidate.model };
     } catch (err) {
       lastError = err;

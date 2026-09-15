@@ -68,11 +68,18 @@ const EXTENSION_BY_MIME: Record<string, string> = {
   "application/octet-stream": "webm",
 };
 
-const speakBody = z.object({
-  // Groq's playai-tts rejects inputs beyond ~10k chars; 4000 keeps one
-  // spoken reply inside a single request on every supported provider.
-  text: z.string().min(1).max(4000),
-});
+const speakBody = z.object({ text: z.string().min(1) });
+
+// Orpheus's spoken replies don't need the full essay — cap ~3900 chars at
+// the last sentence boundary so a long reply gets a graceful spoken
+// summary instead of a 400.
+const SPEAK_CHAR_CAP = 3900;
+function truncateForSpeech(text: string): string {
+  if (text.length <= SPEAK_CHAR_CAP) return text;
+  const slice = text.slice(0, SPEAK_CHAR_CAP);
+  const boundary = Math.max(slice.lastIndexOf(". "), slice.lastIndexOf(".\n"), slice.lastIndexOf("! "), slice.lastIndexOf("? "));
+  return boundary > SPEAK_CHAR_CAP / 2 ? slice.slice(0, boundary + 1) : slice;
+}
 
 async function resolveVoiceConfig(userId: string | null): Promise<{
   provider: VoiceProvider;
@@ -167,7 +174,7 @@ export async function voiceRoutes(app: FastifyInstance) {
       body: JSON.stringify({
         model: voice.ttsModel,
         voice: voice.ttsVoice,
-        input: body.text,
+        input: truncateForSpeech(body.text),
         response_format: voice.responseFormat,
       }),
     });

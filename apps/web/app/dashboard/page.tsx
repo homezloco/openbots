@@ -254,6 +254,7 @@ function BotChat({ graph }: { graph: GraphSummary }) {
           <VoiceReplyToggle
             speakKey={latestCompleted?.id ?? null}
             text={latestCompleted ? stripRoutingSentinel(latestCompleted.output as string) : null}
+            onError={setVoiceError}
           />
           <a href={`/hierarchy?graphId=${graph.id}`}>View in Hierarchy</a>
           <button onClick={scrollToBottom} style={{ background: "transparent", color: "var(--text)", border: "1px solid var(--border)", padding: "4px 8px" }} title="Scroll to bottom">

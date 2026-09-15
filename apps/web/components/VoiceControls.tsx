@@ -147,21 +147,32 @@ export function MicButton({
 }
 
 /**
- * When enabled, speaks `text` once per `speakKey` change — callers pass the
- * latest completed run's id + output, so identical text in two different
- * runs still speaks twice while re-renders of the same run don't.
+ * Speaks `text` once per `speakKey` change — callers pass the latest
+ * completed run's id + output, so identical text in two different runs
+ * still speaks twice while re-renders of the same run don't. On by
+ * default (voice is the point of the Jarvis surface); the button mutes.
  */
-export function VoiceReplyToggle({ speakKey, text }: { speakKey: string | null; text: string | null }) {
-  const [enabled, setEnabled] = useState(false);
+export function VoiceReplyToggle({
+  speakKey,
+  text,
+  onError,
+}: {
+  speakKey: string | null;
+  text: string | null;
+  onError?: (message: string) => void;
+}) {
+  // null until the localStorage read — keeps a muted user's stored "0"
+  // from racing a speak in the first commit.
+  const [enabled, setEnabled] = useState<boolean | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastSpokenRef = useRef<string | null>(null);
 
   useEffect(() => {
-    setEnabled(localStorage.getItem("openbots.voiceReplies") === "1");
+    setEnabled(localStorage.getItem("openbots.voiceReplies") !== "0");
   }, []);
 
   useEffect(() => {
-    if (!enabled || !speakKey || !text || lastSpokenRef.current === speakKey) return;
+    if (enabled !== true || !speakKey || !text || lastSpokenRef.current === speakKey) return;
     lastSpokenRef.current = speakKey;
     let cancelled = false;
     speakText(text)
@@ -170,13 +181,19 @@ export function VoiceReplyToggle({ speakKey, text }: { speakKey: string | null; 
         audioRef.current?.pause();
         const audio = new Audio(URL.createObjectURL(blob));
         audioRef.current = audio;
-        audio.play().catch(() => {});
+        audio
+          .play()
+          .catch(() =>
+            onError?.(
+              "The browser blocked audio playback — interact with the page once (any click) and it will speak on the next reply.",
+            ),
+          );
       })
-      .catch(() => {});
+      .catch((err) => onError?.(err instanceof Error ? err.message : "Speech synthesis failed"));
     return () => {
       cancelled = true;
     };
-  }, [enabled, speakKey, text]);
+  }, [enabled, speakKey, text, onError]);
 
   const toggle = () => {
     const next = !enabled;

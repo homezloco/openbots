@@ -1,9 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { AgentGraph } from "@openbots/graph-schema";
-import { fetchGraph, updateGraph } from "../lib/api";
+import type { AgentGraph, ProviderId } from "@openbots/graph-schema";
+import {
+  createCredential,
+  deleteCredential,
+  fetchGraph,
+  listCredentials,
+  updateGraph,
+  type ProviderCredentialSummary,
+} from "../lib/api";
 import { FallbackChainEditor } from "./FallbackChainEditor";
+
+const BYOK_PROVIDERS: ProviderId[] = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"];
 
 /**
  * Slide-over for a graph's own settings — name, description, and its
@@ -21,6 +30,15 @@ export function GraphSettingsPanel({ graphId, onClose }: { graphId: string; onCl
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  // BYOK: keys stored encrypted server-side (provider_credentials), win
+  // over env vars for every node in this graph — or one node when scoped.
+  const [credentials, setCredentials] = useState<ProviderCredentialSummary[]>([]);
+  const [credProvider, setCredProvider] = useState<ProviderId>("anthropic");
+  const [credNodeId, setCredNodeId] = useState("");
+  const [credLabel, setCredLabel] = useState("");
+  const [credKey, setCredKey] = useState("");
+  const [credBusy, setCredBusy] = useState(false);
+
   useEffect(() => {
     fetchGraph(graphId)
       .then((g) => {
@@ -30,8 +48,48 @@ export function GraphSettingsPanel({ graphId, onClose }: { graphId: string; onCl
         setFallbackChain(g.fallbackChain);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load graph"));
+    listCredentials(graphId)
+      .then(setCredentials)
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graphId]);
+
+  const nodeNameById = new Map((graph?.nodes ?? []).map((n) => [n.id, n.name]));
+
+  async function addCredential() {
+    if (!credKey.trim()) return;
+    setCredBusy(true);
+    setError(null);
+    try {
+      const created = await createCredential(graphId, {
+        provider: credProvider,
+        apiKey: credKey.trim(),
+        ...(credLabel.trim() ? { label: credLabel.trim() } : {}),
+        ...(credNodeId ? { nodeId: credNodeId } : {}),
+      });
+      setCredentials((c) => [...c, created]);
+      setCredKey("");
+      setCredLabel("");
+      setCredNodeId("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save credential");
+    } finally {
+      setCredBusy(false);
+    }
+  }
+
+  async function removeCredential(id: string) {
+    setCredBusy(true);
+    setError(null);
+    try {
+      await deleteCredential(graphId, id);
+      setCredentials((c) => c.filter((x) => x.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete credential");
+    } finally {
+      setCredBusy(false);
+    }
+  }
 
   async function save() {
     if (!name.trim()) return;
@@ -97,6 +155,70 @@ export function GraphSettingsPanel({ graphId, onClose }: { graphId: string; onCl
               </span>
               <FallbackChainEditor value={fallbackChain} onChange={setFallbackChain} />
             </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                Model credentials{" "}
+                <span style={{ color: "var(--text-faint)" }}>
+                  — bring your own key; overrides the server&apos;s env key for this graph (or one node). Stored
+                  encrypted, never shown again.
+                </span>
+              </span>
+              {credentials.map((c) => (
+                <div
+                  key={c.id}
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 13 }}
+                >
+                  <span>
+                    <strong>{c.provider}</strong>
+                    {c.nodeId ? ` → ${nodeNameById.get(c.nodeId) ?? "deleted node"}` : " → whole graph"}
+                    {c.label ? ` (${c.label})` : ""}
+                  </span>
+                  <button
+                    onClick={() => removeCredential(c.id)}
+                    disabled={credBusy}
+                    style={{ background: "transparent", color: "var(--danger)", border: "1px solid var(--border)" }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              {credentials.length === 0 && (
+                <span style={{ fontSize: 13, color: "var(--text-faint)" }}>No keys stored — env key is used.</span>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <select value={credProvider} onChange={(e) => setCredProvider(e.target.value as ProviderId)} style={{ flex: 1 }}>
+                  {BYOK_PROVIDERS.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+                <select value={credNodeId} onChange={(e) => setCredNodeId(e.target.value)} style={{ flex: 1 }}>
+                  <option value="">whole graph</option>
+                  {(graph?.nodes ?? []).map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {n.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <input
+                placeholder="Label (optional)"
+                value={credLabel}
+                onChange={(e) => setCredLabel(e.target.value)}
+              />
+              <input
+                type="password"
+                placeholder="API key"
+                value={credKey}
+                onChange={(e) => setCredKey(e.target.value)}
+              />
+              <button onClick={addCredential} disabled={credBusy || !credKey.trim()} style={{ alignSelf: "flex-start" }}>
+                {credBusy ? "Saving…" : "Add key"}
+              </button>
+            </div>
+
             <button onClick={save} disabled={busy || !name.trim()} style={{ alignSelf: "flex-start" }}>
               {busy ? "Saving…" : "Save"}
             </button>

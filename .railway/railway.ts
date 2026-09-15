@@ -50,7 +50,10 @@ export default defineRailway(() => {
       // Groq free tier — the only env-configured provider, so generateGraph/
       // quick-add work for every visitor while paid spend is impossible.
       OPENAI_COMPATIBLE_BASE_URL: "https://api.groq.com/openai/v1",
-      OPENAI_COMPATIBLE_MODEL: "llama-3.3-70b-versatile",
+      OPENAI_COMPATIBLE_MODEL: "qwen/qwen3.8-27b",
+      // Groq free tier enforces ~1000 output-tokens/minute and rejects
+      // requests whose expected output exceeds it — cap under the limit.
+      MAX_OUTPUT_TOKENS: "800",
       // Secrets — real values set via `railway variable set`, never in source.
       SESSION_SECRET: preserve(),
       CREDENTIALS_ENCRYPTION_KEY: preserve(),

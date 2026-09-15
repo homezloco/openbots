@@ -1567,6 +1567,14 @@ async function callAgent(
           // retry attempt so a retried call gets only the time actually
           // remaining, never a fresh full budget.
           abortSignal: AbortSignal.timeout(Math.max(1_000, hopDeadlineEpochMs - ABORT_MARGIN_MS - Date.now())),
+          // Some providers (Groq's free tier) enforce a per-minute OUTPUT
+          // token ceiling and preflight-reject any request whose expected
+          // output exceeds it — with no maxOutputTokens set, the SDK's
+          // default request can be rejected before generating anything.
+          // Unset = provider default, exactly today's behavior.
+          ...(process.env.MAX_OUTPUT_TOKENS
+            ? { maxOutputTokens: Number(process.env.MAX_OUTPUT_TOKENS) }
+            : {}),
           // 20, not 8: a write-capable investigative specialist doing real
           // work (read CLAUDE.md, read a schema file, read the actual
           // routes file, cross-reference a couple of helpers, THEN write a

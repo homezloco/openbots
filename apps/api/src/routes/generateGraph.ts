@@ -94,6 +94,11 @@ export async function generateGraphRoutes(app: FastifyInstance) {
     const expectedNodes = Math.min(namedAgents.size, 8);
     const maxAttempts = expectedNodes > 1 ? 3 : 1;
 
+    req.log.info(
+      { expectedNodes, namedAgents: [...namedAgents], maxAttempts },
+      "generateGraph: starting generation",
+    );
+
     try {
       let best: { object: z.infer<typeof generatedGraphSchema>; provider: ProviderId; model: string } | null = null;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -112,15 +117,26 @@ export async function generateGraphRoutes(app: FastifyInstance) {
             "Only include tool names that are clearly implied by the agent's job — most agents need no tools at all.",
           body.description,
         );
+        req.log.info(
+          {
+            attempt: attempt + 1,
+            provider: result.provider,
+            model: result.model,
+            nodeCount: result.object.nodes.length,
+            nodeNames: result.object.nodes.map((n) => n.name),
+            edgeCount: result.object.edges.length,
+          },
+          "generateGraph: attempt produced a plan",
+        );
         if (!best || result.object.nodes.length > best.object.nodes.length) best = result;
         if (result.object.nodes.length >= expectedNodes) break;
       }
       plan = best!.object;
       picked = { provider: best!.provider, model: best!.model };
       if (expectedNodes > 1 && plan.nodes.length < expectedNodes) {
-        console.warn(
-          `[generateGraph] plan has ${plan.nodes.length} nodes but description named ${namedAgents.size} agents — ` +
-            `returning best of ${maxAttempts} attempts`,
+        req.log.warn(
+          { nodeCount: plan.nodes.length, expectedNodes, attempts: maxAttempts },
+          "generateGraph: plan under-produced named agents — returning best attempt",
         );
       }
     } catch (err) {

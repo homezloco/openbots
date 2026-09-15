@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createAgencyExample, createGraph, createLiveRerouteExample, deleteGraph, listGraphs, quickAddAgent, updateGraph, type GraphSummary } from "../../lib/api";
+import { createAgencyExample, createLiveRerouteExample, deleteGraph, generateGraph, listGraphs, type GraphSummary } from "../../lib/api";
 import { extractLatestUserMessage, useBotChat } from "../../lib/useBotChat";
 import { stripRoutingSentinel } from "../../lib/textDisplay";
 import { useAuth } from "../../components/AuthProvider";
@@ -72,9 +72,12 @@ export default function DashboardPage() {
     setCreating(true);
     setError(null);
     try {
-      const graph = await createGraph("New bot");
-      const node = await quickAddAgent(graph.id, { description });
-      await updateGraph(graph.id, { name: node.name, entryNodeId: node.id });
+      // "Describe a new one" should build a whole team, not one agent —
+      // it calls the full-graph generator, not quick-add (which is for
+      // adding a single agent inside an existing graph). This whole
+      // handler previously created a graph + ONE quick-add node, so any
+      // multi-department description collapsed to a lone coordinator.
+      const graph = await generateGraph(description);
       setDescription("");
       await refreshGraphs();
       setSelectedId(graph.id);

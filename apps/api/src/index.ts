@@ -20,6 +20,7 @@ import { routingChangeRoutes } from "./routes/routingChanges.js";
 import { wsRoutes } from "./ws/hub.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { configRoutes } from "./routes/config.js";
+import { voiceRoutes } from "./routes/voice.js";
 import { applyMigrations } from "./db/migrate.js";
 import { initOtel } from "./observability/otel.js";
 
@@ -80,6 +81,7 @@ await app.register(routingChangeRoutes);
 await app.register(wsRoutes);
 await app.register(mcpRoutes);
 await app.register(configRoutes);
+await app.register(voiceRoutes);
 
 app.get("/health", async () => ({ status: "ok" }));
 

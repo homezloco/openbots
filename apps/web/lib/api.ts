@@ -507,3 +507,35 @@ export interface RunEventMessage {
 export function runEventsSocketUrl(graphId: string): string {
   return `${API_URL.replace(/^http/, "ws")}/ws/graphs/${graphId}/runs`;
 }
+
+// --- Voice ---
+
+// These bypass request(): transcribe POSTs a raw audio blob (not JSON),
+// and speak returns binary audio rather than parsed JSON.
+export async function transcribeAudio(blob: Blob): Promise<string> {
+  const res = await fetch(`${API_URL}/voice/transcribe`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": blob.type || "application/octet-stream" },
+    body: blob,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `Transcription failed with ${res.status}`);
+  }
+  return ((await res.json()) as { text: string }).text;
+}
+
+export async function speakText(text: string): Promise<Blob> {
+  const res = await fetch(`${API_URL}/voice/speak`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `Speech synthesis failed with ${res.status}`);
+  }
+  return res.blob();
+}

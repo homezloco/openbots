@@ -6,6 +6,7 @@ import { extractLatestUserMessage, useBotChat } from "../../lib/useBotChat";
 import { stripRoutingSentinel } from "../../lib/textDisplay";
 import { useAuth } from "../../components/AuthProvider";
 import { HierarchyChat } from "../../components/HierarchyChat";
+import { MicButton, VoiceReplyToggle } from "../../components/VoiceControls";
 
 /**
  * The bot roster (Grok Bot's sidebar-of-bots pattern): every graph you own,
@@ -234,8 +235,11 @@ export default function DashboardPage() {
 
 function BotChat({ graph }: { graph: GraphSummary }) {
   const { runs, input, setInput, sending, error, send, pending } = useBotChat(graph);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollToBottom = () => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+
+  const latestCompleted = [...runs].reverse().find((r) => r.status === "completed" && typeof r.output === "string");
 
   useEffect(() => {
     scrollToBottom();
@@ -247,6 +251,10 @@ function BotChat({ graph }: { graph: GraphSummary }) {
       <div style={{ padding: "8px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between" }}>
         <strong>{graph.name}</strong>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <VoiceReplyToggle
+            speakKey={latestCompleted?.id ?? null}
+            text={latestCompleted ? stripRoutingSentinel(latestCompleted.output as string) : null}
+          />
           <a href={`/hierarchy?graphId=${graph.id}`}>View in Hierarchy</a>
           <button onClick={scrollToBottom} style={{ background: "transparent", color: "var(--text)", border: "1px solid var(--border)", padding: "4px 8px" }} title="Scroll to bottom">
             ↓
@@ -279,6 +287,7 @@ function BotChat({ graph }: { graph: GraphSummary }) {
         )}
       </div>
       {error && <p style={{ color: "var(--danger)", padding: "0 16px" }}>{error}</p>}
+      {voiceError && <p style={{ color: "var(--danger)", padding: "0 16px" }}>{voiceError}</p>}
       <div style={{ display: "flex", gap: 8, padding: 16 }}>
         <input
           value={input}
@@ -286,6 +295,11 @@ function BotChat({ graph }: { graph: GraphSummary }) {
           onKeyDown={(e) => e.key === "Enter" && send()}
           placeholder="Say something…"
           style={{ flex: 1 }}
+        />
+        <MicButton
+          onTranscript={(text) => setInput(input ? `${input} ${text}` : text)}
+          onError={setVoiceError}
+          disabled={sending}
         />
         <button onClick={send} disabled={sending}>
           {sending ? "Sending…" : "Send"}

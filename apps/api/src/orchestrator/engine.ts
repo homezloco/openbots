@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { generateText, stepCountIs, type ModelMessage, type Tool } from "ai";
-import { eq, desc, and, ne, inArray } from "drizzle-orm";
+import { eq, desc, and, ne, inArray, lt } from "drizzle-orm";
 import {
   commitWorktreeChanges,
   ensureWorktree,
@@ -25,6 +25,7 @@ import {
   usageEvents,
 } from "../db/schema.js";
 import { aggregatorNodeIds, resolveNextHop, startsWithSentinel } from "./resolve.js";
+import { appendReviewGateContext, applyReviewGate } from "./reviewGate.js";
 import { DEFAULT_NODE_TIMEOUT_MS, withNodeTimeout } from "./circuitBreaker.js";
 import { withRetry } from "./retry.js";
 import { getCredentials } from "./credentials.js";
@@ -445,13 +446,29 @@ async function dispatchHopInner(runId: string): Promise<void> {
   const isAggregator = aggregatorNodeIds(graph).has(node.id);
   const autoRoutingTargets = isAggregator ? [] : getAutoRoutingTargets(graph, node.id);
 
+  // Reviewer gate (reviewGate.ts): decided BEFORE the model call so the
+  // reviewer can be taught the APPROVED/NEEDS_REVISION convention, and
+  // used after it so the run delivers the reviewed content, not the
+  // verdict. Null whenever this hop isn't reviewing the previous one.
+  const reviewedContent = isAggregator ? null : await reviewedContentFor(runId, node, run.input, sequence);
+
   let result: AgentCallResult;
   const hopTimeoutMs = hopTimeoutMsFor(node);
   const hopDeadlineEpochMs = startedAt.getTime() + hopTimeoutMs;
   try {
     result = await withNodeTimeout(
       node.id,
-      () => callAgent(node, run.input, runId, autoRoutingTargets, graph.ownerId, hopDeadlineEpochMs, graph.fallbackChain),
+      () =>
+        callAgent(
+          node,
+          run.input,
+          runId,
+          autoRoutingTargets,
+          graph.ownerId,
+          hopDeadlineEpochMs,
+          graph.fallbackChain,
+          reviewedContent !== null,
+        ),
       hopTimeoutMs,
     );
   } catch (err) {
@@ -616,8 +633,13 @@ async function dispatchHopInner(runId: string): Promise<void> {
     payload: { output },
   });
 
+  // The run_event above keeps the reviewer's raw verdict (that's what the
+  // trail should show); only what leaves this hop — the run's answer, or
+  // an explicit handoff to the next node — carries the reviewed content.
+  const delivered = reviewedContent !== null ? applyReviewGate(node.name, reviewedContent, output) : output;
+
   if (!nextNodeId) {
-    await completeRun(runId, graph.id, output, run.createdAt);
+    await completeRun(runId, graph.id, delivered, run.createdAt);
     return;
   }
 
@@ -627,14 +649,16 @@ async function dispatchHopInner(runId: string): Promise<void> {
     .where(and(eq(runEvents.runId, runId), eq(runEvents.nodeId, nextNodeId), eq(runEvents.status, "succeeded")))
     .limit(1);
   if (alreadyVisited) {
-    await completeRun(runId, graph.id, output, run.createdAt);
+    await completeRun(runId, graph.id, delivered, run.createdAt);
     return;
   }
 
   // Auto-edge handoff: the specialist does the user's request, not the
   // router's "I'm sending this to X" paragraph. Explicit pipelines still
-  // chain the previous hop's output (summarize → translate).
-  const nextInput = edge?.kind === "auto" ? run.input : output;
+  // chain the previous hop's output (summarize → translate) — through the
+  // reviewer gate when there is one, so a Writer → Reviewer → Publisher
+  // pipeline publishes the reviewed draft, not the review.
+  const nextInput = edge?.kind === "auto" ? run.input : delivered;
 
   await advanceRun(runId, graphNow, nextNodeId, nextInput);
 }
@@ -1357,6 +1381,35 @@ function isAbortError(err: unknown): boolean {
  * runs with (see AgentGraph.fallbackChain, the same "specific → shared"
  * resolution shape credentials.ts::getCredentials() already uses).
  */
+/**
+ * The previous hop's output iff this hop is a reviewer gate on it — i.e.
+ * a `reviewer`-role node whose input is exactly what the last succeeded
+ * hop produced (an explicit edge's handoff). Compared as JSON rather
+ * than by edge kind: both columns are jsonb and round-trip identically,
+ * and it stays correct in live mode even if the edge that did the
+ * handoff was deleted between hops. Returns null for the entry hop (no
+ * previous hop), for a reviewer reached via an auto edge (its input is
+ * the user's original request, so it's being asked directly), and for
+ * any non-reviewer role.
+ */
+async function reviewedContentFor(
+  runId: string,
+  node: AgentNode,
+  input: unknown,
+  sequence: number,
+): Promise<string | null> {
+  if (node.role !== "reviewer" || sequence === 0) return null;
+  const [prev] = await db
+    .select({ output: runEvents.output })
+    .from(runEvents)
+    .where(and(eq(runEvents.runId, runId), eq(runEvents.status, "succeeded"), lt(runEvents.sequence, sequence)))
+    .orderBy(desc(runEvents.sequence))
+    .limit(1);
+  if (!prev || prev.output == null) return null;
+  if (JSON.stringify(prev.output) !== JSON.stringify(input)) return null;
+  return typeof input === "string" ? input : JSON.stringify(input);
+}
+
 async function callAgent(
   node: AgentNode,
   input: unknown,
@@ -1369,6 +1422,10 @@ async function callAgent(
   // that could outlive the hop itself (see dispatchTool.ts).
   hopDeadlineEpochMs: number = Date.now() + DEFAULT_NODE_TIMEOUT_MS,
   graphFallbackChain: AgentNode["fallbackChain"] = [],
+  // True only when this hop is a reviewer gate on the previous hop's
+  // output (see reviewGate.ts) — decided by dispatchHop, never inferred
+  // here from the role alone.
+  isReviewGate = false,
 ): Promise<AgentCallResult> {
   const effectiveFallbackChain = node.fallbackChain.length > 0 ? node.fallbackChain : graphFallbackChain;
   const targets = [{ provider: node.provider, model: node.model }, ...effectiveFallbackChain];
@@ -1449,11 +1506,14 @@ async function callAgent(
           appendRemoteCommandContext(
             appendReachableGraphsContext(
               appendWriteContext(
-                appendAssignedTaskContext(
-                  appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
-                  isRouter,
-                  node.role,
-                  canWrite,
+                appendReviewGateContext(
+                  appendAssignedTaskContext(
+                    appendAutoRoutingContext(node.systemPrompt, autoRoutingTargets, Boolean(node.consensusGroup)),
+                    isRouter,
+                    node.role,
+                    canWrite,
+                  ),
+                  isReviewGate,
                 ),
                 canWrite,
               ),

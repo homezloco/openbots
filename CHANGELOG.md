@@ -8,6 +8,20 @@ contain breaking changes, which will always be called out explicitly.
 
 ### Fixed
 
+- **A reviewer hop now delivers the reviewed answer, not just its verdict.**
+  A `reviewer`-role node fed by an explicit edge is treated as a gate on
+  the previous hop: the run's output (and any explicit handoff onward)
+  is the reviewed content with the verdict attached — a one-line note
+  on approval, the reviewer's full findings otherwise. Previously a
+  Specialist → Quality Reviewer pipeline answered every chat turn with
+  "Approved – the response is clear…" and the actual response was only
+  visible in the run trail. Reviewers are taught `APPROVED` /
+  `NEEDS_REVISION`, but prose verdicts are read too. A reviewer reached
+  via an auto edge is unaffected (it's answering, not gating).
+- **Migration `0020` no longer fails to apply on databases that had
+  already hit the `nextSequence()` race.** It now removes duplicate
+  `run_events (run_id, sequence)` rows before creating the unique index;
+  previously the api could not boot on such a database.
 - **Auto-routing no longer depends on the model following a convention.**
   `matchAutoEdge` now treats any router output ending in a question mark
   as "no match", in addition to the existing `UNKNOWN`/`DONE` sentinels.

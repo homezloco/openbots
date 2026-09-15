@@ -2050,6 +2050,66 @@ a credential-helper approach would fix it at real complexity cost); and
 the documented DNS-rebinding TOCTOU in `assertPublicUrl` stands as
 before.
 
+## Reviewer gate: a review hop delivers the reviewed answer, not the verdict (2026-09-15)
+
+Found in real use on a generated 8-agent pipeline (Intake Coordinator
+→ specialist → Quality Reviewer): every chat turn came back as
+"**Approved** – the specialist's response is clear…" and never the
+specialist's response. The mechanism was working exactly as built —
+the reviewer was the terminal hop, and a run's output is its last
+hop's output — but nobody wants a verdict *instead of* the answer.
+The answer only survived in hop #1's run_event. And because
+`useBotChat` chains each run's output into the next turn as the
+assistant's prior message, from turn two on the team was "remembering"
+a critique rather than what it had said.
+
+Fixed at the engine level (`orchestrator/reviewGate.ts`, wired in
+`dispatchHop`), not with a prompt: a `reviewer`-role node whose input
+is exactly the previous hop's output (an explicit-edge handoff) is a
+**gate** on that hop. The run delivers the reviewed content with the
+verdict attached — an approval becomes a one-line note, anything else
+appends the reviewer's full text — and the same gated output is what
+an explicit edge hands to a downstream node (Writer → Reviewer →
+Publisher publishes the reviewed draft, not the review). The run_event
+still records the reviewer's raw output; only what leaves the hop
+changes. A reviewer reached via an *auto* edge is being asked directly
+(its input is the user's request), so its output is the answer and
+nothing is appended — the example graphs' "Reviewer (risk,
+correctness)" specialist keeps working as before.
+
+Two lessons from the trailing-`?` fix were applied from the start:
+the reviewer is taught `APPROVED` / `NEEDS_REVISION` sentinels
+(`appendReviewGateContext`, same first-token convention as `UNKNOWN`),
+**and** the verdict is also read from the first/last line the way a
+human would, ordered by phrase *position* so "**Approved** – … No
+revisions are needed." reads as approved while "Not approved" and
+"Review Verdict – Needs Revision" read as negative. "Unknown" is the
+safe outcome (content + full review). The injected context also tells
+the reviewer not to re-emit the content — this exact pipeline was
+already dying on Groq's 8K TPM free-tier limit, and a reviewer that
+"approves" by pasting the answer back doubles output for nothing.
+
+Five mock-tier cases (`run-mock.ts` is now 47/47): sentinel
+approve, sentinel needs-revision, prose verdicts via a transform node
+(both real lines from the pipeline that surfaced this), the auto-edge
+negative control, and the explicit handoff downstream.
+
+**Also fixed while deploying this:** migration `0020` creates the
+`run_events (run_id, sequence)` unique index that closes the
+`nextSequence()` race — but on any database that had already *hit*
+that race (a `succeeded` + `cancelled` pair at the same sequence; the
+local dev DB had 21 of them from the cancel-race e2e cases) the index
+can't be created and the api fails to boot, since migrations run on
+startup. The migration now dedupes first, keeping the most informative
+row per pair. Drizzle applies migrations by journal timestamp, not
+file hash, so this is a no-op for deployments that already applied it.
+
+**Deliberately left open:** `NEEDS_REVISION` does not loop back to the
+specialist for a revision round. The cycle guard (`alreadyVisited`)
+cuts any revisit today; a bounded one-round exception is the natural
+follow-up, and the gate's output shape (content + flagged issues)
+already gives that round its input.
+
 ## License
 
 Apache-2.0 (patent grant intact) plus a narrow Additional Use Grant,

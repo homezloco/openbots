@@ -26,7 +26,12 @@ export type ProviderId = z.infer<typeof ProviderId>;
 /**
  * "reviewer" is a distinct role (not just a worker with a review-flavored
  * prompt) so the engine and canvas can identify review hops explicitly —
- * see ModelTier below for the guard this makes possible.
+ * see ModelTier below for the tier guard, and the engine's reviewer gate
+ * (apps/api/src/orchestrator/reviewGate.ts): a reviewer fed by an explicit
+ * edge delivers the content it reviewed with its verdict attached, rather
+ * than the verdict alone. A node whose *deliverable* is a review document
+ * (e.g. a code reviewer whose report is what the user wants) should be a
+ * "worker".
  */
 export const AgentRole = z.enum(["supervisor", "worker", "router", "reviewer"]);
 export type AgentRole = z.infer<typeof AgentRole>;

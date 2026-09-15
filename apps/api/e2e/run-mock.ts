@@ -584,6 +584,138 @@ async function main() {
     );
   });
 
+  // --- Reviewer gate (reviewGate.ts) ---
+  // A reviewer fed by an explicit edge is a gate on the previous hop, so
+  // the run delivers the REVIEWED content with the verdict attached —
+  // never the verdict alone (which is what a real 8-agent pipeline
+  // shipped as its answer, and then chained into the next chat turn as
+  // the assistant's own prior message). Same mock/transform trick as the
+  // auto-routing cases: the reviewer's exact wording is controllable, so
+  // both the cooperating (sentinel) and non-cooperating (prose verdict)
+  // paths are deterministic.
+  async function reviewGateGraph(name: string, reviewer: ReturnType<typeof mockNode>) {
+    const g = await createGraph(name);
+    const worker = await createNode(g.id, mockNode({ name: "Writer" }));
+    const r = await createNode(g.id, reviewer);
+    await createEdge(g.id, worker.id, r.id, "explicit");
+    await setEntry(g.id, worker.id);
+    return { g, worker, reviewer: r };
+  }
+
+  await test("reviewer gate: APPROVED delivers the reviewed content, not the verdict", async () => {
+    const { g, reviewer } = await reviewGateGraph(
+      "Mock: review gate approved",
+      mockNode({ name: "Quality Reviewer", role: "reviewer", systemPrompt: "ROUTE_TO APPROVED" }),
+    );
+    const runId = await startRun(g.id, "draft the memo");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 2, `expected 2 hops, got ${hops.length}`);
+    // The trail still shows what the reviewer actually said…
+    assert(hops[1].nodeId === reviewer.id && hops[1].output === "APPROVED", `reviewer hop wrong: ${JSON.stringify(hops[1])}`);
+    // …but the run's answer is the writer's content plus a one-line note.
+    assert(
+      run.output === "MOCK: draft the memo\n\n---\n✅ Reviewed by Quality Reviewer: approved.",
+      `expected reviewed content + approval note, got: ${JSON.stringify(run.output)}`,
+    );
+  });
+
+  await test("reviewer gate: NEEDS_REVISION keeps the content and appends the reviewer's issues", async () => {
+    const { g } = await reviewGateGraph(
+      "Mock: review gate needs revision",
+      mockNode({ name: "Quality Reviewer", role: "reviewer", systemPrompt: "ROUTE_TO NEEDS_REVISION" }),
+    );
+    const runId = await startRun(g.id, "draft the memo");
+    const run = await waitForRun(runId);
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    assert(
+      typeof run.output === "string" &&
+        run.output.startsWith("MOCK: draft the memo\n\n---\n⚠️ Quality Reviewer flagged issues with this answer:") &&
+        run.output.endsWith("NEEDS_REVISION"),
+      `expected content + flagged issues, got: ${JSON.stringify(run.output)}`,
+    );
+  });
+
+  await test("reviewer gate: a prose verdict with no sentinel is still read correctly", async () => {
+    // A transform/template node with the reviewer role emits an exact
+    // verdict line without cooperating with the injected convention —
+    // the shape a small local model produces. Both real-world lines here
+    // come from the pipeline that surfaced this bug: "Needs Revision"
+    // after a heading dash, and an "Approved" line that ALSO contains the
+    // word "revisions" later on ("No revisions are needed").
+    const needs = await reviewGateGraph("Mock: review gate prose needs revision", {
+      ...mockNode({
+        name: "Quality Reviewer",
+        role: "reviewer",
+        systemPrompt: "**Review Verdict – Needs Revision**\n\nAll dates are in the past.",
+      }),
+      provider: "transform",
+      model: "template",
+    });
+    const needsRun = await waitForRun(await startRun(needs.g.id, "draft the memo"));
+    assert(needsRun.status === "completed", `run failed: ${JSON.stringify(needsRun)}`);
+    assert(
+      typeof needsRun.output === "string" &&
+        needsRun.output.startsWith("MOCK: draft the memo\n\n---\n⚠️ Quality Reviewer flagged issues") &&
+        needsRun.output.includes("All dates are in the past."),
+      `prose NEEDS REVISION misread: ${JSON.stringify(needsRun.output)}`,
+    );
+
+    const approved = await reviewGateGraph("Mock: review gate prose approved", {
+      ...mockNode({
+        name: "Quality Reviewer",
+        role: "reviewer",
+        systemPrompt: "**Approved** – clear and factually accurate. No revisions are needed.",
+      }),
+      provider: "transform",
+      model: "template",
+    });
+    const approvedRun = await waitForRun(await startRun(approved.g.id, "draft the memo"));
+    assert(approvedRun.status === "completed", `run failed: ${JSON.stringify(approvedRun)}`);
+    assert(
+      approvedRun.output === "MOCK: draft the memo\n\n---\n✅ Reviewed by Quality Reviewer: approved.",
+      `prose APPROVED misread (the later word "revisions" must not flip it): ${JSON.stringify(approvedRun.output)}`,
+    );
+  });
+
+  await test("reviewer gate: a reviewer reached via an AUTO edge is answering, not gating", async () => {
+    // The example graphs route "risk/correctness" requests to a Reviewer
+    // specialist via auto edges. Its input is the user's own request, so
+    // its output IS the answer — nothing must be appended.
+    const g = await createGraph("Mock: reviewer via auto edge");
+    const router = await createNode(g.id, mockNode({ name: "Lead", role: "router", systemPrompt: "ROUTE_TO Reviewer" }));
+    const reviewer = await createNode(g.id, mockNode({ name: "Reviewer", role: "reviewer", description: "Reviewer checks risk" }));
+    await createEdge(g.id, router.id, reviewer.id, "auto");
+    await setEntry(g.id, router.id);
+    const run = await waitForRun(await startRun(g.id, "is this safe to ship?"));
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 2 && hops[1].nodeId === reviewer.id, `expected Lead → Reviewer, got ${JSON.stringify(hops.map((h) => h.nodeId))}`);
+    assert(run.output === "MOCK: is this safe to ship?", `auto-routed reviewer output was altered: ${JSON.stringify(run.output)}`);
+  });
+
+  await test("reviewer gate: passes the reviewed content downstream on an explicit handoff", async () => {
+    // Writer → Reviewer → Publisher: the publisher must receive the
+    // reviewed draft (with the note), not the bare verdict.
+    const { g, reviewer } = await reviewGateGraph(
+      "Mock: review gate handoff",
+      mockNode({ name: "Quality Reviewer", role: "reviewer", systemPrompt: "ROUTE_TO APPROVED" }),
+    );
+    const publisher = await createNode(g.id, mockNode({ name: "Publisher" }));
+    await createEdge(g.id, reviewer.id, publisher.id, "explicit");
+    const run = await waitForRun(await startRun(g.id, "draft the memo"));
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(hops.length === 3 && hops[2].nodeId === publisher.id, `expected 3 hops ending at Publisher, got ${hops.length}`);
+    // The mock echoes the last 200 chars of its input; the note is the tail.
+    assert(
+      typeof run.output === "string" && run.output.endsWith("✅ Reviewed by Quality Reviewer: approved."),
+      `publisher did not receive the reviewed content: ${JSON.stringify(run.output)}`,
+    );
+    assert(!run.output.startsWith("MOCK: APPROVED"), "publisher received the bare verdict");
+  });
+
   // --- http_request operator allowlist (no model involved) ---
   // ALLOWED_HTTP_ENDPOINTS is unset in the mock CI env, so EVERY baseUrl
   // is outside the allowlist — which is exactly the empty-deny default

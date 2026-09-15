@@ -50,11 +50,15 @@ export default defineRailway(() => {
       // Groq free tier — the only env-configured provider, so generateGraph/
       // quick-add work for every visitor while paid spend is impossible.
       OPENAI_COMPATIBLE_BASE_URL: "https://api.groq.com/openai/v1",
-      OPENAI_COMPATIBLE_MODEL: "qwen/qwen3.8-27b",
+      // gpt-oss-120b for env-provider picks (generation/quick-add): its
+      // reasoning_content quirk only breaks multi-turn tool loops, which
+      // generation never is. Demo graphs should pin tool-using nodes to
+      // qwen/qwen3.8-27b explicitly per-node.
+      OPENAI_COMPATIBLE_MODEL: "openai/gpt-oss-120b",
       OPENAI_COMPATIBLE_STRUCTURED_OUTPUTS: "true",
       // Groq free tier enforces ~1000 output-tokens/minute and rejects
       // requests whose expected output exceeds it — cap under the limit.
-      MAX_OUTPUT_TOKENS: "800",
+      MAX_OUTPUT_TOKENS: "950",
       // Secrets — real values set via `railway variable set`, never in source.
       SESSION_SECRET: preserve(),
       CREDENTIALS_ENCRYPTION_KEY: preserve(),

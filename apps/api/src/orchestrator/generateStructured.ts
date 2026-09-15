@@ -49,7 +49,18 @@ export async function generateStructuredWithFallback<S extends z.ZodTypeAny>(
       // ours. Appending it here covers every caller; providers that don't
       // require it are unaffected by one extra accurate instruction.
       const systemText = /\bjson\b/i.test(system) ? system : `${system}\n\nRespond with a single JSON object matching the required schema.`;
-      const result = await generateObject({ model, schema, system: systemText, prompt });
+      const result = await generateObject({
+        model,
+        schema,
+        system: systemText,
+        prompt,
+        // Same preflight-quota issue as the hop path in engine.ts —
+        // Groq's free tier rejects requests whose expected output exceeds
+        // its per-minute cap. Unset = provider default, unchanged.
+        ...(process.env.MAX_OUTPUT_TOKENS
+          ? { maxOutputTokens: Number(process.env.MAX_OUTPUT_TOKENS) }
+          : {}),
+      });
       return { object: result.object, provider: candidate.provider, model: candidate.model };
     } catch (err) {
       lastError = err;

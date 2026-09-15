@@ -38,10 +38,18 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
  * it. COOKIE_SECURE is opt-in and explicit instead.
  */
 export function setSessionCookie(reply: FastifyReply, token: string) {
+  // COOKIE_SAMESITE exists for deployments where web and api live on
+  // different eTLD+1s — e.g. Railway's *.up.railway.app, which is on the
+  // Public Suffix List, making two of its subdomains cross-site and
+  // SameSite=Lax undeliverable. "none" is only meaningful over HTTPS
+  // (browsers reject SameSite=None without Secure), so it forces secure
+  // on regardless of COOKIE_SECURE. Same-site setups (a custom domain's
+  // subdomains, or localhost) should leave this unset.
+  const sameSite = (process.env.COOKIE_SAMESITE ?? "lax") as "lax" | "strict" | "none";
   reply.setCookie(COOKIE_NAME, token, {
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.COOKIE_SECURE === "true",
+    sameSite,
+    secure: sameSite === "none" || process.env.COOKIE_SECURE === "true",
     path: "/",
     maxAge: 60 * 60 * 24 * 7,
   });

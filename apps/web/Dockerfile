@@ -28,6 +28,12 @@ RUN --mount=type=cache,target=/pnpm-store \
 
 FROM deps AS build
 COPY . .
+# NEXT_PUBLIC_* vars are inlined into the client bundle at build time —
+# a runtime env var (like compose's `environment:` entry) reaches only
+# server code. Railway injects this build arg so the bundle points at the
+# deployed api domain instead of the localhost:4000 fallback in lib/api.ts.
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN pnpm --filter @openbots/graph-schema --filter @openbots/web build
 
 FROM base AS runtime

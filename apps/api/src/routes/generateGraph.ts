@@ -18,8 +18,12 @@ const generatedNodeSchema = z.object({
   role: AgentRole.describe(
     "supervisor/router coordinates others; worker does the task; reviewer checks another node's output",
   ),
-  tier: ModelTier.optional().describe(
-    "Self-declared capability label — flagship for judgment-heavy roles like reviewer, economy for simple mechanical steps",
+  // Required, not .optional(): strict json_schema endpoints (Groq)
+  // reject the whole call when `required` omits any key in properties —
+  // an optional field makes the request itself invalid, not just its
+  // output. Same reason edges[] below lost its .default([]).
+  tier: ModelTier.describe(
+    "Always provide one: flagship for judgment-heavy roles like reviewer, economy for simple mechanical steps, standard otherwise",
   ),
   description: z
     .string()
@@ -44,7 +48,7 @@ const generatedGraphSchema = z.object({
   graphName: z.string().min(1).max(80),
   graphDescription: z.string(),
   nodes: z.array(generatedNodeSchema).min(1).max(8),
-  edges: z.array(generatedEdgeSchema).default([]),
+  edges: z.array(generatedEdgeSchema).describe("Always provide — use [] only for a single-node graph"),
   entryNodeName: z.string().describe("Must exactly match one name from nodes[] — where a new run starts"),
 });
 

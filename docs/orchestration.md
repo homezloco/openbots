@@ -246,6 +246,77 @@ All three of the non-obvious cases in step 3 are covered deterministically
 in the mock-tier e2e suite (`run-mock.ts`), which can control the router's
 exact wording; real-model coverage of them is inherently flaky.
 
+## Reviewer gate and the one revision round
+
+`apps/api/src/orchestrator/reviewGate.ts`, wired into `dispatchHop`.
+A `reviewer`-role node whose input is exactly the previous hop's output
+(an explicit-edge handoff) is a **gate** on that hop, not a new author.
+Its own `run_event` records its raw verdict, but what *leaves* the hop —
+the run's output, or an explicit handoff onward — is the reviewed
+content with the verdict attached:
+
+- approved → `<content>\n\n---\n✅ Reviewed by <name>: approved.`
+- anything else → `<content>\n\n---\n⚠️ <name> flagged issues with this
+  answer:\n\n<the reviewer's full output>`
+
+The content is never dropped. This exists because a generated
+Specialist → Quality Reviewer pipeline delivered every chat turn as
+"Approved – the specialist's response is clear…" with the actual
+response only visible in the run trail — and `useBotChat` then chained
+that verdict into the next turn as the assistant's own prior message.
+
+**The gate is decided by input identity, not role.** A reviewer reached
+via an `auto` edge receives the user's original request (see above), so
+it's being *asked* something and its output is the answer, untouched —
+the example graphs' "Reviewer (risk, correctness)" specialist depends on
+this. Consensus aggregators complete on their own path before routing
+and never reach the gate. A node whose deliverable *is* a review
+document (a code reviewer whose report is what the user wants) should be
+a `worker`.
+
+**Verdict parsing is two-layered**, for the same reason `matchAutoEdge`
+doesn't rely on `UNKNOWN` alone: the reviewer is taught `APPROVED` /
+`NEEDS_REVISION` as a first-token sentinel (`appendReviewGateContext`),
+*and* `parseReviewVerdict` reads the first (then last) non-empty line
+the way a human would, ordered by phrase **position** so that
+"**Approved** – … No revisions are needed." is approved while
+"Not approved" and "Review Verdict – Needs Revision" are not. An
+unreadable verdict is treated as "flagged" (content + full review), the
+safe outcome. The injected context also tells the reviewer not to
+re-emit the content — a reviewer that "approves" by pasting the answer
+back doubles output tokens per turn.
+
+**One revision round, bounded by the trail.** The *first* time a gate
+says NEEDS_REVISION, `dispatchHop` doesn't follow any edge: it sends the
+reviewed node a self-contained revision request
+(`buildRevisionRequest`: findings + its previous draft + its original
+task — every hop is a fresh `generateText`, so nothing else carries
+over) and publishes a `revision_requested` run event. The node's own
+explicit edge brings the revised draft back to the same reviewer, and
+that second review is final either way: approved becomes the note; a
+second NEEDS_REVISION is delivered as content + findings. The reviewer
+is told which round it's in (`reviewRound` 1 vs 2) so its first
+findings are written to be fixable and its second verdict knows it's
+final.
+
+The bound is derived from `run_events`, not stored state, exactly like
+the cycle guard it has to cooperate with: `reviewGateFor` counts the
+reviewer's prior succeeded hops in this run (0 → may request a
+revision), and the cycle guard's single exception,
+`isRevisedDraftReturning`, allows a revisit only when the two preceding
+succeeded hops are [this node, then that reviewer], the reviewer's
+recorded verdict parses as NEEDS_REVISION, and it was that reviewer's
+first review. Every other revisit still ends the run — including the
+reviewer's own second verdict when a user-drawn edge points it back at
+the author (covered in `run-mock.ts`, alongside the round itself, the
+two-rejections bound, the prose-verdict trigger, the auto-edge negative
+control, and the downstream handoff).
+
+Two rounds would be the next thing to want and the wrong thing to add:
+each round re-sends the growing transcript to a (possibly TPM-limited)
+provider, and a reviewer that rejects twice is usually objecting to
+something the author can't fix, like missing facts.
+
 ## `consensus` edges (fan-out/join)
 
 A node's `consensusGroup` marks it as a fan-out source: every edge in

@@ -25,7 +25,12 @@ export interface RunEventMessage {
     | "dispatch_started"
     | "dispatch_succeeded"
     | "dispatch_failed"
-    | "dispatch_timed_out";
+    | "dispatch_timed_out"
+    // A reviewer gate sent the draft back to its author (nodeId) for the
+    // one revision round — see orchestrator/reviewGate.ts. No edge was
+    // followed, so without this the canvas would only see the author's
+    // second hop_dispatched with nothing explaining why.
+    | "revision_requested";
   nodeId?: string;
   resolvedEdgeId?: string | null;
   payload?: unknown;

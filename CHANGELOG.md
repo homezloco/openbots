@@ -17,7 +17,12 @@ contain breaking changes, which will always be called out explicitly.
   "Approved – the response is clear…" and the actual response was only
   visible in the run trail. Reviewers are taught `APPROVED` /
   `NEEDS_REVISION`, but prose verdicts are read too. A reviewer reached
-  via an auto edge is unaffected (it's answering, not gating).
+  via an auto edge is unaffected (it's answering, not gating). A first
+  `NEEDS_REVISION` sends the draft back to its author for exactly one
+  revision (findings + draft + original task), and the reviewer's second
+  verdict is final either way; a run-event `revision_requested` is
+  published for the round. The mock provider gained
+  `IF_INPUT_HAS <word> SAY <token>` for testing it.
 - **Migration `0020` no longer fails to apply on databases that had
   already hit the `nextSequence()` race.** It now removes duplicate
   `run_events (run_id, sequence)` rows before creating the unique index;

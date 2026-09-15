@@ -25,6 +25,20 @@ import { startsWithSentinel } from "./resolve.js";
  * the reviewer's input is exactly the previous hop's output. Consensus
  * aggregators never reach this code either (their hop completes on the
  * aggregator path before routing).
+ *
+ * One bounded revision round: the FIRST time a gate says NEEDS_REVISION,
+ * the engine sends the reviewed node its own draft plus the findings
+ * (buildRevisionRequest) and lets its explicit edge bring the revised
+ * draft back to the same reviewer; that second review is final either
+ * way — approved becomes the note, another NEEDS_REVISION is delivered
+ * as content + findings exactly as a first-round rejection was before
+ * the loop existed. The cap is per reviewer per run, derived from the
+ * run's own event history rather than stored state (engine.ts's
+ * reviewGateFor / isRevisedDraftReturning), the same way the cycle guard
+ * itself works. Two rounds would be the next thing to want and the
+ * wrong thing to add: every round re-sends the growing transcript to a
+ * TPM-limited provider, and a reviewer that rejects twice is usually
+ * objecting to something the specialist can't fix (missing facts).
  */
 
 export type ReviewVerdict = "approved" | "needs_revision" | "unknown";
@@ -84,8 +98,8 @@ export function parseReviewVerdict(output: unknown): ReviewVerdict {
   return lines.length > 1 ? classifyLine(lines[lines.length - 1]) : "unknown";
 }
 
-/** The reviewer's own text minus a leading sentinel line, for the approval note. */
-function reviewerNotes(output: string): string {
+/** The reviewer's own text minus a leading sentinel, for the approval note and the revision request. */
+export function reviewFindings(output: string): string {
   return output
     .replace(new RegExp(`^\\s*(?:${APPROVED_SENTINEL}|${NEEDS_REVISION_SENTINEL})[\\s,.:;!\\-–—]*`, "i"), "")
     .trim();
@@ -99,7 +113,7 @@ function reviewerNotes(output: string): string {
 export function applyReviewGate(reviewerName: string, reviewedContent: string, reviewerOutput: string): string {
   const verdict = parseReviewVerdict(reviewerOutput);
   if (verdict === "approved") {
-    const notes = reviewerNotes(reviewerOutput);
+    const notes = reviewFindings(reviewerOutput);
     // Keep the note short: an approval's "why it passes" table is noise in
     // front of the answer, and stays readable in the run trail anyway.
     const brief = notes && notes.length <= 300 && !notes.includes("\n") ? ` ${notes}` : "";
@@ -118,7 +132,45 @@ export function applyReviewGate(reviewerName: string, reviewedContent: string, r
  * doubles output tokens per turn for nothing (this pipeline was already
  * dying on a provider TPM limit).
  */
-export function appendReviewGateContext(systemPrompt: string, isReviewGate: boolean): string {
-  if (!isReviewGate) return systemPrompt;
-  return `${systemPrompt}\n\nYou are reviewing another agent's response before it goes to the user. The response you are reviewing is what the user will receive; your review is attached to it as a note, not shown instead of it. Start your reply with exactly one word on its own line: ${APPROVED_SENTINEL} if the response can go to the user as-is (you may follow with one brief line of notes), or ${NEEDS_REVISION_SENTINEL} followed by the specific problems. Do not rewrite, repeat, or summarize the response itself.`;
+export function appendReviewGateContext(systemPrompt: string, reviewRound: number): string {
+  if (reviewRound <= 0) return systemPrompt;
+  const base = `${systemPrompt}\n\nYou are reviewing another agent's response before it goes to the user. The response you are reviewing is what the user will receive; your review is attached to it as a note, not shown instead of it. Start your reply with exactly one word on its own line: ${APPROVED_SENTINEL} if the response can go to the user as-is (you may follow with one brief line of notes), or ${NEEDS_REVISION_SENTINEL} followed by the specific problems. Do not rewrite, repeat, or summarize the response itself.`;
+  if (reviewRound === 1) {
+    return `${base} If you say ${NEEDS_REVISION_SENTINEL}, the author gets one chance to revise using your findings, so make each finding specific and fixable.`;
+  }
+  return `${base} This is the author's revised draft after your earlier ${NEEDS_REVISION_SENTINEL}; there is no further revision round, so this verdict is final either way — only flag problems that genuinely matter.`;
+}
+
+/**
+ * What the reviewed node receives for its one revision hop. Self-
+ * contained on purpose: the node has no memory of its earlier hop (every
+ * hop is a fresh generateText), so its original task, its own draft, and
+ * the findings all have to travel together. Ends with "the complete
+ * revised answer only" because the revised output goes straight back
+ * through the gate and then to the user — commentary about the review
+ * would be delivered as part of the answer.
+ */
+export function buildRevisionRequest(
+  reviewerName: string,
+  originalTask: unknown,
+  draft: string,
+  reviewerOutput: string,
+): string {
+  const task = typeof originalTask === "string" ? originalTask : JSON.stringify(originalTask ?? "");
+  const findings = reviewFindings(reviewerOutput) || reviewerOutput.trim();
+  return [
+    `Revise your previous answer. ${reviewerName} reviewed it and found these issues:`,
+    "",
+    findings,
+    "",
+    "Your previous answer was:",
+    "",
+    draft,
+    "",
+    "The original request was:",
+    "",
+    task,
+    "",
+    "Reply with the complete revised answer only — do not comment on the review or describe what you changed.",
+  ].join("\n");
 }

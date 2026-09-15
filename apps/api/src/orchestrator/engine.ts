@@ -25,7 +25,7 @@ import {
   usageEvents,
 } from "../db/schema.js";
 import { aggregatorNodeIds, resolveNextHop, startsWithSentinel } from "./resolve.js";
-import { appendReviewGateContext, applyReviewGate } from "./reviewGate.js";
+import { appendReviewGateContext, applyReviewGate, buildRevisionRequest, parseReviewVerdict } from "./reviewGate.js";
 import { DEFAULT_NODE_TIMEOUT_MS, withNodeTimeout } from "./circuitBreaker.js";
 import { withRetry } from "./retry.js";
 import { getCredentials } from "./credentials.js";
@@ -447,10 +447,11 @@ async function dispatchHopInner(runId: string): Promise<void> {
   const autoRoutingTargets = isAggregator ? [] : getAutoRoutingTargets(graph, node.id);
 
   // Reviewer gate (reviewGate.ts): decided BEFORE the model call so the
-  // reviewer can be taught the APPROVED/NEEDS_REVISION convention, and
-  // used after it so the run delivers the reviewed content, not the
-  // verdict. Null whenever this hop isn't reviewing the previous one.
-  const reviewedContent = isAggregator ? null : await reviewedContentFor(runId, node, run.input, sequence);
+  // reviewer can be taught the APPROVED/NEEDS_REVISION convention (and
+  // told whether this is the final, post-revision look), and used after
+  // it so the run delivers the reviewed content, not the verdict. Null
+  // whenever this hop isn't reviewing the previous one.
+  const gate = isAggregator ? null : await reviewGateFor(runId, node, run.input, sequence);
 
   let result: AgentCallResult;
   const hopTimeoutMs = hopTimeoutMsFor(node);
@@ -467,7 +468,7 @@ async function dispatchHopInner(runId: string): Promise<void> {
           graph.ownerId,
           hopDeadlineEpochMs,
           graph.fallbackChain,
-          reviewedContent !== null,
+          gate ? gate.priorReviews + 1 : 0,
         ),
       hopTimeoutMs,
     );
@@ -613,12 +614,23 @@ async function dispatchHopInner(runId: string): Promise<void> {
 
   const { edge, nextNodeId } = resolveNextHop(graphNow, nodeNow.id, output, { toolCalled: result.toolCalled });
 
+  // A gate's FIRST NEEDS_REVISION sends the draft back to its author for
+  // one revision instead of following any edge — decided before the
+  // event insert so the trail doesn't record an edge that wasn't taken.
+  // Second-round verdicts never come here (priorReviews > 0), so the
+  // loop is one round by construction; see reviewGate.ts.
+  const revisionTarget =
+    gate && gate.priorReviews === 0 && parseReviewVerdict(output) === "needs_revision"
+      ? (graphNow.nodes.find((n) => n.id === gate.reviewedNodeId) ?? null)
+      : null;
+  const followedEdge = revisionTarget ? null : edge;
+
   await db.insert(runEvents).values({
     runId,
     nodeId: node.id,
     sequence,
     status: "succeeded",
-    resolvedEdgeId: edge?.id ?? null,
+    resolvedEdgeId: followedEdge?.id ?? null,
     input: run.input,
     output,
     startedAt,
@@ -629,14 +641,31 @@ async function dispatchHopInner(runId: string): Promise<void> {
     graphId: graphNow.id,
     type: "hop_succeeded",
     nodeId: node.id,
-    resolvedEdgeId: edge?.id ?? null,
+    resolvedEdgeId: followedEdge?.id ?? null,
     payload: { output },
   });
+
+  if (revisionTarget && gate) {
+    publishRunEvent({
+      runId,
+      graphId: graphNow.id,
+      type: "revision_requested",
+      nodeId: revisionTarget.id,
+      payload: { reviewerNodeId: node.id, reviewerName: node.name },
+    });
+    await advanceRun(
+      runId,
+      graphNow,
+      revisionTarget.id,
+      buildRevisionRequest(node.name, gate.reviewedInput, gate.reviewedContent, output),
+    );
+    return;
+  }
 
   // The run_event above keeps the reviewer's raw verdict (that's what the
   // trail should show); only what leaves this hop — the run's answer, or
   // an explicit handoff to the next node — carries the reviewed content.
-  const delivered = reviewedContent !== null ? applyReviewGate(node.name, reviewedContent, output) : output;
+  const delivered = gate ? applyReviewGate(node.name, gate.reviewedContent, output) : output;
 
   if (!nextNodeId) {
     await completeRun(runId, graph.id, delivered, run.createdAt);
@@ -648,7 +677,11 @@ async function dispatchHopInner(runId: string): Promise<void> {
     .from(runEvents)
     .where(and(eq(runEvents.runId, runId), eq(runEvents.nodeId, nextNodeId), eq(runEvents.status, "succeeded")))
     .limit(1);
-  if (alreadyVisited) {
+  // The cycle guard's one exception: a revised draft returning to the
+  // reviewer that asked for it. Anything else that revisits a node still
+  // ends the run here — including that reviewer's own second verdict if
+  // a user-drawn edge points it back at the author.
+  if (alreadyVisited && !(await isRevisedDraftReturning(runId, node.id, graphNow, nextNodeId, sequence))) {
     await completeRun(runId, graph.id, delivered, run.createdAt);
     return;
   }
@@ -1381,33 +1414,106 @@ function isAbortError(err: unknown): boolean {
  * runs with (see AgentGraph.fallbackChain, the same "specific → shared"
  * resolution shape credentials.ts::getCredentials() already uses).
  */
+interface ReviewGate {
+  /** The previous hop's output verbatim — what's being reviewed and what gets delivered. */
+  reviewedContent: string;
+  /** The node that produced it — where a revision request goes. */
+  reviewedNodeId: string;
+  /** That node's own input — its original task, restated in a revision request. */
+  reviewedInput: unknown;
+  /** How many times this reviewer has already succeeded in this run: 0 = first look, 1 = reviewing a revision. */
+  priorReviews: number;
+}
+
 /**
- * The previous hop's output iff this hop is a reviewer gate on it — i.e.
- * a `reviewer`-role node whose input is exactly what the last succeeded
+ * Non-null iff this hop is a reviewer gate on the previous one — i.e. a
+ * `reviewer`-role node whose input is exactly what the last succeeded
  * hop produced (an explicit edge's handoff). Compared as JSON rather
  * than by edge kind: both columns are jsonb and round-trip identically,
  * and it stays correct in live mode even if the edge that did the
- * handoff was deleted between hops. Returns null for the entry hop (no
- * previous hop), for a reviewer reached via an auto edge (its input is
- * the user's original request, so it's being asked directly), and for
- * any non-reviewer role.
+ * handoff was deleted between hops. Null for the entry hop (no previous
+ * hop), for a reviewer reached via an auto edge (its input is the user's
+ * original request, so it's being asked directly), and for any
+ * non-reviewer role. priorReviews is what bounds the revision loop, and
+ * like the cycle guard it's derived from the run's own history rather
+ * than a stored flag that could drift from it.
  */
-async function reviewedContentFor(
+async function reviewGateFor(
   runId: string,
   node: AgentNode,
   input: unknown,
   sequence: number,
-): Promise<string | null> {
+): Promise<ReviewGate | null> {
   if (node.role !== "reviewer" || sequence === 0) return null;
   const [prev] = await db
-    .select({ output: runEvents.output })
+    .select({ nodeId: runEvents.nodeId, input: runEvents.input, output: runEvents.output })
     .from(runEvents)
     .where(and(eq(runEvents.runId, runId), eq(runEvents.status, "succeeded"), lt(runEvents.sequence, sequence)))
     .orderBy(desc(runEvents.sequence))
     .limit(1);
   if (!prev || prev.output == null) return null;
   if (JSON.stringify(prev.output) !== JSON.stringify(input)) return null;
-  return typeof input === "string" ? input : JSON.stringify(input);
+  const earlier = await db
+    .select({ id: runEvents.id })
+    .from(runEvents)
+    .where(
+      and(
+        eq(runEvents.runId, runId),
+        eq(runEvents.nodeId, node.id),
+        eq(runEvents.status, "succeeded"),
+        lt(runEvents.sequence, sequence),
+      ),
+    );
+  return {
+    reviewedContent: typeof input === "string" ? input : JSON.stringify(input),
+    reviewedNodeId: prev.nodeId,
+    reviewedInput: prev.input,
+    priorReviews: earlier.length,
+  };
+}
+
+/**
+ * True iff the hop that just finished (`nodeId`) was the one revision a
+ * reviewer gate requested, and `nextNodeId` is that reviewer — the only
+ * revisit the cycle guard allows. Read off the trail: the two succeeded
+ * hops before this one must be [this node, then the reviewer], the
+ * reviewer's verdict there must parse as NEEDS_REVISION, and it must
+ * have been that reviewer's first review (a second NEEDS_REVISION is
+ * delivered, never re-revised, so a third pass can't arise). Same
+ * verdict parser as the gate itself, so the two decisions can't
+ * disagree.
+ */
+async function isRevisedDraftReturning(
+  runId: string,
+  nodeId: string,
+  graph: AgentGraph,
+  nextNodeId: string,
+  sequence: number,
+): Promise<boolean> {
+  const reviewer = graph.nodes.find((n) => n.id === nextNodeId);
+  if (!reviewer || reviewer.role !== "reviewer") return false;
+  const trail = await db
+    .select({ nodeId: runEvents.nodeId, output: runEvents.output })
+    .from(runEvents)
+    .where(and(eq(runEvents.runId, runId), eq(runEvents.status, "succeeded"), lt(runEvents.sequence, sequence)))
+    .orderBy(desc(runEvents.sequence))
+    .limit(2);
+  if (trail.length < 2) return false;
+  const [verdictHop, draftHop] = trail;
+  if (verdictHop.nodeId !== reviewer.id || draftHop.nodeId !== nodeId) return false;
+  if (parseReviewVerdict(verdictHop.output) !== "needs_revision") return false;
+  const reviews = await db
+    .select({ id: runEvents.id })
+    .from(runEvents)
+    .where(
+      and(
+        eq(runEvents.runId, runId),
+        eq(runEvents.nodeId, reviewer.id),
+        eq(runEvents.status, "succeeded"),
+        lt(runEvents.sequence, sequence),
+      ),
+    );
+  return reviews.length === 1;
 }
 
 async function callAgent(
@@ -1422,10 +1528,11 @@ async function callAgent(
   // that could outlive the hop itself (see dispatchTool.ts).
   hopDeadlineEpochMs: number = Date.now() + DEFAULT_NODE_TIMEOUT_MS,
   graphFallbackChain: AgentNode["fallbackChain"] = [],
-  // True only when this hop is a reviewer gate on the previous hop's
-  // output (see reviewGate.ts) — decided by dispatchHop, never inferred
-  // here from the role alone.
-  isReviewGate = false,
+  // 0 unless this hop is a reviewer gate on the previous hop's output
+  // (see reviewGate.ts): 1 for the first review, 2 when reviewing the
+  // revised draft. Decided by dispatchHop, never inferred here from the
+  // role alone.
+  reviewRound = 0,
 ): Promise<AgentCallResult> {
   const effectiveFallbackChain = node.fallbackChain.length > 0 ? node.fallbackChain : graphFallbackChain;
   const targets = [{ provider: node.provider, model: node.model }, ...effectiveFallbackChain];
@@ -1513,7 +1620,7 @@ async function callAgent(
                     node.role,
                     canWrite,
                   ),
-                  isReviewGate,
+                  reviewRound,
                 ),
                 canWrite,
               ),

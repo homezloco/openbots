@@ -29,6 +29,15 @@ function extractPromptText(content: unknown): string {
 
 /** Matches "ROUTE_TO <name>" anywhere in a node's (already auto-routing-context-appended) system prompt. */
 const MOCK_ROUTE_TO = /ROUTE_TO\s+(\S+)/;
+/**
+ * "IF_INPUT_HAS <word> SAY <token>": reply with exactly <token> when the
+ * user prompt contains <word> (case-sensitive substring), else fall
+ * through to ROUTE_TO / echo. Exists so a mock can answer differently on
+ * a second visit — the reviewer-gate revision round needs a reviewer
+ * that rejects a first draft and approves the revised one, and the
+ * revised draft is the only thing that differs between the two calls.
+ */
+const MOCK_IF_INPUT_HAS = /IF_INPUT_HAS\s+(\S+)\s+SAY\s+(\S+)/;
 
 /**
  * No network call, no credentials required (see credentials.ts's "mock"
@@ -38,6 +47,8 @@ const MOCK_ROUTE_TO = /ROUTE_TO\s+(\S+)/;
  * — if the system prompt contains "ROUTE_TO <name>" — reply with exactly
  * <name>, so a future routing test can steer auto-routing deterministically
  * (resolve.ts matches an auto edge's target name against the output text).
+ * Plus one conditional form, "IF_INPUT_HAS <word> SAY <token>", checked
+ * first (see MOCK_IF_INPUT_HAS).
  */
 // Derived from MockLanguageModelV3's own instance method rather than a
 // hand-typed guess — this stays correct if the class's doGenerate
@@ -65,8 +76,14 @@ const mockAdapter: ProviderAdapter = {
           .map((m) => extractPromptText(m.content))
           .join("\n");
 
+        const conditional = systemText.match(MOCK_IF_INPUT_HAS);
         const routeMatch = systemText.match(MOCK_ROUTE_TO);
-        const text = routeMatch ? routeMatch[1] : `MOCK: ${userText.slice(-200)}`;
+        const text =
+          conditional && userText.includes(conditional[1])
+            ? conditional[2]
+            : routeMatch
+              ? routeMatch[1]
+              : `MOCK: ${userText.slice(-200)}`;
 
         const result: MockDoGenerateResult = {
           finishReason: { unified: "stop", raw: "stop" },

@@ -621,20 +621,79 @@ async function main() {
     );
   });
 
-  await test("reviewer gate: NEEDS_REVISION keeps the content and appends the reviewer's issues", async () => {
-    const { g } = await reviewGateGraph(
-      "Mock: review gate needs revision",
-      mockNode({ name: "Quality Reviewer", role: "reviewer", systemPrompt: "ROUTE_TO NEEDS_REVISION" }),
+  await test("reviewer gate: NEEDS_REVISION sends the draft back once, then re-reviews; approval delivers the revision", async () => {
+    // Rejects the first draft, approves anything that reads as a revision
+    // (the revised draft is a mock echo of the revision request, which
+    // contains "revised"). Publisher downstream proves the revision
+    // happens BEFORE the handoff, not instead of it.
+    const { g, worker, reviewer } = await reviewGateGraph(
+      "Mock: review gate one revision round",
+      mockNode({
+        name: "Quality Reviewer",
+        role: "reviewer",
+        systemPrompt: "IF_INPUT_HAS revised SAY APPROVED ROUTE_TO NEEDS_REVISION",
+      }),
     );
-    const runId = await startRun(g.id, "draft the memo");
-    const run = await waitForRun(runId);
+    const publisher = await createNode(g.id, mockNode({ name: "Publisher" }));
+    await createEdge(g.id, reviewer.id, publisher.id, "explicit");
+    const run = await waitForRun(await startRun(g.id, "draft the memo"));
     assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(
+      hops.map((h) => h.nodeId).join() === [worker.id, reviewer.id, worker.id, reviewer.id, publisher.id].join(),
+      `expected Writer → Reviewer → Writer → Reviewer → Publisher, got ${hops.length} hops`,
+    );
+    assert(hops[1].output === "NEEDS_REVISION" && hops[1].resolvedEdgeId === null, "first verdict should record no edge taken");
+    // The revision hop is self-contained: findings + previous draft + original task.
+    const revisionInput = typeof hops[2].input === "string" ? hops[2].input : JSON.stringify(hops[2].input);
+    assert(
+      revisionInput.startsWith("Revise your previous answer. Quality Reviewer reviewed it") &&
+        revisionInput.includes("MOCK: draft the memo") &&
+        revisionInput.includes("The original request was:\n\ndraft the memo"),
+      `revision request malformed: ${JSON.stringify(revisionInput)}`,
+    );
+    assert(hops[3].output === "APPROVED", `second verdict should be APPROVED, got ${JSON.stringify(hops[3].output)}`);
     assert(
       typeof run.output === "string" &&
-        run.output.startsWith("MOCK: draft the memo\n\n---\n⚠️ Quality Reviewer flagged issues with this answer:") &&
-        run.output.endsWith("NEEDS_REVISION"),
-      `expected content + flagged issues, got: ${JSON.stringify(run.output)}`,
+        run.output.endsWith("✅ Reviewed by Quality Reviewer: approved.") &&
+        !run.output.includes("flagged issues"),
+      `publisher should receive the approved revision: ${JSON.stringify(run.output)}`,
     );
+  });
+
+  await test("reviewer gate: a second NEEDS_REVISION is delivered with the findings, never a third round", async () => {
+    const { g, worker, reviewer } = await reviewGateGraph(
+      "Mock: review gate needs revision twice",
+      mockNode({ name: "Quality Reviewer", role: "reviewer", systemPrompt: "ROUTE_TO NEEDS_REVISION" }),
+    );
+    const run = await waitForRun(await startRun(g.id, "draft the memo"));
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    const hops = succeededEvents(run);
+    assert(
+      hops.map((h) => h.nodeId).join() === [worker.id, reviewer.id, worker.id, reviewer.id].join(),
+      `expected exactly one revision round (4 hops), got ${hops.length}`,
+    );
+    // Delivered content is the REVISED draft (hop 3's output), with the
+    // second verdict attached — the pre-loop shape, one round later.
+    assert(
+      typeof run.output === "string" &&
+        run.output.startsWith(`${hops[2].output}\n\n---\n⚠️ Quality Reviewer flagged issues with this answer:`) &&
+        run.output.endsWith("NEEDS_REVISION"),
+      `expected revised content + flagged issues, got: ${JSON.stringify(run.output)}`,
+    );
+  });
+
+  await test("reviewer gate: a user-drawn Reviewer → Writer edge with an always-rejecting reviewer still terminates", async () => {
+    // The cycle guard's exception is exactly one revisit pair; a graph
+    // that ALSO loops the reviewer back to the author must not spin.
+    const { g, worker, reviewer } = await reviewGateGraph(
+      "Mock: review gate plus loop edge",
+      mockNode({ name: "Quality Reviewer", role: "reviewer", systemPrompt: "ROUTE_TO NEEDS_REVISION" }),
+    );
+    await createEdge(g.id, reviewer.id, worker.id, "explicit");
+    const run = await waitForRun(await startRun(g.id, "draft the memo"));
+    assert(run.status === "completed", `run failed: ${JSON.stringify(run)}`);
+    assert(succeededEvents(run).length === 4, `expected 4 hops, got ${succeededEvents(run).length}`);
   });
 
   await test("reviewer gate: a prose verdict with no sentinel is still read correctly", async () => {
@@ -655,9 +714,14 @@ async function main() {
     });
     const needsRun = await waitForRun(await startRun(needs.g.id, "draft the memo"));
     assert(needsRun.status === "completed", `run failed: ${JSON.stringify(needsRun)}`);
+    // A prose rejection triggers the revision round exactly like the
+    // sentinel does (the template rejects the revision too, so: one round,
+    // then delivered with the findings).
+    const needsHops = succeededEvents(needsRun);
+    assert(needsHops.length === 4, `prose NEEDS REVISION should trigger one revision round, got ${needsHops.length} hops`);
     assert(
       typeof needsRun.output === "string" &&
-        needsRun.output.startsWith("MOCK: draft the memo\n\n---\n⚠️ Quality Reviewer flagged issues") &&
+        needsRun.output.startsWith(`${needsHops[2].output}\n\n---\n⚠️ Quality Reviewer flagged issues`) &&
         needsRun.output.includes("All dates are in the past."),
       `prose NEEDS REVISION misread: ${JSON.stringify(needsRun.output)}`,
     );

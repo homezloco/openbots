@@ -2104,11 +2104,52 @@ startup. The migration now dedupes first, keeping the most informative
 row per pair. Drizzle applies migrations by journal timestamp, not
 file hash, so this is a no-op for deployments that already applied it.
 
-**Deliberately left open:** `NEEDS_REVISION` does not loop back to the
-specialist for a revision round. The cycle guard (`alreadyVisited`)
-cuts any revisit today; a bounded one-round exception is the natural
-follow-up, and the gate's output shape (content + flagged issues)
-already gives that round its input.
+**Verified on the Railway demo the same hour** (Groq `gpt-oss-120b`
+as the reviewer): it took the cooperating path — led with
+`NEEDS_REVISION`, two specific bullets, no re-emitted content — and the
+findings were real (a dangling "R5" risk reference). Which is exactly
+the case for the revision round below: the fix was two lines the author
+could have applied before delivery.
+
+### …and the one bounded revision round (2026-09-15, same day)
+
+The gate's first `NEEDS_REVISION` now follows no edge: `dispatchHop`
+sends the reviewed node a self-contained revision request
+(`buildRevisionRequest` — findings, its previous draft, its original
+task; every hop is a fresh `generateText`, so all three have to travel)
+and publishes `revision_requested`; the author's own explicit edge
+brings the revised draft back to the same reviewer, whose second
+review is final either way (approved → note; rejected again → content
++ findings, the pre-loop shape one round later). The reviewer is told
+its round (`reviewRound` 1 vs 2) so first findings are written to be
+fixable and the second verdict knows it's final.
+
+**No stored state.** The bound is read off `run_events`, the way the
+cycle guard already works and has to keep working alongside this:
+`reviewGateFor` counts the reviewer's prior succeeded hops in the run
+(0 → may request), and the guard's single exception
+`isRevisedDraftReturning` allows a revisit only when the two preceding
+succeeded hops are [this node, that reviewer], the recorded verdict
+parses as NEEDS_REVISION, and it was the reviewer's first review. Both
+decisions use the same `parseReviewVerdict`, so they can't disagree.
+Every other revisit still ends the run — including the reviewer's own
+second verdict when a user-drawn Reviewer → Writer edge exists, which
+is its own mock case because it's the way this could have spun.
+
+The mock adapter needed one new deterministic behavior to test the
+approve-on-revision path: `IF_INPUT_HAS <word> SAY <token>` (the
+revised draft is a mock echo of the revision request, so "revised" is
+the only thing that differs between the reviewer's two calls). Mock
+suite: 49/49 — the round itself with a downstream Publisher (revision
+happens *before* the handoff), the two-rejections bound, the loop-edge
+termination, and the prose-verdict path now triggering the round too.
+
+**Deliberately not added:** a second round. Each round re-sends the
+growing transcript to a provider that on the demo is TPM-limited, and
+a reviewer rejecting twice is usually objecting to something the
+author can't supply (real project names, real dates). The canvas
+doesn't render `revision_requested` yet — the author's second
+`hop_dispatched` pulse is what a viewer sees today.
 
 ## License
 

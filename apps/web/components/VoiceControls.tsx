@@ -19,6 +19,34 @@ function pickAudioMime(): string | undefined {
   return undefined;
 }
 
+/**
+ * Peak amplitude of a recorded clip, or null if the browser can't decode
+ * that container. Guards against the classic failure where getUserMedia
+ * bound to the wrong source (a monitor line, a dead Bluetooth profile) —
+ * the recording "works" but contains silence, and Whisper helpfully
+ * hallucinates "Thank you" onto it. Cheaper to catch here than to ship
+ * silence to STT and show the user nonsense.
+ */
+async function peakAmplitude(blob: Blob): Promise<number | null> {
+  try {
+    const ctx = new AudioContext();
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+    let peak = 0;
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const data = buf.getChannelData(c);
+      const step = Math.max(1, Math.floor(data.length / 20000));
+      for (let i = 0; i < data.length; i += step) {
+        const a = Math.abs(data[i]);
+        if (a > peak) peak = a;
+      }
+    }
+    void ctx.close();
+    return peak;
+  } catch {
+    return null;
+  }
+}
+
 export function MicButton({
   onTranscript,
   onError,
@@ -49,7 +77,9 @@ export function MicButton({
 
   const start = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
       streamRef.current = stream;
       const mimeType = pickAudioMime();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
@@ -65,6 +95,13 @@ export function MicButton({
         if (blob.size === 0) return;
         setBusy(true);
         try {
+          const peak = await peakAmplitude(blob);
+          if (peak !== null && peak < 0.005) {
+            onError?.(
+              "The recording was silent — the browser is probably listening to the wrong input. Check the mic source in your system settings / browser site permissions.",
+            );
+            return;
+          }
           const text = await transcribeAudio(blob);
           if (text.trim()) onTranscript(text.trim());
         } catch (err) {
@@ -73,7 +110,7 @@ export function MicButton({
           setBusy(false);
         }
       };
-      recorder.start();
+      recorder.start(250);
       setRecording(true);
     } catch (err) {
       stopStream();

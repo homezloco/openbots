@@ -217,42 +217,49 @@ Multi-agent orchestration that runs entirely on Ollama — no cloud key, steerab
 > into a SaaS" protection.
 
 **"Is there a hosted version / demo?"**
-> Self-hosted only today. The README GIF shows the flagship feature in
-> ~12s and `pnpm dev` + compose gets you a running stack in a few
-> minutes; a hosted demo instance is the gap being worked. (See §5.)
+> Self-hosted is the real product — `pnpm dev` + compose gets you a
+> stack in minutes. There's also a live demo instance on Railway (see
+> §5): sign up, bring any provider key (or use the free-tier endpoint
+> it's configured with), and try the live reroute yourself.
 
 **"Token cost of running agents?"**
 > Every hop is usage-tracked with real per-provider pricing including
 > prompt-cache token breakdowns, so you can see what a run actually
 > cost. For zero marginal cost, run the whole graph on Ollama.
 
-## 5. Hosted demo — spec for later (not a launch blocker)
+## 5. Hosted demo — LIVE on Railway
 
-Launch carries on the committed GIFs + the in-app "Try the live-reroute
-demo" button. If a real "try it now" link becomes worth it:
+Deployed 2026-09-15. Project `openbots`, env `production`, IaC authoring
+file at `.railway/railway.ts` (edit → `railway config plan` →
+`railway config apply`). Services:
 
-- **Shape:** one Railway service running api+worker in the same
-  container (they must share a filesystem — `/push`, commit diffs, and
-  PR-status exec `git` in the API process against worktrees the worker
-  creates; Railway volumes are per-service), plus Railway Postgres and
-  Redis plugins.
-- **Domains:** `app.botmaestro.ai` + `api.botmaestro.ai`, NOT default
-  `*.up.railway.app` — `up.railway.app` is on the Public Suffix List, so
-  those two are different "sites" and the `SameSite=Lax` session cookie
-  won't be sent on cross-site fetches. Subdomains of one domain are
-  same-site; works with zero code changes. Set `COOKIE_SECURE=true`,
-  `WEB_ORIGIN=https://app.botmaestro.ai`.
-- **Build arg:** `NEXT_PUBLIC_API_URL` is inlined at Next.js build time
-  — the web Dockerfile needs an `ARG`/`ENV` pair so Railway can inject
-  `https://api.botmaestro.ai` during the image build.
-- **Cost guard:** seed one demo account, set `DISABLE_SIGNUP=true`, and
-  pin every demo-graph node to a free/cheap model (local Ollama on the
-  VPS or an OpenRouter free-tier model) — never the operator's Anthropic
-  key. Open signup + env provider keys = strangers billing runs to you.
-- **Omit on the demo:** file tools entirely (no repos to clone, no
-  volume needed), `pc_telemetry`, local Piston sandbox.
-- **Cheaper alternative that converts nearly as well:** a 60-second
-  narrated screen capture. One evening, no deployment.
+- `app` — api+worker in ONE container via `apps/api/scripts/serve-both.mjs`
+  (they share the `app-data` volume for agent worktrees; Railway volumes
+  are per-service). Seeds `/data/demo-repo` + a bare `-remote.git` on
+  first boot. Domain: `app-production-7fab.up.railway.app`.
+- `web` — `apps/web/Dockerfile`; `NEXT_PUBLIC_API_URL` is a service var
+  Railway passes as a Docker build arg (inlined into the Next bundle).
+  Domain: `web-production-da812e.up.railway.app`.
+- `Postgres`, `Redis` — plugins, referenced as `Postgres.env.DATABASE_URL`
+  / `Redis.env.REDIS_URL` in the IaC file.
+
+Cost model: **open signup, BYOK** — the only provider env vars are
+`OPENAI_COMPATIBLE_BASE_URL`/`OPENAI_COMPATIBLE_API_KEY` pointed at a
+free-tier endpoint (Gemini or Groq), set via `railway variable set
+--service app` (preserved in IaC via `preserve()`, never committed).
+That keeps generateGraph/quick-add alive for visitors while making paid
+spend structurally impossible. Everything gated by ALLOWED_* envs stays
+unset = ungrantable, except `/data/demo-repo` file access+write.
+
+Cross-site cookie: `*.up.railway.app` is on the Public Suffix List, so
+`COOKIE_SAMESITE=none` (forces `Secure`). When a real domain lands:
+point `app.`/`api.` subdomains at the services, set `COOKIE_SAMESITE=lax`,
+update `WEB_ORIGIN` + `NEXT_PUBLIC_API_URL`, redeploy web.
+
+Deploys: `railway up --service <app|web>` ships the local tree; pushes to
+`main` auto-deploy via the GitHub-linked source. Verified live:
+signup+login (SameSite=None credentialed CORS), graph/node/edge CRUD,
+a real two-hop `mode:"live"` run through the worker.
 
 ## 6. Post-launch routine
 

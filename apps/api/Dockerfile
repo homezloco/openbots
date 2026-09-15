@@ -15,7 +15,11 @@ COPY packages/graph-schema/package.json packages/graph-schema/package.json
 COPY packages/providers/package.json packages/providers/package.json
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
-RUN --mount=type=cache,target=/pnpm-store \
+# Cache-mount ids carry an s/<service-id>- prefix because Railway's Metal
+# builder rejects any id not prefixed with the service's own cache key
+# (env/ARG interpolation is not allowed there). Harmless locally — the id
+# is just a BuildKit cache key outside Railway.
+RUN --mount=type=cache,id=s/2557dda1-bdcc-4d82-9bfe-d6ad119852ff-pnpm-store,target=/pnpm-store \
     pnpm install --frozen-lockfile --filter "@openbots/api..."
 
 FROM deps AS build
@@ -32,7 +36,7 @@ ENV NODE_ENV=production
 # run_remote_command (orchestrator/remoteCommandTool.ts) invokes directly
 # — --no-install-recommends means apt would otherwise skip it entirely
 # even though git "recommends" it, silently leaving both SSH paths broken.
-RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt/lists \
+RUN --mount=type=cache,id=s/2557dda1-bdcc-4d82-9bfe-d6ad119852ff-apt-cache,target=/var/cache/apt --mount=type=cache,id=s/2557dda1-bdcc-4d82-9bfe-d6ad119852ff-apt-lists,target=/var/lib/apt/lists \
     apt-get update && apt-get install -y --no-install-recommends git openssh-client && rm -rf /var/lib/apt/lists/*
 COPY --from=build /repo /repo
 WORKDIR /repo/apps/api

@@ -23,7 +23,9 @@ COPY packages/graph-schema/package.json packages/graph-schema/package.json
 COPY packages/providers/package.json packages/providers/package.json
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
-RUN --mount=type=cache,target=/pnpm-store \
+# Cache-mount id carries an s/<service-id>- prefix for Railway's Metal
+# builder (see the same note in apps/api/Dockerfile). Harmless locally.
+RUN --mount=type=cache,id=s/c21d94e9-1547-4643-84b7-6057a3d5ca83-pnpm-store,target=/pnpm-store \
     pnpm install --frozen-lockfile --filter "@openbots/web..."
 
 FROM deps AS build

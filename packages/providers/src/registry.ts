@@ -395,6 +395,15 @@ const adapters: Record<ProviderId, ProviderAdapter> = {
         name: "openai-compatible",
         apiKey: creds.apiKey,
         baseURL: creds.baseURL,
+        // Opt-in because this adapter fronts arbitrary endpoints: with it
+        // unset, generateObject degrades to bare json_object mode (schema
+        // dropped — see the openrouter entry above for the failure that
+        // produced) which is the SAFER default for endpoints that reject
+        // response_format: json_schema outright. Set
+        // OPENAI_COMPATIBLE_STRUCTURED_OUTPUTS=true for endpoints that
+        // support it (Groq does) or structured generation always returns
+        // unparseable free-form JSON.
+        supportsStructuredOutputs: process.env.OPENAI_COMPATIBLE_STRUCTURED_OUTPUTS === "true",
       }).chatModel(modelId);
     },
   },

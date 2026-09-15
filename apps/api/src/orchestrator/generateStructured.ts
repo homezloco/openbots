@@ -56,9 +56,11 @@ export async function generateStructuredWithFallback<S extends z.ZodTypeAny>(
         prompt,
         // Same preflight-quota issue as the hop path in engine.ts —
         // Groq's free tier rejects requests whose expected output exceeds
-        // its per-minute cap. Unset = provider default, unchanged.
-        ...(process.env.MAX_OUTPUT_TOKENS
-          ? { maxOutputTokens: Number(process.env.MAX_OUTPUT_TOKENS) }
+        // its per-minute cap. Scoped per-candidate to openai-compatible
+        // for the same reason: a global cap would silently truncate
+        // outputs on providers that never needed it. Unset = default.
+        ...(candidate.provider === "openai-compatible" && process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS
+          ? { maxOutputTokens: Number(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS) }
           : {}),
       });
       return { object: result.object, provider: candidate.provider, model: candidate.model };

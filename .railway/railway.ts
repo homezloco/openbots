@@ -58,7 +58,9 @@ export default defineRailway(() => {
       OPENAI_COMPATIBLE_STRUCTURED_OUTPUTS: "true",
       // Groq free tier enforces ~1000 output-tokens/minute and rejects
       // requests whose expected output exceeds it — cap under the limit.
-      MAX_OUTPUT_TOKENS: "950",
+      // Scoped to openai-compatible only; BYOK visitors on Anthropic/
+      // OpenAI keys are never capped by this.
+      OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS: "950",
       // Secrets — real values set via `railway variable set`, never in source.
       SESSION_SECRET: preserve(),
       CREDENTIALS_ENCRYPTION_KEY: preserve(),

@@ -1567,13 +1567,16 @@ async function callAgent(
           // retry attempt so a retried call gets only the time actually
           // remaining, never a fresh full budget.
           abortSignal: AbortSignal.timeout(Math.max(1_000, hopDeadlineEpochMs - ABORT_MARGIN_MS - Date.now())),
-          // Some providers (Groq's free tier) enforce a per-minute OUTPUT
-          // token ceiling and preflight-reject any request whose expected
-          // output exceeds it — with no maxOutputTokens set, the SDK's
-          // default request can be rejected before generating anything.
+          // Some openai-compatible endpoints (Groq's free tier) enforce a
+          // per-minute OUTPUT token ceiling and preflight-reject any
+          // request whose expected output exceeds it — with no
+          // maxOutputTokens set, the SDK's default request can be rejected
+          // before generating anything. Scoped to openai-compatible
+          // deliberately: on a multi-provider install a global cap would
+          // silently truncate Anthropic/OpenAI outputs for no benefit.
           // Unset = provider default, exactly today's behavior.
-          ...(process.env.MAX_OUTPUT_TOKENS
-            ? { maxOutputTokens: Number(process.env.MAX_OUTPUT_TOKENS) }
+          ...(target.provider === "openai-compatible" && process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS
+            ? { maxOutputTokens: Number(process.env.OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS) }
             : {}),
           // 20, not 8: a write-capable investigative specialist doing real
           // work (read CLAUDE.md, read a schema file, read the actual

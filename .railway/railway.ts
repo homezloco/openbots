@@ -47,10 +47,13 @@ export default defineRailway(() => {
       ALLOWED_FILE_WRITE_ROOTS: "/data/demo-repo",
       DEMO_REPO_DIR: "/data/demo-repo",
       WORKTREE_RETENTION_HOURS: "72",
+      // Groq free tier — the only env-configured provider, so generateGraph/
+      // quick-add work for every visitor while paid spend is impossible.
+      OPENAI_COMPATIBLE_BASE_URL: "https://api.groq.com/openai/v1",
+      OPENAI_COMPATIBLE_MODEL: "llama-3.3-70b-versatile",
       // Secrets — real values set via `railway variable set`, never in source.
       SESSION_SECRET: preserve(),
       CREDENTIALS_ENCRYPTION_KEY: preserve(),
-      OPENAI_COMPATIBLE_BASE_URL: preserve(),
       OPENAI_COMPATIBLE_API_KEY: preserve(),
     },
   });

@@ -62,6 +62,12 @@ const DEFAULT_MODELS: Record<ProviderId, string> = {
 };
 
 export function defaultModelFor(providerId: ProviderId): string {
+  // openai-compatible fronts arbitrary endpoints whose model ids differ by
+  // host (Ollama's "llama3.2" vs Groq's "llama-3.3-70b-versatile" vs a
+  // provider's own naming) — the baked-in default only matches Ollama.
+  if (providerId === "openai-compatible" && process.env.OPENAI_COMPATIBLE_MODEL) {
+    return process.env.OPENAI_COMPATIBLE_MODEL;
+  }
   return DEFAULT_MODELS[providerId];
 }
 
@@ -96,7 +102,7 @@ const ENV_PROVIDER_ORDER: ProviderId[] = ["anthropic", "openai", "xai", "openrou
 
 export function pickEnvProvider(): { provider: ProviderId; model: string } | null {
   for (const provider of ENV_PROVIDER_ORDER) {
-    if (envConfigured(provider)) return { provider, model: DEFAULT_MODELS[provider] };
+    if (envConfigured(provider)) return { provider, model: defaultModelFor(provider) };
   }
   return null;
 }
@@ -110,7 +116,7 @@ export function pickEnvProvider(): { provider: ProviderId; model: string } | nul
  * than giving up after a single hard pick.
  */
 export function allEnvConfiguredProviders(): { provider: ProviderId; model: string }[] {
-  return ENV_PROVIDER_ORDER.filter(envConfigured).map((provider) => ({ provider, model: DEFAULT_MODELS[provider] }));
+  return ENV_PROVIDER_ORDER.filter(envConfigured).map((provider) => ({ provider, model: defaultModelFor(provider) }));
 }
 
 /** Exported for the standalone chat playground, which has no graph/node to scope a stored credential to. */

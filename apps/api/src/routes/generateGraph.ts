@@ -116,6 +116,8 @@ export async function generateGraphRoutes(app: FastifyInstance) {
             "and 'explicit' edges for a fixed, always-the-same-next-step pipeline. " +
             "Only include tool names that are clearly implied by the agent's job — most agents need no tools at all.",
           body.description,
+          [],
+          req.userId ?? null,
         );
         req.log.info(
           {

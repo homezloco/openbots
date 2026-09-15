@@ -1541,7 +1541,7 @@ async function callAgent(
     const touchedFiles = new Set<string>();
     let mcp: McpResolution = { tools: {}, granted: [], skipped: [], closeAll: async () => {} };
     try {
-      const credentials = await getCredentials(node.graphId, node.id, target.provider);
+      const credentials = await getCredentials(node.graphId, node.id, target.provider, ownerId);
       const model = getModel(target.provider, target.model, credentials);
       const baseTools =
         node.tools.length > 0

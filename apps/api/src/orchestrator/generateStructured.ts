@@ -2,7 +2,12 @@ import { generateObject } from "ai";
 import { z } from "zod";
 import type { FallbackTarget, ProviderId } from "@openbots/graph-schema";
 import { getModel } from "@openbots/providers";
-import { allEnvConfiguredProviders, getCredentialsFromEnv, pickEnvProvider } from "./credentials.js";
+import {
+  allEnvConfiguredProviders,
+  allUserConfiguredProviders,
+  getUserOrEnvCredentials,
+  pickEnvProvider,
+} from "./credentials.js";
 
 /**
  * Structured LLM generation (the quick-add / promptable-workflow-generation
@@ -25,23 +30,28 @@ export async function generateStructuredWithFallback<S extends z.ZodTypeAny>(
   system: string,
   prompt: string,
   extraFallbackChain: FallbackTarget[] = [],
+  // The caller's account — when set, their stored BYOK keys are tried
+  // FIRST (a hosted-demo visitor's own key should power their generation,
+  // not the shared env key), with env providers still tried after.
+  userId: string | null = null,
 ): Promise<{ object: z.infer<S>; provider: ProviderId; model: string }> {
-  const primary = pickEnvProvider();
+  const userProviders = userId ? await allUserConfiguredProviders(userId) : [];
+  const primary = userProviders[0] ?? pickEnvProvider();
   if (!primary) {
     throw new Error(
-      "No model API key configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, or OPENAI_COMPATIBLE_BASE_URL in .env, then restart the API.",
+      "No model API key configured. Add one under Settings → Model API keys, or set ANTHROPIC_API_KEY, OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, or OPENAI_COMPATIBLE_BASE_URL in .env.",
     );
   }
 
-  const candidates: { provider: ProviderId; model: string }[] = [primary, ...extraFallbackChain];
-  for (const p of allEnvConfiguredProviders()) {
+  const candidates: { provider: ProviderId; model: string }[] = [...userProviders];
+  for (const p of [primary, ...extraFallbackChain, ...allEnvConfiguredProviders()]) {
     if (!candidates.some((c) => c.provider === p.provider && c.model === p.model)) candidates.push(p);
   }
 
   let lastError: unknown;
   for (const candidate of candidates) {
     try {
-      const credentials = getCredentialsFromEnv(candidate.provider);
+      const credentials = await getUserOrEnvCredentials(userId, candidate.provider);
       const model = getModel(candidate.provider, candidate.model, credentials);
       // OpenAI-compatible json_object mode (which generateObject uses for
       // providers like Groq) hard-rejects the call unless the word "json"

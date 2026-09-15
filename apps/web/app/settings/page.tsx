@@ -12,11 +12,13 @@ import {
 import { useAuth } from "../../components/AuthProvider";
 
 /**
- * Account-scoped credentials the /push chat command uses (apps/api/src/
- * routes/userCredentials.ts): a GitHub token for an https:// origin, or an
- * SSH private key for a git@/ssh:// origin (github.com only — see
- * gitWorktree.ts's pinned host key). Separate from the per-graph AI
- * provider keys managed inside each graph's own settings.
+ * Account-scoped credentials (apps/api/src/routes/userCredentials.ts):
+ * model API keys (BYOK — one key per provider, used by every graph you
+ * own unless a graph/node-scoped key overrides it), plus the tool
+ * integrations — a GitHub token or SSH private key for /push and /pr
+ * (github.com only — see gitWorktree.ts's pinned host key), metrics
+ * sources, and sandbox keys. The per-graph AI provider keys managed in
+ * each graph's own settings take precedence over the account keys here.
  */
 export default function SettingsPage() {
   const { user, loading: authLoading } = useAuth();
@@ -57,6 +59,17 @@ export default function SettingsPage() {
     <div style={{ padding: 24, maxWidth: 640 }}>
       <h1>Settings</h1>
       {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
+
+      <h2 style={{ marginTop: 16, marginBottom: 4 }}>Model API keys</h2>
+      <p style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 0 }}>
+        Bring your own provider keys — one per provider. Every node in every graph you own uses the matching account
+        key for its configured provider, so different agents can run on different models without re-entering anything.
+        A key stored on a graph&apos;s own settings still overrides these. Keys are encrypted at rest and never shown
+        again after saving.
+      </p>
+      <ModelKeysSection credentials={credentials} loading={loading} onError={setError} onSaved={refresh} />
+
+      <h2 style={{ marginTop: 32, marginBottom: 4 }}>Tool integrations</h2>
 
       <CredentialSection
         title="GitHub token"
@@ -247,6 +260,122 @@ function CredentialSection({
 
 const METRICS_PROVIDER_PREFIX = "metrics_";
 const METRICS_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+// The providers a model key can belong to — matches ProviderId minus the
+// credential-free mock/transform adapters. Stored as the row's `provider`
+// value, same string getCredentials() looks up at run time.
+const MODEL_PROVIDERS = ["anthropic", "openai", "xai", "openrouter", "openai-compatible"] as const;
+const MODEL_PROVIDER_SET = new Set<string>(MODEL_PROVIDERS);
+
+/**
+ * Account-level BYOK: user_credentials rows whose provider is a model
+ * provider. One key per provider (the unique (userId, provider) upsert
+ * replaces on re-save); a run resolves node key → graph key → the
+ * matching account key here → env, so this is the fallback every graph
+ * the user owns shares. See credentials.ts::getCredentials.
+ */
+function ModelKeysSection({
+  credentials,
+  loading,
+  onError,
+  onSaved,
+}: {
+  credentials: UserCredentialSummary[];
+  loading: boolean;
+  onError: (message: string | null) => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [provider, setProvider] = useState<string>(MODEL_PROVIDERS[0]);
+  const [label, setLabel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const keys = credentials.filter((c) => MODEL_PROVIDER_SET.has(c.provider));
+  const unusedProviders = MODEL_PROVIDERS.filter((p) => !keys.some((k) => k.provider === p));
+
+  async function save() {
+    if (!apiKey.trim()) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await createUserCredential({ provider, apiKey: apiKey.trim(), label: label.trim() || undefined });
+      await onSaved();
+      setApiKey("");
+      setLabel("");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    onError(null);
+    try {
+      await deleteUserCredential(id);
+      await onSaved();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to remove");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 16, marginTop: 12 }}>
+      {loading ? (
+        <p>Loading…</p>
+      ) : keys.length === 0 ? (
+        <p style={{ color: "var(--text-muted)", fontSize: 13, marginTop: 0 }}>
+          No model keys yet — runs fall back to the server&apos;s configured provider.
+        </p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+          {keys.map((k) => (
+            <div key={k.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <div>
+                <strong>{k.provider}</strong>
+                {k.label && <span style={{ color: "var(--text-muted)", fontSize: 13 }}> — {k.label}</span>}
+                <p style={{ margin: "2px 0 0", color: "var(--text-muted)", fontSize: 13 }}>
+                  Saved {new Date(k.createdAt).toLocaleDateString()}
+                </p>
+              </div>
+              <button onClick={() => remove(k.id)} disabled={busy}>
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Provider</span>
+          <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+            {MODEL_PROVIDERS.map((p) => (
+              <option key={p} value={p}>
+                {p}
+                {unusedProviders.includes(p) ? "" : " (replace)"}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Label (optional)</span>
+          <input placeholder="e.g. work key" value={label} onChange={(e) => setLabel(e.target.value)} />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>API key</span>
+          <input type="password" placeholder="sk-…" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+        </label>
+        <button onClick={save} disabled={busy || !apiKey.trim()}>
+          Save
+        </button>
+      </div>
+    </section>
+  );
+}
 
 /**
  * Sources are user-defined, not a fixed list — each one is a

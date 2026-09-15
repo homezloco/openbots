@@ -2,19 +2,26 @@ import { and, eq, isNull, or } from "drizzle-orm";
 import type { ProviderCredentials } from "@openbots/providers";
 import type { ProviderId } from "@openbots/graph-schema";
 import { db } from "../db/client.js";
-import { providerCredentials } from "../db/schema.js";
+import { providerCredentials, userCredentials } from "../db/schema.js";
 import { decryptCredential } from "../auth/crypto.js";
 
 /**
  * Resolution order: a node-specific stored credential, then a graph-wide
- * stored credential for the provider, then an environment variable. This
- * lets most self-hosted setups use env vars (Phase 1 default) while still
- * supporting per-agent/per-graph keys (Phase 2) without changing callers.
+ * stored credential for the provider, then the graph OWNER'S account-level
+ * key (user_credentials — "bring your own key" once for every graph they
+ * own), then an environment variable. This lets most self-hosted setups
+ * use env vars (Phase 1 default) while still supporting per-agent/
+ * per-graph/per-account keys (Phase 2) without changing callers.
+ *
+ * The account key is resolved by the graph's ownerId, never by the
+ * caller's session — runs are owner-scoped anyway, so this can only ever
+ * spend the key of whoever owns the graph being run.
  */
 export async function getCredentials(
   graphId: string,
   nodeId: string,
   providerId: ProviderId,
+  ownerId?: string | null,
 ): Promise<ProviderCredentials> {
   const stored = await db.query.providerCredentials.findFirst({
     where: and(
@@ -31,8 +38,17 @@ export async function getCredentials(
     orderBy: (t, { asc }) => [asc(t.nodeId)],
   });
 
-  if (stored) {
-    const apiKey = decryptCredential(stored.encryptedKey);
+  const encrypted = stored?.encryptedKey ??
+    (ownerId
+      ? (
+          await db.query.userCredentials.findFirst({
+            where: and(eq(userCredentials.userId, ownerId), eq(userCredentials.provider, providerId)),
+          })
+        )?.encryptedKey
+      : undefined);
+
+  if (encrypted) {
+    const apiKey = decryptCredential(encrypted);
     if (providerId === "openai-compatible" || providerId === "openrouter") {
       // `|| undefined`, not the raw value: an env var that is SET BUT
       // EMPTY (`OPENAI_COMPATIBLE_BASE_URL=` — exactly what a .env
@@ -117,6 +133,53 @@ export function pickEnvProvider(): { provider: ProviderId; model: string } | nul
  */
 export function allEnvConfiguredProviders(): { provider: ProviderId; model: string }[] {
   return ENV_PROVIDER_ORDER.filter(envConfigured).map((provider) => ({ provider, model: defaultModelFor(provider) }));
+}
+
+/**
+ * The model providers a user has stored an account-level key for
+ * (user_credentials rows whose provider is a model ProviderId), in the
+ * same preference order as ENV_PROVIDER_ORDER. Lets generateStructured
+ * try the caller's own keys before/instead of env keys — e.g. the hosted
+ * demo where a visitor's BYOK key should power their generation rather
+ * than the shared free-tier env key.
+ */
+export async function allUserConfiguredProviders(
+  userId: string,
+): Promise<{ provider: ProviderId; model: string }[]> {
+  const rows = await db
+    .select({ provider: userCredentials.provider })
+    .from(userCredentials)
+    .where(eq(userCredentials.userId, userId));
+  const stored = new Set(rows.map((r) => r.provider));
+  return ENV_PROVIDER_ORDER.filter((p) => stored.has(p)).map((provider) => ({
+    provider,
+    model: defaultModelFor(provider),
+  }));
+}
+
+/**
+ * Resolve a credential for one provider: the user's account-level key if
+ * they stored one, else the env var. Shared by getCredentials' run path
+ * (above) and generateStructured's candidate loop — keep the
+ * openai-compatible/openrouter baseURL nuance in one place.
+ */
+export async function getUserOrEnvCredentials(
+  userId: string | null,
+  providerId: ProviderId,
+): Promise<ProviderCredentials> {
+  if (userId) {
+    const row = await db.query.userCredentials.findFirst({
+      where: and(eq(userCredentials.userId, userId), eq(userCredentials.provider, providerId)),
+    });
+    if (row) {
+      const apiKey = decryptCredential(row.encryptedKey);
+      if (providerId === "openai-compatible" || providerId === "openrouter") {
+        return { apiKey, baseURL: process.env.OPENAI_COMPATIBLE_BASE_URL || undefined };
+      }
+      return { apiKey };
+    }
+  }
+  return getCredentialsFromEnv(providerId);
 }
 
 /** Exported for the standalone chat playground, which has no graph/node to scope a stored credential to. */

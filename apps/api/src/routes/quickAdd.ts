@@ -83,6 +83,7 @@ export async function quickAddRoutes(app: FastifyInstance) {
         "You turn a plain-English request for a new AI agent into a structured configuration for that agent. Be specific and concrete in the system prompt — describe exactly what this one agent should do, not generic filler like 'you are a helpful assistant'.",
         body.description,
         graphFallbackChain,
+        req.userId ?? null,
       );
       extracted = result.object;
       usedProvider = result.provider;

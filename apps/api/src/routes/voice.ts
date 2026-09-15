@@ -28,8 +28,11 @@ const VOICE_DEFAULTS: Record<
 > = {
   "openai-compatible": {
     sttModel: "whisper-large-v3-turbo",
-    ttsModel: "playai-tts",
-    ttsVoice: "Fritz-PlayAI",
+    // Groq migrated TTS platform-wide from playai-tts (decommissioned
+    // 2025-12-31) to Canopy Orpheus. English voices: autumn, diana,
+    // hannah, austin, daniel, troy.
+    ttsModel: "canopylabs/orpheus-v1-english",
+    ttsVoice: "troy",
     // Groq's speech endpoint only emits wav today.
     responseFormat: "wav",
     baseURL: "https://api.groq.com/openai/v1",

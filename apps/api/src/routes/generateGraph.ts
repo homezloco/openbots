@@ -180,8 +180,40 @@ export async function generateGraphRoutes(app: FastifyInstance) {
       .values({ name: plan.graphName, description: plan.graphDescription, ownerId: req.userId! })
       .returning();
 
+    // Lay nodes out in topological layers (BFS depth from the entry node)
+    // rather than one vertical stack — a generated team's shape should be
+    // readable the moment it lands on the canvas. Same-layer siblings
+    // spread horizontally; unreachable stragglers go in a final row.
+    const depthByName = new Map<string, number>([[normalize(plan.entryNodeName), 0]]);
+    const queue = [normalize(plan.entryNodeName)];
+    while (queue.length) {
+      const src = queue.shift()!;
+      const depth = depthByName.get(src)!;
+      for (const e of plan.edges) {
+        const tgt = normalize(e.targetName);
+        if (normalize(e.sourceName) === src && !depthByName.has(tgt)) {
+          depthByName.set(tgt, depth + 1);
+          queue.push(tgt);
+        }
+      }
+    }
+    const maxDepth = Math.max(0, ...depthByName.values());
+    const byLayer = new Map<number, string[]>();
+    for (const node of plan.nodes) {
+      const layer = depthByName.get(normalize(node.name)) ?? maxDepth + 1;
+      const arr = byLayer.get(layer) ?? [];
+      arr.push(normalize(node.name));
+      byLayer.set(layer, arr);
+    }
+    const positionByName = new Map<string, { x: number; y: number }>();
+    for (const [layer, names] of byLayer) {
+      for (const [i, name] of names.entries()) {
+        positionByName.set(name, { x: 250 + (i - (names.length - 1) / 2) * 260, y: 100 + layer * 180 });
+      }
+    }
+
     const nameToId = new Map<string, string>();
-    for (const [i, node] of plan.nodes.entries()) {
+    for (const node of plan.nodes) {
       const inserted = await insertAgentNode(graph.id, {
         name: node.name,
         role: node.role,
@@ -191,7 +223,7 @@ export async function generateGraphRoutes(app: FastifyInstance) {
         systemPrompt: node.systemPrompt,
         description: node.description,
         tools: node.tools,
-        position: { x: 250, y: 100 + i * 150 },
+        position: positionByName.get(normalize(node.name)) ?? { x: 250, y: 100 },
       }, req.userId);
       nameToId.set(normalize(node.name), inserted.id);
     }

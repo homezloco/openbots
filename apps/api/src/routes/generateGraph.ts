@@ -77,24 +77,52 @@ export async function generateGraphRoutes(app: FastifyInstance) {
 
     let plan: z.infer<typeof generatedGraphSchema>;
     let picked: { provider: ProviderId; model: string };
+
+    // A schema-valid plan can still be wrong: free-tier models sometimes
+    // collapse a "one node per named department" request into a single
+    // all-purpose agent, which passes zod but silently drops the team the
+    // user asked for. When the description names agents explicitly
+    // (quoted names — the way the UI's example prompts and the system
+    // prompt both teach it), count them and retry the generation until
+    // the plan actually contains that many nodes (capped at the schema
+    // max). Falls back to the best attempt rather than erroring — a
+    // partial graph on an editable canvas beats a failure toast.
+    const namedAgents = new Set<string>();
+    for (const m of body.description.matchAll(/["“]([^"“”\n]{2,60})["”]/g)) {
+      namedAgents.add(normalize(m[1]));
+    }
+    const expectedNodes = Math.min(namedAgents.size, 8);
+    const maxAttempts = expectedNodes > 1 ? 3 : 1;
+
     try {
-      const result = await generateStructuredWithFallback(
-        generatedGraphSchema,
-        "You turn a plain-English description of a team/workflow into a structured multi-agent graph plan. " +
-          "Design a real pipeline: a supervisor or router that coordinates, worker nodes that do the actual work, " +
-          "and a reviewer node where a quality gate genuinely makes sense — not one node per sentence. " +
-          "When the description names multiple distinct functions or departments, EVERY one gets its own " +
-          "worker node — never collapse them into a single all-purpose agent. A request naming six " +
-          "departments should produce roughly that many specialists plus the coordinator and reviewer. " +
-          "Every edge's sourceName/targetName and the top-level entryNodeName must exactly match a name you put in nodes[]. " +
-          "Wire every node into the graph with at least one edge — a node with no edges never runs. " +
-          "Prefer 'auto' edges when routing depends on the content of the request (e.g. a router choosing a specialist), " +
-          "and 'explicit' edges for a fixed, always-the-same-next-step pipeline. " +
-          "Only include tool names that are clearly implied by the agent's job — most agents need no tools at all.",
-        body.description,
-      );
-      plan = result.object;
-      picked = { provider: result.provider, model: result.model };
+      let best: { object: z.infer<typeof generatedGraphSchema>; provider: ProviderId; model: string } | null = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const result = await generateStructuredWithFallback(
+          generatedGraphSchema,
+          "You turn a plain-English description of a team/workflow into a structured multi-agent graph plan. " +
+            "Design a real pipeline: a supervisor or router that coordinates, worker nodes that do the actual work, " +
+            "and a reviewer node where a quality gate genuinely makes sense — not one node per sentence. " +
+            "When the description names multiple distinct functions or departments, EVERY one gets its own " +
+            "worker node — never collapse them into a single all-purpose agent. A request naming six " +
+            "departments should produce roughly that many specialists plus the coordinator and reviewer. " +
+            "Every edge's sourceName/targetName and the top-level entryNodeName must exactly match a name you put in nodes[]. " +
+            "Wire every node into the graph with at least one edge — a node with no edges never runs. " +
+            "Prefer 'auto' edges when routing depends on the content of the request (e.g. a router choosing a specialist), " +
+            "and 'explicit' edges for a fixed, always-the-same-next-step pipeline. " +
+            "Only include tool names that are clearly implied by the agent's job — most agents need no tools at all.",
+          body.description,
+        );
+        if (!best || result.object.nodes.length > best.object.nodes.length) best = result;
+        if (result.object.nodes.length >= expectedNodes) break;
+      }
+      plan = best!.object;
+      picked = { provider: best!.provider, model: best!.model };
+      if (expectedNodes > 1 && plan.nodes.length < expectedNodes) {
+        console.warn(
+          `[generateGraph] plan has ${plan.nodes.length} nodes but description named ${namedAgents.size} agents — ` +
+            `returning best of ${maxAttempts} attempts`,
+        );
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Graph generation failed";
       return reply.code(400).send({ error: message });

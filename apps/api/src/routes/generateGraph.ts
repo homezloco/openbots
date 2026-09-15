@@ -83,6 +83,9 @@ export async function generateGraphRoutes(app: FastifyInstance) {
         "You turn a plain-English description of a team/workflow into a structured multi-agent graph plan. " +
           "Design a real pipeline: a supervisor or router that coordinates, worker nodes that do the actual work, " +
           "and a reviewer node where a quality gate genuinely makes sense — not one node per sentence. " +
+          "When the description names multiple distinct functions or departments, EVERY one gets its own " +
+          "worker node — never collapse them into a single all-purpose agent. A request naming six " +
+          "departments should produce roughly that many specialists plus the coordinator and reviewer. " +
           "Every edge's sourceName/targetName and the top-level entryNodeName must exactly match a name you put in nodes[]. " +
           "Wire every node into the graph with at least one edge — a node with no edges never runs. " +
           "Prefer 'auto' edges when routing depends on the content of the request (e.g. a router choosing a specialist), " +

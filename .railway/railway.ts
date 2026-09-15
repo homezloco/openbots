@@ -45,6 +45,11 @@ export default defineRailway(() => {
       COOKIE_SAMESITE: "none",
       ALLOWED_FILE_ACCESS_ROOTS: "/data/demo-repo",
       ALLOWED_FILE_WRITE_ROOTS: "/data/demo-repo",
+      // The CanWeb dogfood (docs/dogfood-canweb.md): nodes reach
+      // canadian_web's MCP server (audit + lead tools) behind a ck_live_
+      // key stored per account as user_credentials "canweb_api_key".
+      // Prefix allowlist, same empty-deny shape as the file roots above.
+      ALLOWED_MCP_SERVERS: "https://www.canweb.net/mcp",
       DEMO_REPO_DIR: "/data/demo-repo",
       WORKTREE_RETENTION_HOURS: "72",
       // Groq free tier — the only env-configured provider, so generateGraph/
@@ -56,11 +61,12 @@ export default defineRailway(() => {
       // qwen/qwen3.8-27b explicitly per-node.
       OPENAI_COMPATIBLE_MODEL: "openai/gpt-oss-120b",
       OPENAI_COMPATIBLE_STRUCTURED_OUTPUTS: "true",
-      // Groq free tier enforces ~1000 output-tokens/minute and rejects
-      // requests whose expected output exceeds it — cap under the limit.
       // Scoped to openai-compatible only; BYOK visitors on Anthropic/
-      // OpenAI keys are never capped by this.
-      OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS: "950",
+      // OpenAI keys are never capped by this. Was 950 (Groq free tier's
+      // ~1000 output-tokens/minute); raised live to 6000 once the demo
+      // pipelines' status reports outgrew it — reconciled here 2026-09-15
+      // so `railway config apply` stops trying to revert it.
+      OPENAI_COMPATIBLE_MAX_OUTPUT_TOKENS: "6000",
       // Secrets — real values set via `railway variable set`, never in source.
       SESSION_SECRET: preserve(),
       CREDENTIALS_ENCRYPTION_KEY: preserve(),

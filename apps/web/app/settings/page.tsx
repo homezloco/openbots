@@ -108,6 +108,15 @@ export default function SettingsPage() {
         onSaved={refresh}
       />
 
+      <h2 style={{ marginTop: 32, marginBottom: 4 }}>MCP server keys</h2>
+      <p style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 0 }}>
+        API keys for MCP servers your agents call. Name each one however you like; an agent&apos;s MCP server config
+        references it by that name (&quot;Credential provider&quot; in the node editor), and the key is sent as{" "}
+        <code>Authorization: Bearer …</code> unless the server config sets a different header. Stored once per account,
+        reused across every graph you own.
+      </p>
+      <McpKeysSection credentials={credentials} loading={loading} onError={setError} onSaved={refresh} />
+
       <h2 style={{ marginTop: 32, marginBottom: 4 }}>Business metrics</h2>
       <p style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 0 }}>
         Lets an agent with the <code>business_metrics</code> tool read real conversion/revenue/traffic numbers instead of only
@@ -259,6 +268,118 @@ function CredentialSection({
 }
 
 const METRICS_PROVIDER_PREFIX = "metrics_";
+
+/**
+ * Every credential name the other sections own, so the MCP section can
+ * show "everything else" without a second registry. Any name outside
+ * these is a free-form key an MCP server config can reference.
+ */
+const RESERVED_CREDENTIAL_PREFIXES = ["github_ssh_key", "github", "sandbox_", "ssh_target_", METRICS_PROVIDER_PREFIX];
+function isMcpCredential(provider: string): boolean {
+  return !MODEL_PROVIDER_SET.has(provider) && !RESERVED_CREDENTIAL_PREFIXES.some((p) => provider === p || provider.startsWith(p));
+}
+const MCP_CREDENTIAL_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+function McpKeysSection({
+  credentials,
+  loading,
+  onError,
+  onSaved,
+}: {
+  credentials: UserCredentialSummary[];
+  loading: boolean;
+  onError: (message: string | null) => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const keys = credentials.filter((c) => isMcpCredential(c.provider));
+  const nameOk = MCP_CREDENTIAL_NAME.test(name.trim());
+  const nameTaken = credentials.some((c) => c.provider === name.trim());
+
+  async function save() {
+    if (!nameOk || nameTaken || !apiKey.trim()) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await createUserCredential({ provider: name.trim(), apiKey: apiKey.trim(), label: label.trim() || undefined });
+      await onSaved();
+      setName("");
+      setApiKey("");
+      setLabel("");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    onError(null);
+    try {
+      await deleteUserCredential(id);
+      await onSaved();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to remove");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 16, marginTop: 16 }}>
+      {loading ? (
+        <p>Loading…</p>
+      ) : (
+        <>
+          {keys.length > 0 && (
+            <ul style={{ listStyle: "none", padding: 0, margin: "0 0 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+              {keys.map((k) => (
+                <li key={k.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <div>
+                    <code>{k.provider}</code>
+                    {k.label && <span style={{ marginLeft: 8, color: "var(--text-muted)", fontSize: 13 }}>{k.label}</span>}
+                    <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 13 }}>
+                      Saved {new Date(k.createdAt).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <button onClick={() => remove(k.id)} disabled={busy}>
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Name (what the node&apos;s MCP config references)</span>
+              <input placeholder="e.g. canweb_api_key" value={name} onChange={(e) => setName(e.target.value)} />
+              {name.trim() && !nameOk && (
+                <span style={{ fontSize: 12, color: "var(--danger)" }}>Lowercase letters, digits, _ or -, up to 64 characters.</span>
+              )}
+              {nameTaken && <span style={{ fontSize: 12, color: "var(--danger)" }}>A credential with this name already exists.</span>}
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>API key</span>
+              <input type="password" placeholder="ck_live_…" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={{ fontSize: 13, color: "var(--text-muted)" }}>Label (optional)</span>
+              <input placeholder="e.g. canweb.net audit + lead tools" value={label} onChange={(e) => setLabel(e.target.value)} />
+            </label>
+            <button onClick={save} disabled={busy || !nameOk || nameTaken || !apiKey.trim()} style={{ alignSelf: "flex-start" }}>
+              Save
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
 const METRICS_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 // The providers a model key can belong to — matches ProviderId minus the

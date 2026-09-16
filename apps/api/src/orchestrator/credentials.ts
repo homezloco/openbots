@@ -84,6 +84,16 @@ export function defaultModelFor(providerId: ProviderId): string {
   if (providerId === "openai-compatible" && process.env.OPENAI_COMPATIBLE_MODEL) {
     return process.env.OPENAI_COMPATIBLE_MODEL;
   }
+  // anthropic/claude-sonnet-4 via OpenRouter silently ignores
+  // response_format: json_schema and free-forms prose, so structured
+  // generation (generateGraph/quickAdd) can never parse its output. The
+  // default stays put for quality; environments that need generation to
+  // work over OpenRouter (CI, or an operator whose Anthropic key is out of
+  // credits) set this to a model that enforces json_schema — verified:
+  // openai/gpt-4o-mini, google/gemini-2.5-flash-lite.
+  if (providerId === "openrouter" && process.env.OPENROUTER_MODEL) {
+    return process.env.OPENROUTER_MODEL;
+  }
   return DEFAULT_MODELS[providerId];
 }
 

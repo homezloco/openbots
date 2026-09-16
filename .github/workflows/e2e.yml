@@ -33,6 +33,10 @@ jobs:
           OPENAI_API_KEY=
           XAI_API_KEY=
           OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+          # claude-sonnet-4 over OpenRouter ignores response_format:
+          # json_schema (free-forms prose → every structured generation
+          # unparseable). gpt-4o-mini enforces it — verified live.
+          OPENROUTER_MODEL=openai/gpt-4o-mini
           OPENAI_COMPATIBLE_API_KEY=
           OPENAI_COMPATIBLE_BASE_URL=
           DATABASE_URL=postgres://openbots:openbots@postgres:5432/openbots
